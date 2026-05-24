@@ -1,5 +1,5 @@
 import type { ApiPath, GalleryEntry, GenerateJobStatus } from '$lib/api/types';
-import { DEFAULT_PROMPT_MODEL, initialPromptFormState, type PromptFormState } from '$lib/stores/preview';
+import { DEFAULT_PROMPT_MODEL, DEFAULT_QUANTITY, initialPromptFormState, type PromptFormState } from '$lib/stores/preview';
 
 const GENERATION_API_PATHS: ApiPath[] = ['/v1/images/generations', '/v1/responses', '/v1/chat/completions'];
 
@@ -22,7 +22,16 @@ export function normalizeJobResponseFormat(value: string | null | undefined): Pr
 }
 
 export function clampQuantity(value: number | string | null | undefined): number {
-  return Math.min(Math.max(Number(value) || initialPromptFormState.quantity, 1), 10);
+  return Math.min(Math.max(Number(value) || DEFAULT_QUANTITY, 1), 10);
+}
+
+export function sanitizeQuantityInput(value: number | string | null | undefined): string {
+  return String(value ?? '').replace(/\D+/g, '');
+}
+
+export function normalizeSubmissionQuantity(value: number | string | null | undefined): number {
+  if (value === '' || value === null || value === undefined) return DEFAULT_QUANTITY;
+  return clampQuantity(value);
 }
 
 export function jobToPromptForm(job: GenerateJobStatus, fallbackModel = DEFAULT_PROMPT_MODEL): PromptFormState {

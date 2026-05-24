@@ -21,9 +21,11 @@ export type PromptFormState = {
   quality: GenerateRequestBody['quality'];
   outputFormat: GenerateRequestBody['output_format'];
   outputCompression: string;
-  quantity: number;
+  quantity: number | string;
   responseFormat: string;
 };
+
+export const DEFAULT_QUANTITY = 1;
 
 const initialPreviewState: PreviewState = {
   loading: false,
@@ -44,16 +46,17 @@ export const initialPromptFormState: PromptFormState = {
   quality: 'auto',
   outputFormat: 'png',
   outputCompression: '',
-  quantity: 1,
+  quantity: DEFAULT_QUANTITY,
   responseFormat: 'url'
 };
 
 function buildRequestBody(form: PromptFormState): GenerateRequestBody {
+  const quantity = form.quantity === '' ? DEFAULT_QUANTITY : Math.min(Math.max(Number(form.quantity) || DEFAULT_QUANTITY, 1), 10);
   const body: GenerateRequestBody = {
     prompt: form.prompt.trim(),
     size: form.size,
     model: form.model.trim(),
-    n: Math.min(Math.max(Number(form.quantity) || 1, 1), 10),
+    n: quantity,
     quality: form.quality,
     output_format: form.outputFormat,
     output_compression: null,

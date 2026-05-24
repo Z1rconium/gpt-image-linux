@@ -40,7 +40,13 @@
   import { uiStore, type ToastOptions } from '$lib/stores/ui';
   import { versionStore } from '$lib/stores/version';
   import { copyText, galleryImageSize, imageUrl } from '$lib/utils/format';
-  import { galleryEntryToPromptForm, galleryEntryToPromptOnly, jobToPromptForm, normalizeApiPath } from '$lib/utils/promptForm';
+  import {
+    galleryEntryToPromptForm,
+    galleryEntryToPromptOnly,
+    jobToPromptForm,
+    normalizeApiPath,
+    normalizeSubmissionQuantity
+  } from '$lib/utils/promptForm';
 
   type JobsTab = 'running' | 'history';
 
@@ -339,11 +345,20 @@
     jobsStore.trackJob(jobId, async (job) => updatePreviewFromJob(job), previewStore.setError);
   }
 
+  function normalizeFormQuantityForSubmit() {
+    const quantity = normalizeSubmissionQuantity(form.quantity);
+    if (form.quantity === '' || Number(form.quantity) !== quantity) {
+      form = { ...form, quantity };
+    }
+  }
+
   function generateImage() {
+    normalizeFormQuantityForSubmit();
     void previewStore.generateImage(form, jobsStore.makeQueuedPreview, trackJob, jobsStore.loadJobs);
   }
 
   function editImage() {
+    normalizeFormQuantityForSubmit();
     void previewStore.editImage(form, $editSourceStore, jobsStore.makeQueuedPreview, trackJob, jobsStore.loadJobs);
   }
 

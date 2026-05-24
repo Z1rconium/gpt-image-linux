@@ -335,7 +335,7 @@ The panel supports these upstream paths. The API base URL may either omit or inc
 - Quality: `auto`, `low`, `medium`, or `high`
 - Format: `PNG`, `JPEG`, or `WebP`
 - Compression: disabled for `PNG`; `0-100` for `JPEG` and `WebP`
-- Quantity: integer from `1` to `10`
+- Quantity: integer from `1` to `10`; the field can be cleared while editing, and Generate/Edit will restore an empty value to `1` on submit
 - Response Format: `url` by default in the UI, with `none` and `b64_json` still available; `none` omits the `response_format` parameter
 
 ## Import and upload limits
@@ -832,7 +832,7 @@ curl http://localhost:9090/health
 - Quality：`auto`、`low`、`medium`、`high`
 - Format：`PNG`、`JPEG`、`WebP`
 - Compression：`PNG` 不可用；`JPEG` 和 `WebP` 可设置 `0-100`
-- Quantity：`1` 到 `10`
+- Quantity：`1` 到 `10`；编辑时可以先清空，提交 Generate/Edit 时如果为空会自动回填为 `1`
 - Response Format：界面默认 `url`，仍可选 `none` 和 `b64_json`；`none` 会省略 `response_format` 参数
 
 ## 导入与上传限制

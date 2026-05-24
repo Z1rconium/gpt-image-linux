@@ -533,6 +533,23 @@ test('generation, gallery edit source, batch favorite, and lightbox flows work w
   await expect(lightbox).toBeHidden();
 });
 
+test('empty quantity falls back to 1 on generate', async ({ page }) => {
+  await loadApp(page);
+
+  await page.getByRole('textbox', { name: 'Prompt', exact: true }).fill('empty quantity prompt');
+  await page.getByLabel('Quantity').fill('');
+
+  const generateRequest = page.waitForRequest((request) => new URL(request.url()).pathname === '/api/generate');
+  await page.getByRole('button', { name: 'Generate', exact: true }).click();
+  const request = await generateRequest;
+
+  expect(request.postDataJSON()).toMatchObject({
+    prompt: 'empty quantity prompt',
+    n: 1
+  });
+  await expect(page.getByLabel('Quantity')).toHaveValue('1');
+});
+
 test('prompt helper tags append once and optimizer replaces prompt with undo', async ({ page }) => {
   await loadApp(page);
 

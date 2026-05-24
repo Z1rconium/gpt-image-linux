@@ -2,6 +2,7 @@
   import PromptHelperPanel from '$lib/components/PromptHelperPanel.svelte';
   import { t } from '$lib/i18n';
   import type { PromptFormState } from '$lib/stores/preview';
+  import { sanitizeQuantityInput } from '$lib/utils/promptForm';
 
   export let form: PromptFormState;
   export let loading = false;
@@ -25,8 +26,8 @@
       : '0-100';
   $: optimizeDisabled = loading || optimizing || !optimizerEnabled || !form.prompt.trim();
 
-  function clampQuantity() {
-    form = { ...form, quantity: Math.min(Math.max(Number(form.quantity) || 1, 1), 10) };
+  function handleQuantityInput() {
+    form = { ...form, quantity: sanitizeQuantityInput(form.quantity) };
   }
 
   function clampCompression() {
@@ -120,7 +121,15 @@
 
     <label class="block">
       <span class="mb-1.5 block text-xs font-medium text-zinc-400">{$t.promptForm.quantity}</span>
-      <input bind:value={form.quantity} disabled={promptOnlyMode || loading} type="number" min="1" max="10" class="control-focus w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2.5 text-sm text-zinc-100 focus:border-emerald-500 disabled:cursor-not-allowed disabled:opacity-50" on:input={clampQuantity} />
+      <input
+        bind:value={form.quantity}
+        disabled={promptOnlyMode || loading}
+        type="text"
+        inputmode="numeric"
+        pattern="[0-9]*"
+        class="control-focus w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2.5 text-sm text-zinc-100 focus:border-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
+        on:input={handleQuantityInput}
+      />
     </label>
 
     <label class="block">
