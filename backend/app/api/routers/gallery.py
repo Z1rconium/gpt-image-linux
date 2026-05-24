@@ -41,6 +41,9 @@ from ...schemas.models import (
 router = APIRouter()
 logger = logging.getLogger(__name__)
 GALLERY_EXPORT_TERMINAL_STATUSES = {"success", "error"}
+MAX_ACTIVE_EXPORT_JOBS = 5
+EXPORT_JOB_TTL_SECONDS = 1800
+EXPORT_JOB_GC_INTERVAL_SECONDS = 300
 
 
 def normalize_gallery_date_filter(value: str | None, end_of_day: bool = False) -> str | None:
@@ -177,6 +180,48 @@ def _cleanup_gallery_export_job(job_id: str) -> None:
     path = job.get("path")
     if path:
         Path(path).unlink(missing_ok=True)
+
+
+async def gc_gallery_export_jobs() -> None:
+    """Periodically clean up completed/errored export jobs and orphan ZIP files."""
+    while True:
+        try:
+            await asyncio.sleep(EXPORT_JOB_GC_INTERVAL_SECONDS)
+            now_ts = time.time()
+            jobs = _gallery_export_jobs()
+            stale_ids = []
+            for job_id, job in jobs.items():
+                if job.get("status") not in GALLERY_EXPORT_TERMINAL_STATUSES:
+                    continue
+                updated_at = job.get("updated_at", "")
+                try:
+                    job_ts = datetime.fromisoformat(
+                        str(updated_at).replace("Z", "+00:00")
+                    ).timestamp()
+                except (ValueError, AttributeError):
+                    job_ts = 0
+                if now_ts - job_ts >= EXPORT_JOB_TTL_SECONDS:
+                    stale_ids.append(job_id)
+            for job_id in stale_ids:
+                _cleanup_gallery_export_job(job_id)
+            if stale_ids:
+                logger.info(
+                    "GC cleaned up %d stale gallery export job(s)", len(stale_ids)
+                )
+            # Remove orphan ZIP files with no matching in-memory job
+            exports_dir = Path(config.DATA_DIR) / "exports"
+            if exports_dir.exists():
+                known_ids = set(jobs.keys())
+                for zip_path in exports_dir.glob("*.zip"):
+                    if zip_path.stem not in known_ids:
+                        zip_path.unlink(missing_ok=True)
+                        logger.info(
+                            "GC removed orphan export file: %s", zip_path.name
+                        )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("Gallery export GC error", exc_info=True)
 
 
 def _create_gallery_export_job(filename_prefix: str, requested_count: int) -> dict:
@@ -420,6 +465,17 @@ async def download_gallery_batch(req: GalleryBatchRequest):
 
 @router.post("/api/gallery/export-jobs", response_model=GalleryExportJobStatus, status_code=202)
 async def create_gallery_export_job(req: GalleryExportRequest | None = Body(default=None)):
+    active_count = sum(
+        1
+        for job in _gallery_export_jobs().values()
+        if job.get("status") not in GALLERY_EXPORT_TERMINAL_STATUSES
+    )
+    if active_count >= MAX_ACTIVE_EXPORT_JOBS:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many active export jobs ({active_count}). "
+            "Please wait for existing exports to complete.",
+        )
     ids = req.ids if req else None
     if ids:
         entries = await asyncio.to_thread(storage.get_gallery_entries_by_ids, ids)

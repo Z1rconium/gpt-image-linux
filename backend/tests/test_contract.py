@@ -15,10 +15,12 @@ from fastapi.testclient import TestClient
 
 from backend.app import main as backend_main
 from backend.app.api import jobs
+from backend.app.api.routers import access as access_router
 from backend.app.api.routers import static as static_router
 from backend.app.api.jobs import EditImageSource
 from backend.app.core import settings as config
 from backend.app.core.observability import metrics, record_job_stage_timing
+from backend.app.integrations import session_pool
 from backend.app.integrations.upstream_client import call_image_edit_api as ORIGINAL_CALL_IMAGE_EDIT_API
 from backend.app.repositories import storage
 from backend.app.schemas.models import EditRequest
@@ -593,6 +595,61 @@ def test_access_lockout(tmp_path):
             resp = client.post("/api/access", json={"access_key": "wrong"})
         assert resp.status_code == 429
         assert "Too many failed attempts" in resp.json()["detail"]
+
+
+def test_access_failures_stays_bounded_under_unique_ips(tmp_path, monkeypatch):
+    _configure_runtime(tmp_path, access_key="secret", allow_unauthenticated=False)
+    monkeypatch.setattr(access_router, "_ACCESS_FAILURES_MAX_SIZE", 3)
+    current_ip = {"value": "10.0.0.1"}
+    monkeypatch.setattr(
+        access_router.auth,
+        "get_client_ip",
+        lambda request: current_ip["value"],
+    )
+
+    with TestClient(backend_main.app, raise_server_exceptions=False) as client:
+        for index in range(5):
+            current_ip["value"] = f"10.0.0.{index}"
+            resp = client.post("/api/access", json={"access_key": "wrong"})
+            assert resp.status_code == 401
+
+        failures = backend_main.app.state.access_failures
+        assert list(failures.keys()) == ["10.0.0.2", "10.0.0.3", "10.0.0.4"]
+        assert len(failures) == 3
+
+
+def test_session_pool_close_all_closes_retired_sessions(monkeypatch):
+    created_sessions = []
+
+    class FakeSession:
+        def __init__(self, timeout=None, connector=None):
+            self.timeout = timeout
+            self.connector = connector
+            self.closed = False
+            self.close_calls = 0
+            created_sessions.append(self)
+
+        async def close(self):
+            self.close_calls += 1
+            self.closed = True
+
+    monkeypatch.setattr(session_pool.aiohttp, "ClientSession", FakeSession)
+    monkeypatch.setattr(session_pool, "_build_socks5_connector", lambda proxy: proxy)
+
+    pool = session_pool.SessionPool()
+    first = pool.get(timeout_kind=session_pool.TIMEOUT_UPSTREAM, socks5_proxy="socks5://a")
+    second = pool.get(timeout_kind=session_pool.TIMEOUT_UPSTREAM, socks5_proxy="socks5://b")
+
+    assert first is created_sessions[0]
+    assert second is created_sessions[1]
+    assert not first.closed
+
+    asyncio.run(pool.close_all())
+
+    assert first.closed is True
+    assert second.closed is True
+    assert first.close_calls == 1
+    assert second.close_calls == 1
 
 
 def test_ip_allowlist_blocks_api_but_not_health(tmp_path):

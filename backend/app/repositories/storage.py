@@ -189,6 +189,7 @@ GALLERY_FTS_VERSION_KEY = "gallery_fts_version"
 GALLERY_FTS_VERSION = "trigram-v1"
 GALLERY_FTS_MIN_QUERY_LENGTH = 3
 GALLERY_TOTAL_BYTES_CACHE_SECONDS = 2.0
+_GALLERY_BYTES_CACHE_MAX_SIZE = 512
 
 _db_initialized = False
 _db_init_lock = threading.RLock()
@@ -1822,6 +1823,8 @@ def _get_gallery_total_bytes_on_conn(
     total_bytes = int(row["total_bytes"] or 0) if row else 0
 
     with _gallery_total_bytes_cache_lock:
+        if len(_gallery_total_bytes_cache) >= _GALLERY_BYTES_CACHE_MAX_SIZE:
+            _gallery_total_bytes_cache.clear()
         _gallery_total_bytes_cache[cache_key] = (now, total_bytes)
 
     return total_bytes

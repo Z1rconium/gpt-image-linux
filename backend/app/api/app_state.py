@@ -1,6 +1,7 @@
-from contextlib import asynccontextmanager
 import asyncio
 import logging
+from collections import OrderedDict
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -100,8 +101,10 @@ async def lifespan(app: FastAPI):
     app.state.gallery_export_jobs = {}
     app.state.gallery_export_tasks = {}
     app.state.gallery_export_subscribers = {}
+    from .routers.gallery import gc_gallery_export_jobs
+    app.state.gallery_export_gc_task = asyncio.create_task(gc_gallery_export_jobs())
     app.state.pending_edit_source_bytes = 0
-    app.state.access_failures: dict[str, tuple[int, float]] = {}
+    app.state.access_failures: OrderedDict[str, tuple[int, float]] = OrderedDict()
     jobs.reconcile_active_generate_jobs_from_storage()
     try:
         yield
@@ -109,13 +112,16 @@ async def lifespan(app: FastAPI):
         broadcast_task = app.state.generate_jobs_broadcast_task
         if broadcast_task and not broadcast_task.done():
             broadcast_task.cancel()
+        gc_task = getattr(app.state, "gallery_export_gc_task", None)
+        if gc_task and not gc_task.done():
+            gc_task.cancel()
         tasks = list(jobs.get_generate_job_tasks().values())
         gallery_export_tasks = list(getattr(app.state, "gallery_export_tasks", {}).values())
         for task in gallery_export_tasks:
             task.cancel()
         for task in tasks:
             task.cancel()
-        awaitables = [task for task in (broadcast_task, *tasks, *gallery_export_tasks) if task]
+        awaitables = [task for task in (broadcast_task, gc_task, *tasks, *gallery_export_tasks) if task]
         if awaitables:
             await asyncio.gather(*awaitables, return_exceptions=True)
         for job in getattr(app.state, "gallery_export_jobs", {}).values():
