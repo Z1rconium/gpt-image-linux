@@ -243,7 +243,9 @@ const en = {
   },
   lightbox: {
     title: 'Image Details',
-    closeLabel: 'Close lightbox'
+    closeLabel: 'Close lightbox',
+    previousImage: 'Previous image',
+    nextImage: 'Next image'
   },
   confirm: {
     closeLabel: 'Close confirmation',
@@ -619,7 +621,9 @@ const zh: TranslationSchema<typeof en> = {
   },
   lightbox: {
     title: '图片详情',
-    closeLabel: '关闭图片详情'
+    closeLabel: '关闭图片详情',
+    previousImage: '上一张图片',
+    nextImage: '下一张图片'
   },
   confirm: {
     closeLabel: '关闭确认',

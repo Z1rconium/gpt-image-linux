@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { GenerateJobImage, GenerateJobStatus } from '$lib/api/types';
   import { t } from '$lib/i18n';
-  import { downloadUrl, filenameFromImageUrl, formatBeijingTime, stageLabel, statusLabel } from '$lib/utils/format';
+  import { displayImageSize, downloadUrl, filenameFromImageUrl, formatBeijingTime, stageLabel, statusLabel } from '$lib/utils/format';
 
   export let loading = false;
   export let error = '';
@@ -56,6 +56,11 @@
   $: selectedImageIndex = selectedImage ? resultImages.findIndex((image) => image.image_id === selectedImage.image_id) : -1;
   $: previewWidth = selectedImage?.image_width || job?.image_width || undefined;
   $: previewHeight = selectedImage?.image_height || job?.image_height || undefined;
+  $: previewSize = displayImageSize({
+    size: job?.size || null,
+    image_width: selectedImage?.image_width ?? job?.image_width ?? null,
+    image_height: selectedImage?.image_height ?? job?.image_height ?? null
+  });
 </script>
 
 <section class="rounded-2xl border border-zinc-800 bg-zinc-900/60 p-4 sm:p-5">
@@ -144,7 +149,7 @@
       </div>
       <div class="rounded-lg border border-zinc-800 bg-zinc-950/50 px-3 py-2">
         <div class="text-zinc-600">{$t.common.size}</div>
-        <div class="mt-1 text-zinc-300">{job.size || '-'}</div>
+        <div class="mt-1 text-zinc-300">{previewSize}</div>
       </div>
       <div class="rounded-lg border border-zinc-800 bg-zinc-950/50 px-3 py-2">
         <div class="text-zinc-600">{$t.common.model}</div>

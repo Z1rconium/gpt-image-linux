@@ -14,6 +14,11 @@
   export let onCopyUrl: (image: GalleryEntry) => void = () => {};
   export let onUsePrompt: (image: GalleryEntry) => void = () => {};
   export let onUseAll: (image: GalleryEntry) => void = () => {};
+  export let canNavigatePrevious = false;
+  export let canNavigateNext = false;
+  export let navigating = false;
+  export let onNavigatePrevious: () => void = () => {};
+  export let onNavigateNext: () => void = () => {};
 </script>
 
 {#if open && image}
@@ -25,15 +30,48 @@
       use:dialog={{ open, onClose }}
     >
       <div class="lightbox-media">
-        <img
-          src={imageUrl(image.filename)}
-          alt={image.prompt}
-          class="lightbox-img"
-          decoding="async"
-          fetchpriority="high"
-          width={image.image_width || undefined}
-          height={image.image_height || undefined}
-        />
+        <div class="flex h-full min-h-0 w-full flex-col">
+          <div class="flex min-h-0 flex-1 items-center justify-center">
+            <img
+              src={imageUrl(image.filename)}
+              alt={image.prompt}
+              class="lightbox-img"
+              decoding="async"
+              fetchpriority="high"
+              width={image.image_width || undefined}
+              height={image.image_height || undefined}
+            />
+          </div>
+          <div class="mt-4 flex h-10 shrink-0 items-center justify-between">
+            {#if canNavigatePrevious}
+              <button
+                type="button"
+                class="control-focus inline-flex h-10 w-10 items-center justify-center rounded-lg border border-zinc-700 text-lg leading-none text-zinc-300 transition-colors hover:bg-zinc-800 hover:text-zinc-100 disabled:cursor-not-allowed disabled:opacity-40"
+                aria-label={$t.lightbox.previousImage}
+                disabled={navigating}
+                on:click={onNavigatePrevious}
+              >
+                <span aria-hidden="true">&larr;</span>
+              </button>
+            {:else}
+              <span class="h-10 w-10" aria-hidden="true"></span>
+            {/if}
+
+            {#if canNavigateNext}
+              <button
+                type="button"
+                class="control-focus inline-flex h-10 w-10 items-center justify-center rounded-lg border border-zinc-700 text-lg leading-none text-zinc-300 transition-colors hover:bg-zinc-800 hover:text-zinc-100 disabled:cursor-not-allowed disabled:opacity-40"
+                aria-label={$t.lightbox.nextImage}
+                disabled={navigating}
+                on:click={onNavigateNext}
+              >
+                <span aria-hidden="true">&rarr;</span>
+              </button>
+            {:else}
+              <span class="h-10 w-10" aria-hidden="true"></span>
+            {/if}
+          </div>
+        </div>
       </div>
       <aside class="lightbox-details flex min-h-0 flex-col">
         <div class="flex items-start justify-between gap-3 border-b border-zinc-800 p-5">

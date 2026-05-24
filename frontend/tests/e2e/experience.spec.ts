@@ -643,6 +643,45 @@ test('lightbox use all reuses parameters and edit api path is ignored', async ({
   await expect(page.getByRole('status')).toContainText('edit API path was ignored');
 });
 
+test('lightbox navigates images across gallery pages', async ({ page }) => {
+  await loadApp(page, { galleryImages: manyGalleryImages(10) });
+
+  await page.getByRole('img', { name: 'Paged gallery image 1', exact: true }).click();
+  const lightbox = page.getByRole('dialog', { name: 'Image Details' });
+  await expect(lightbox).toBeVisible();
+  await expect(lightbox.getByRole('button', { name: 'Previous image' })).toHaveCount(0);
+  await expect(lightbox.getByRole('button', { name: 'Next image' })).toBeVisible();
+
+  await lightbox.getByRole('button', { name: 'Next image' }).click();
+  await expect(lightbox).toContainText('paged-img-2.png');
+  await expect(page).toHaveURL(/image=paged-img-2/);
+
+  await page.keyboard.press('ArrowLeft');
+  await expect(lightbox).toContainText('paged-img-1.png');
+  await expect(page).toHaveURL(/image=paged-img-1/);
+
+  await page.keyboard.press('Escape');
+  await expect(lightbox).toBeHidden();
+
+  await page.getByRole('img', { name: 'Paged gallery image 9', exact: true }).click();
+  await expect(lightbox).toContainText('paged-img-9.png');
+  const nextPageRequest = page.waitForRequest((request) => {
+    const url = new URL(request.url());
+    return request.method() === 'GET' && url.pathname === '/api/gallery' && url.searchParams.get('page') === '2';
+  });
+  await page.keyboard.press('ArrowRight');
+  await nextPageRequest;
+
+  await expect(lightbox).toContainText('paged-img-10.png');
+  await expect(page).toHaveURL(/page=2/);
+  await expect(page).toHaveURL(/image=paged-img-10/);
+  await expect(lightbox.getByRole('button', { name: 'Next image' })).toHaveCount(0);
+
+  await page.keyboard.press('ArrowRight');
+  await expect(lightbox).toContainText('paged-img-10.png');
+  await expect(page).toHaveURL(/image=paged-img-10/);
+});
+
 test('multi-image job results can be previewed individually', async ({ page }) => {
   const generatedJob = {
     ...job('job-generated', 'browser multi prompt'),

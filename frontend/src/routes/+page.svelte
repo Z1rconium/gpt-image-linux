@@ -56,10 +56,22 @@
   let urlSyncQueued = false;
   let queuedUrlSyncMode: 'replace' | 'push' = 'replace';
   let lightboxLookupSeq = 0;
+  let lightboxNavigating = false;
   let lastActivePresetApiPath: ApiPath = initialPromptFormState.apiPath;
   let optimizingPrompt = false;
 
   $: activeJobsCount = $jobsStore.jobs.length;
+  $: lightboxImages = $galleryStore.gallery?.images || [];
+  $: lightboxImageIndex = lightboxImages.findIndex((image) => image.id === $lightboxStore.image?.id);
+  $: lightboxImageInCurrentPage = lightboxImageIndex >= 0;
+  $: canNavigatePrevious = Boolean(
+    $lightboxStore.image && lightboxImageInCurrentPage && (lightboxImageIndex > 0 || $galleryStore.gallery?.has_prev)
+  );
+  $: canNavigateNext = Boolean(
+    $lightboxStore.image &&
+      lightboxImageInCurrentPage &&
+      (lightboxImageIndex < lightboxImages.length - 1 || $galleryStore.gallery?.has_next)
+  );
   $: optimizerSettings = $settingsStore.settings?.prompt_optimizer || null;
   $: optimizerAvailable = Boolean(
     optimizerSettings?.enabled &&
@@ -147,6 +159,52 @@
   function closeLightbox() {
     lightboxStore.close();
     queueUrlSync('replace');
+  }
+
+  function lightboxNavigationBlocked() {
+    return Boolean(
+      $confirmStore.request ||
+        $uiStore.editPreviewOpen ||
+        $uiStore.sizeDialogOpen ||
+        $uiStore.promptSnippetsOpen ||
+        $uiStore.jobsOpen ||
+        $uiStore.settingsOpen
+    );
+  }
+
+  async function navigateLightbox(direction: -1 | 1) {
+    if (lightboxNavigating || !$lightboxStore.image || !$galleryStore.gallery) return;
+
+    const gallery = $galleryStore.gallery;
+    const images = gallery.images;
+    const currentIndex = images.findIndex((image) => image.id === $lightboxStore.image?.id);
+    if (currentIndex < 0) return;
+
+    const nextIndex = currentIndex + direction;
+    if (nextIndex >= 0 && nextIndex < images.length) {
+      lightboxStore.open(images[nextIndex]);
+      queueUrlSync('replace');
+      return;
+    }
+
+    const nextPage = gallery.page + direction;
+    if ((direction < 0 && !gallery.has_prev) || (direction > 0 && !gallery.has_next)) return;
+
+    lightboxNavigating = true;
+    try {
+      await galleryStore.loadGallery(nextPage);
+      const nextImages = $galleryStore.gallery?.images || [];
+      const nextImage = direction < 0 ? nextImages[nextImages.length - 1] : nextImages[0];
+      if (nextImage) {
+        lightboxStore.open(nextImage);
+        queueUrlSync('replace');
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : $t.messages.requestFailed;
+      showToast(message || $t.messages.requestFailed, 'error');
+    } finally {
+      lightboxNavigating = false;
+    }
   }
 
   function openJobsDrawer(tab: JobsTab = jobsTab) {
@@ -594,13 +652,24 @@
     window.addEventListener('popstate', popstate);
 
     const keydown = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return;
-      if ($uiStore.editPreviewOpen) setUi('editPreviewOpen', false);
-      else if ($lightboxStore.image) closeLightbox();
-      else if ($uiStore.sizeDialogOpen) setUi('sizeDialogOpen', false);
-      else if ($uiStore.promptSnippetsOpen) closePromptSnippetsDrawer();
-      else if ($uiStore.jobsOpen) closeJobsDrawer();
-      else if ($uiStore.settingsOpen) setUi('settingsOpen', false);
+      if (event.key === 'Escape') {
+        if ($uiStore.editPreviewOpen) setUi('editPreviewOpen', false);
+        else if ($lightboxStore.image) closeLightbox();
+        else if ($uiStore.sizeDialogOpen) setUi('sizeDialogOpen', false);
+        else if ($uiStore.promptSnippetsOpen) closePromptSnippetsDrawer();
+        else if ($uiStore.jobsOpen) closeJobsDrawer();
+        else if ($uiStore.settingsOpen) setUi('settingsOpen', false);
+        return;
+      }
+
+      if (!$lightboxStore.image || lightboxNavigationBlocked()) return;
+      if (event.key === 'ArrowLeft' && canNavigatePrevious) {
+        event.preventDefault();
+        void navigateLightbox(-1);
+      } else if (event.key === 'ArrowRight' && canNavigateNext) {
+        event.preventDefault();
+        void navigateLightbox(1);
+      }
     };
     window.addEventListener('keydown', keydown);
     return () => {
@@ -773,6 +842,11 @@
   onCopyUrl={copyImageUrl}
   onUsePrompt={useGalleryPrompt}
   onUseAll={useGalleryParams}
+  canNavigatePrevious={canNavigatePrevious}
+  canNavigateNext={canNavigateNext}
+  navigating={lightboxNavigating}
+  onNavigatePrevious={() => navigateLightbox(-1)}
+  onNavigateNext={() => navigateLightbox(1)}
 />
 
 <EditPreviewModal

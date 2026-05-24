@@ -52,10 +52,19 @@ export function formatBeijingTime(value: string | null | undefined) {
   return `${part('year')}-${part('month')}-${part('day')} ${part('hour')}:${part('minute')}:${part('second')}`;
 }
 
-export function galleryImageSize(image: Pick<GalleryEntry, 'size' | 'image_width' | 'image_height'>) {
-  if (image.size && image.size !== 'auto') return image.size;
-  if (image.image_width && image.image_height) return `${image.image_width}x${image.image_height}`;
-  return image.size || '-';
+type ImageSizeLike = {
+  size?: string | null;
+  image_width?: number | null;
+  image_height?: number | null;
+};
+
+export function displayImageSize(image: ImageSizeLike | null | undefined) {
+  if (image?.image_width && image?.image_height) return `${image.image_width}x${image.image_height}`;
+  return image?.size || '-';
+}
+
+export function galleryImageSize(image: ImageSizeLike) {
+  return displayImageSize(image);
 }
 
 export function stageLabel(job: GenerateJobStatus | null, labels?: Record<string, string>) {
