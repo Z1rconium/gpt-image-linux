@@ -3476,6 +3476,33 @@ def test_generate_jobs_history_supports_offset_pagination(client):
     assert [job["job_id"] for job in resp.json()] == ["history-2", "history-1"]
 
 
+def test_generate_jobs_history_failed_only_filters_error_statuses(client):
+    for job_id, status in [
+        ("history-success", "success"),
+        ("history-cancelled", "cancelled"),
+        ("history-error", "error"),
+        ("history-upstream", "upstream_error"),
+    ]:
+        storage.upsert_generate_job(
+            {
+                "job_id": job_id,
+                "status": status,
+                "operation": "generation",
+                "prompt": job_id,
+                "size": "1024x1024",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-01T00:00:00+00:00",
+                "completed_at": "2026-01-01T00:00:00+00:00",
+                "error": "failed" if status in {"error", "upstream_error"} else None,
+            }
+        )
+
+    resp = client.get("/api/generate/jobs?include_finished=true&failed_only=true")
+
+    assert resp.status_code == 200
+    assert {job["job_id"] for job in resp.json()} == {"history-error", "history-upstream"}
+
+
 def test_validation_422_and_global_500(tmp_path, monkeypatch):
     _configure_runtime(tmp_path)
     with TestClient(backend_main.app, raise_server_exceptions=False) as client:

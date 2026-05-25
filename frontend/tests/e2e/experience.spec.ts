@@ -244,6 +244,12 @@ function manyJobs(count: number) {
   return Array.from({ length: count }, (_, index) => job(`job-${index}`, `history prompt ${index}`, 'running'));
 }
 
+function isErrorJob(candidate: unknown) {
+  if (!candidate || typeof candidate !== 'object') return false;
+  const status = (candidate as { status?: unknown }).status;
+  return status === 'error' || status === 'upstream_error';
+}
+
 function manyGalleryImages(count: number) {
   return Array.from({ length: count }, (_, index) => ({
     ...baseGalleryImages[index % baseGalleryImages.length],
@@ -423,7 +429,8 @@ async function mockApi(page: Page, options: MockOptions = {}) {
     }
     if (url.pathname === '/api/generate/jobs') {
       const includeFinished = url.searchParams.get('include_finished') === 'true';
-      await route.fulfill(json(includeFinished ? historyJobs : runningJobs));
+      const failedOnly = url.searchParams.get('failed_only') === 'true';
+      await route.fulfill(json(includeFinished ? (failedOnly ? historyJobs.filter(isErrorJob) : historyJobs) : runningJobs));
       return;
     }
     if (url.pathname === '/api/generate/jobs/events') {
@@ -756,6 +763,15 @@ test('job history shows detailed terminal statuses', async ({ page }) => {
   await expect(upstreamJob.getByRole('button', { name: 'Hide error' })).toBeVisible();
   await upstreamJob.getByRole('button', { name: 'Hide error' }).click();
   await expect(upstreamJob.getByText('Upstream API error', { exact: true })).toBeHidden();
+
+  await jobsDrawer.getByLabel('Errors only').check();
+  await expect(jobsDrawer.getByText('upstream prompt')).toBeVisible();
+  await expect(jobsDrawer.getByText('cancelled prompt')).toBeHidden();
+  await expect(jobsDrawer.getByText('interrupted prompt')).toBeHidden();
+
+  await jobsDrawer.getByLabel('Errors only').uncheck();
+  await expect(jobsDrawer.getByText('cancelled prompt')).toBeVisible();
+  await expect(jobsDrawer.getByText('interrupted prompt')).toBeVisible();
 });
 
 test('gallery url state restores filters, lightbox, and job history tab', async ({ page }) => {

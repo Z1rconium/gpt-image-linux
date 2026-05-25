@@ -753,12 +753,14 @@
   historyLoading={$jobsStore.historyLoading}
   historyLoaded={$jobsStore.historyLoaded}
   historyHasMore={$jobsStore.historyHasMore}
+  historyFailedOnly={$jobsStore.historyFailedOnly}
   selectedIds={$jobsStore.selectedIds}
   onClose={closeJobsDrawer}
   onTabChange={setJobsTab}
   onRefresh={jobsStore.loadJobs}
   onRefreshHistory={jobsStore.loadJobHistory}
   onLoadMoreHistory={jobsStore.loadMoreJobHistory}
+  onHistoryFailedOnlyChange={jobsStore.setHistoryFailedOnly}
   onToggle={jobsStore.toggleSelection}
   onToggleAll={jobsStore.toggleAll}
   onCancelSelected={jobsStore.cancelSelected}

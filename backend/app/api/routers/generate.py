@@ -18,7 +18,7 @@ from ..jobs import (
     trim_generate_jobs,
 )
 from ...core.api_paths import normalize_api_path
-from ...core.constants import ACTIVE_GENERATE_JOB_STATUSES
+from ...core.constants import ACTIVE_GENERATE_JOB_STATUSES, ERROR_GENERATE_JOB_STATUSES
 from ...core.utils import utc_now
 from ...repositories import storage
 from ...schemas.models import (
@@ -66,11 +66,13 @@ async def generate(req: GenerateRequest):
 @router.get("/api/generate/jobs", response_model=list[GenerateJobStatus])
 async def list_generate_jobs(
     include_finished: bool = Query(default=False),
+    failed_only: bool = Query(default=False),
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
 ):
     if include_finished:
-        jobs = await asyncio.to_thread(storage.list_generate_jobs, limit=limit, offset=offset)
+        statuses = ERROR_GENERATE_JOB_STATUSES if failed_only else None
+        jobs = await asyncio.to_thread(storage.list_generate_jobs, statuses=statuses, limit=limit, offset=offset)
     else:
         jobs = list_active_generate_jobs()
     return [GenerateJobStatus(**job) for job in jobs]

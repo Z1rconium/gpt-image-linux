@@ -16,12 +16,14 @@
   export let historyLoading = false;
   export let historyLoaded = false;
   export let historyHasMore = false;
+  export let historyFailedOnly = false;
   export let selectedIds: Set<string> = new Set();
   export let onClose: () => void = () => {};
   export let onTabChange: (tab: JobsTab) => void = () => {};
   export let onRefresh: () => MaybePromise = () => {};
   export let onRefreshHistory: () => MaybePromise = () => {};
   export let onLoadMoreHistory: () => MaybePromise = () => {};
+  export let onHistoryFailedOnlyChange: (failedOnly: boolean) => MaybePromise = () => {};
   export let onToggle: (jobId: string) => void = () => {};
   export let onToggleAll: () => void = () => {};
   export let onCancelSelected: () => MaybePromise = () => {};
@@ -52,6 +54,13 @@
   function refreshCurrentTab() {
     if (internalActiveTab === 'history') void onRefreshHistory();
     else void onRefresh();
+  }
+
+  function toggleHistoryFailedOnly(event: Event) {
+    const failedOnly = (event.currentTarget as HTMLInputElement).checked;
+    visibleJobIds = new Set<string>();
+    expandedErrorIds = new Set<string>();
+    void onHistoryFailedOnlyChange(failedOnly);
   }
 
   async function requestMoreHistory() {
@@ -165,11 +174,24 @@
             {$t.jobs.historyTab}
           </button>
         </div>
-        <div class="flex justify-end gap-3">
+        <div class="flex flex-wrap justify-end gap-3">
           {#if internalActiveTab === 'running'}
             <button type="button" class="control-focus rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40" disabled={!jobs.length} on:click={onToggleAll}>
               {$t.jobs.selectAll}
             </button>
+          {/if}
+          {#if internalActiveTab === 'history'}
+            <label class={`control-focus flex items-center gap-2 rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-300 ${historyLoading ? 'cursor-not-allowed opacity-40' : 'cursor-pointer hover:bg-zinc-800'}`}>
+              <input
+                type="checkbox"
+                class="h-3.5 w-3.5 accent-red-500"
+                checked={historyFailedOnly}
+                disabled={historyLoading}
+                aria-label={$t.jobs.errorsOnly}
+                on:change={toggleHistoryFailedOnly}
+              />
+              <span>{$t.jobs.errorsOnly}</span>
+            </label>
           {/if}
           <button type="button" class="control-focus rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40" disabled={internalActiveTab === 'history' && historyLoading} on:click={refreshCurrentTab}>
             {$t.jobs.refresh}
@@ -205,8 +227,8 @@
           </div>
         {:else if historyJobs.length === 0}
           <div class="rounded-xl border border-dashed border-zinc-800 bg-zinc-950/35 px-4 py-10 text-center">
-            <p class="text-sm font-medium text-zinc-300">{$t.jobs.noHistory}</p>
-            <p class="mt-2 text-xs text-zinc-500">{$t.jobs.noHistoryHint}</p>
+            <p class="text-sm font-medium text-zinc-300">{historyFailedOnly ? $t.jobs.noErrorHistory : $t.jobs.noHistory}</p>
+            <p class="mt-2 text-xs text-zinc-500">{historyFailedOnly ? $t.jobs.noErrorHistoryHint : $t.jobs.noHistoryHint}</p>
           </div>
         {:else}
           <div class="space-y-3" aria-busy={historyLoading}>

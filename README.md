@@ -37,7 +37,7 @@ Key characteristics:
 - API preset management: base URL/path/key, per-preset default model, global SOCKS5 upstream proxy, and global Webhook URL
 - prompt helper tags, server-side prompt optimization, independent prompt snippets, and gallery prompt/parameter reuse
 - generation and image-editing (`/v1/images/edits`) with size/quality/format/compression/quantity controls and up to 16 edit reference images
-- preview + job history with SSE progress, multi-image result previews, `completed_at`, elapsed time, per-job stage timings, loading states, detailed terminal statuses, cancel for queued/running jobs, and reuse/retry from persisted history
+- preview + job history with SSE progress, multi-image result previews, `completed_at`, elapsed time, per-job stage timings, loading states, detailed terminal statuses, an errors-only history filter, cancel for queued/running jobs, and reuse/retry from persisted history
 - shared queue and concurrency limits for generation/edit jobs
 - optional global Webhook URL with HTTPS-only validation, SSRF checks, signing, retry, and masked settings responses
 - gallery with filters (FTS-backed prompt search, model, preset, size, date range, favorite), URL-synced page/filter/lightbox/job-history state, direct page-number jump, lightbox previous/next navigation and left/right keyboard shortcuts, “Edit this image”, download, custom delete confirmations with 5-second undo for single images, batch actions with partial-success feedback, delete/delete-all, prompt/image-url copy, and on-demand total-size metadata
@@ -420,7 +420,7 @@ The panel supports these upstream paths. The API base URL may either omit or inc
 | `POST` | `/api/generate` | Start an image generation job |
 | `POST` | `/api/edits` | Start an image edit job with one or more multipart image uploads |
 | `POST` | `/api/edits/from-gallery/{image_id}` | Start an image edit job using an existing gallery image, optionally with uploaded references |
-| `GET` | `/api/generate/jobs` | List queued/running generation and edit jobs; pass `include_finished=true` with optional `limit`/`offset` for paginated persisted history |
+| `GET` | `/api/generate/jobs` | List queued/running generation and edit jobs; pass `include_finished=true` with optional `limit`/`offset` for paginated persisted history, and `failed_only=true` to return only `error`/`upstream_error` history rows |
 | `GET` | `/api/generate/jobs/events` | Stream queued/running generation and edit jobs over SSE |
 | `GET` | `/api/generate/{job_id}` | Get generation job status or result |
 | `GET` | `/api/generate/{job_id}/events` | Stream generation job status/progress over SSE |
@@ -450,7 +450,7 @@ The panel supports these upstream paths. The API base URL may either omit or inc
 - generation and edit share one queue (`MAX_ACTIVE_GENERATE_JOBS` + `MAX_QUEUED_GENERATE_JOBS`), all edit source images are staged under `DATA_DIR/edit-sources` and additionally capped by `MAX_PENDING_EDIT_SOURCE_MB`, support cancellation, and persist terminal history including `completed_at`
 - batch generation (`n > 1`) consumes one public queue/running slot; the parent job aggregates successful child results into `images[]`, while Gallery metadata keeps the user-requested `n`
 - Prompt Optimizer uses its own server-side Chat Completions-compatible endpoint config, resolves API key env refs on the backend, and does not consume generation/edit queue capacity.
-- SSE is the primary progress channel; `/api/generate/jobs` provides list/history (`include_finished=true`, optional `limit`/`offset`), and `/api/generate/jobs/events` streams debounced live job-list changes from memory
+- SSE is the primary progress channel; `/api/generate/jobs` provides list/history (`include_finished=true`, optional `limit`/`offset`, optional `failed_only=true`), and `/api/generate/jobs/events` streams debounced live job-list changes from memory
 - terminal job history includes `stage_timings` for `upstream_wait`, `download_decode`, `validate`, `thumbnail`, and `db_insert`; slow gallery queries are logged with query filters and totals and counted in metrics; optional metrics include queue depth, running jobs, failure ratios, job-stage latencies, and slow SQLite query counters; terminal job statuses distinguish `cancelled`, `interrupted`, and `upstream_error` in addition to the generic `error`
 - upstream JSON/SSE bodies are read with a `MAX_UPSTREAM_JSON_MB` cap before parsing, and upstream image URL downloads are revalidated (SSRF-aware, no blind redirect follow) and bounded by `MAX_FILE_SIZE_MB`
 - `/api/import` enforces ZIP safety/size/count/compression checks; `/api/download-all` keeps the low-memory streaming path, while tracked export jobs write temp ZIP files so UI progress can cover both packing and transfer
@@ -534,7 +534,7 @@ GPT Image Panel 是一个轻量级 FastAPI Web 界面，用于图像生成和图
 - API 预设管理：base URL/path/key、每个预设的默认 model、全局 SOCKS5 上游代理和全局 Webhook URL
 - 提示词助手标签、服务端提示词优化器、独立提示词收藏夹，以及 Gallery 提示词/参数复用
 - 图像生成 + 图生图编辑（`/v1/images/edits`），支持尺寸/质量/格式/压缩率/数量等参数，并支持最多 16 张编辑参考图
-- 预览 + 历史任务：SSE 进度、多图结果预览、`completed_at`、耗时、任务分段耗时、加载状态、细分终态状态、排队/运行任务取消，以及从持久化历史复用/重试
+- 预览 + 历史任务：SSE 进度、多图结果预览、`completed_at`、耗时、任务分段耗时、加载状态、细分终态状态、仅错误历史筛选、排队/运行任务取消，以及从持久化历史复用/重试
 - 生成与编辑共享并发和排队限制
 - 可选全局 Webhook URL：HTTPS 校验、SSRF 防护、签名、重试，以及设置响应打码
 - Gallery：筛选（FTS 提示词搜索、模型、预设、尺寸、日期区间、收藏）、URL 同步的 page/filter/lightbox/job history 状态、页码输入跳转、Lightbox 上一张/下一张导航和左右方向键快捷键、”Edit this image”、下载/删除、批量操作部分成功反馈、单图 5 秒撤销删除、复制提示词/图片链接、按需总大小统计
@@ -917,7 +917,7 @@ curl http://localhost:9090/health
 | `POST` | `/api/generate` | 创建图像生成任务 |
 | `POST` | `/api/edits` | 使用一张或多张 multipart 上传图片创建图像编辑任务 |
 | `POST` | `/api/edits/from-gallery/{image_id}` | 使用已有 Gallery 图片创建图像编辑任务，可附加上传参考图 |
-| `GET` | `/api/generate/jobs` | 查询排队/运行中的生成和编辑任务；传 `include_finished=true` 并可选 `limit`/`offset` 可分页查询持久化历史 |
+| `GET` | `/api/generate/jobs` | 查询排队/运行中的生成和编辑任务；传 `include_finished=true` 并可选 `limit`/`offset` 可分页查询持久化历史，传 `failed_only=true` 仅返回 `error`/`upstream_error` 历史行 |
 | `GET` | `/api/generate/jobs/events` | 通过 SSE 推送排队/运行中的生成和编辑任务 |
 | `GET` | `/api/generate/{job_id}` | 查询任务状态或结果 |
 | `GET` | `/api/generate/{job_id}/events` | 通过 SSE 推送单个任务状态和进度 |
@@ -947,7 +947,7 @@ curl http://localhost:9090/health
 - 生成与编辑共用队列（`MAX_ACTIVE_GENERATE_JOBS` + `MAX_QUEUED_GENERATE_JOBS`）；所有编辑源图先落到 `DATA_DIR/edit-sources` 并额外受 `MAX_PENDING_EDIT_SOURCE_MB` 总量限制；支持取消，并持久化终态历史（含 `completed_at`）
 - 批量生成（`n > 1`）只占一个公开队列/运行槽；父任务会把成功子结果聚合到 `images[]`，Gallery 元数据保留用户请求的 `n`
 - 提示词优化器使用独立的服务端 Chat Completions 兼容 endpoint 配置，在后端解析 API Key 环境变量引用，不占用生成/编辑任务队列容量。
-- SSE 是主进度通道；`/api/generate/jobs` 提供列表/历史（`include_finished=true`，可选 `limit`/`offset`），`/api/generate/jobs/events` 从内存推送 debounce 后的实时任务列表变化
+- SSE 是主进度通道；`/api/generate/jobs` 提供列表/历史（`include_finished=true`，可选 `limit`/`offset`，可选 `failed_only=true`），`/api/generate/jobs/events` 从内存推送 debounce 后的实时任务列表变化
 - 任务终态历史包含 `stage_timings`：`upstream_wait`、`download_decode`、`validate`、`thumbnail`、`db_insert`；慢 Gallery 查询日志会带筛选条件与 total，并计入 metrics；可选 metrics 包含队列深度、运行中任务数、失败率、任务分段耗时和慢 SQLite 查询数；终态状态区分 `cancelled`、`interrupted` 和 `upstream_error`，同时保留通用 `error`
 - 上游 JSON/SSE 响应会在解析前受 `MAX_UPSTREAM_JSON_MB` 限制；上游图片 URL 下载会做 SSRF/重定向目标复核，并受 `MAX_FILE_SIZE_MB` 限制
 - `/api/import` 做 ZIP 安全与体积校验；`/api/download-all` 保留低内存流式导出，带进度的导出任务会写入临时 ZIP，让 UI 同时展示打包和传输进度
