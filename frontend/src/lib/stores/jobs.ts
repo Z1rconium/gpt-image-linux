@@ -2,8 +2,8 @@ import { get, writable } from 'svelte/store';
 import { apiFetch } from '$lib/api/client';
 import { openJsonEventSource } from '$lib/api/events';
 import { t } from '$lib/i18n';
-import { filenameFromImageUrl } from '$lib/utils/format';
-import { isActiveJobStatus, isFailureJobStatus } from '$lib/utils/jobs';
+import { filenameFromImageUrl, jobFailureMessage } from '$lib/utils/format';
+import { isActiveJobStatus } from '$lib/utils/jobs';
 import type { GenerateJobResponse, GenerateJobStatus } from '$lib/api/types';
 import type { PreviewState } from '$lib/stores/preview';
 
@@ -245,7 +245,7 @@ function createJobsStore() {
     const image = primaryImage?.image_url || job.image_url || '';
     return {
       loading: isActiveJobStatus(job.status),
-      error: isFailureJobStatus(job.status) ? job.error || job.message || get(t).messages.jobFailed : '',
+      error: jobFailureMessage(job, get(t).messages.jobFailed),
       job,
       imageUrl: image || preview.imageUrl,
       filename: primaryImage?.filename || (image ? filenameFromImageUrl(image) : preview.filename),

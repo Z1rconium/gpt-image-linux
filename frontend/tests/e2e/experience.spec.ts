@@ -741,11 +741,16 @@ test('multi-image job results can be previewed individually', async ({ page }) =
 });
 
 test('job history shows detailed terminal statuses', async ({ page }) => {
+  const detailedUpstreamError = 'Upstream API error (400): Invalid model';
   await loadApp(page, {
     historyJobs: [
       job('cancelled-job', 'cancelled prompt', 'cancelled'),
       job('interrupted-job', 'interrupted prompt', 'interrupted'),
-      job('upstream-job', 'upstream prompt', 'upstream_error')
+      {
+        ...job('upstream-job', 'upstream prompt', 'upstream_error'),
+        message: 'Generation failed',
+        error: detailedUpstreamError
+      }
     ]
   });
 
@@ -757,12 +762,13 @@ test('job history shows detailed terminal statuses', async ({ page }) => {
   await expect(jobsDrawer.getByText('upstream error', { exact: true })).toBeVisible();
 
   const upstreamJob = jobsDrawer.locator('article').filter({ hasText: 'upstream prompt' });
-  await expect(upstreamJob.getByText('Upstream API error', { exact: true })).toBeHidden();
+  await expect(upstreamJob.getByText('Generation failed', { exact: true })).toBeVisible();
+  await expect(upstreamJob.getByText(detailedUpstreamError, { exact: true })).toBeHidden();
   await upstreamJob.getByRole('button', { name: 'Show error' }).click();
-  await expect(upstreamJob.getByText('Upstream API error', { exact: true })).toBeVisible();
+  await expect(upstreamJob.getByText(detailedUpstreamError, { exact: true })).toBeVisible();
   await expect(upstreamJob.getByRole('button', { name: 'Hide error' })).toBeVisible();
   await upstreamJob.getByRole('button', { name: 'Hide error' }).click();
-  await expect(upstreamJob.getByText('Upstream API error', { exact: true })).toBeHidden();
+  await expect(upstreamJob.getByText(detailedUpstreamError, { exact: true })).toBeHidden();
 
   await jobsDrawer.getByLabel('Errors only').check();
   await expect(jobsDrawer.getByText('upstream prompt')).toBeVisible();

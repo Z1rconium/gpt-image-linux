@@ -69,13 +69,19 @@ export function galleryImageSize(image: ImageSizeLike) {
 
 export function stageLabel(job: GenerateJobStatus | null, labels?: Record<string, string>) {
   if (!job?.stage) return '';
-  if (isFailureJobStatus(job.status) && (job.error || job.message)) return job.error || job.message || '';
+  const failureMessage = jobFailureMessage(job);
+  if (failureMessage) return failureMessage;
 
   const translated = labels?.[job.stage];
   if (!translated) return job.message || job.stage.replaceAll('_', ' ');
 
   const progressSuffix = job.message?.match(/\(\d+\/\d+\)$/)?.[0];
   return progressSuffix ? `${translated} ${progressSuffix}` : translated;
+}
+
+export function jobFailureMessage(job: GenerateJobStatus | null | undefined, fallback = '') {
+  if (!job || !isFailureJobStatus(job.status)) return '';
+  return String(job.error || job.message || fallback || '').trim();
 }
 
 export function statusLabel(status: string | null | undefined, labels?: Record<string, string>) {

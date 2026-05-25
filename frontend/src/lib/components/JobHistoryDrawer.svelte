@@ -2,7 +2,7 @@
   import { tick } from 'svelte';
   import type { GenerateJobStatus } from '$lib/api/types';
   import { t } from '$lib/i18n';
-  import { formatBeijingTime, operationLabel, stageLabel, statusLabel } from '$lib/utils/format';
+  import { formatBeijingTime, jobFailureMessage, operationLabel, stageLabel, statusLabel } from '$lib/utils/format';
   import { isActiveJobStatus, isFailureJobStatus } from '$lib/utils/jobs';
   import { dialog } from '$lib/actions/dialog';
 
@@ -107,9 +107,8 @@
     return labels[job.stage] || job.stage.replaceAll('_', ' ');
   }
 
-  function jobErrorMessage(job: GenerateJobStatus) {
-    if (!isFailureJobStatus(job.status)) return '';
-    return (job.error || job.message || '').trim();
+  function jobErrorMessage(job: GenerateJobStatus, fallback: string) {
+    return jobFailureMessage(job, fallback);
   }
 
   function isErrorExpanded(jobId: string) {
@@ -242,6 +241,9 @@
                     </div>
                     <p class="mt-2 line-clamp-2 text-sm text-zinc-200">{job.prompt || $t.common.untitledJob}</p>
                     <p class="mt-1 truncate text-xs text-zinc-500">{historyStageLabel(job, $t.stages)}</p>
+                    {#if jobErrorMessage(job, $t.messages.jobFailed)}
+                      <p hidden={!isErrorExpanded(job.job_id)} class="mt-1 whitespace-pre-wrap break-words text-xs leading-relaxed text-red-300">{jobErrorMessage(job, $t.messages.jobFailed)}</p>
+                    {/if}
                     <div class="mt-3 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-zinc-500">
                       {#if jobMeta(job)}
                         <span>{jobMeta(job)}</span>
@@ -251,7 +253,7 @@
                         <span>{$t.common.duration}: {job.duration}</span>
                       {/if}
                     </div>
-                    {#if jobErrorMessage(job)}
+                    {#if jobErrorMessage(job, $t.messages.jobFailed)}
                       <div class="mt-3">
                         <button
                           type="button"
@@ -261,9 +263,6 @@
                         >
                           {isErrorExpanded(job.job_id) ? $t.jobs.hideError : $t.jobs.showError}
                         </button>
-                        {#if isErrorExpanded(job.job_id)}
-                          <pre class="mt-3 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-red-500/25 bg-red-950/20 p-3 text-xs leading-relaxed text-red-100">{jobErrorMessage(job)}</pre>
-                        {/if}
                       </div>
                     {/if}
                     <div class="mt-4 flex flex-wrap justify-end gap-2">
