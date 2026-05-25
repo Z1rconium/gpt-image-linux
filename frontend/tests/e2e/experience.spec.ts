@@ -748,6 +748,14 @@ test('job history shows detailed terminal statuses', async ({ page }) => {
   await expect(jobsDrawer.getByText('cancelled', { exact: true })).toBeVisible();
   await expect(jobsDrawer.getByText('interrupted', { exact: true })).toBeVisible();
   await expect(jobsDrawer.getByText('upstream error', { exact: true })).toBeVisible();
+
+  const upstreamJob = jobsDrawer.locator('article').filter({ hasText: 'upstream prompt' });
+  await expect(upstreamJob.getByText('Upstream API error', { exact: true })).toBeHidden();
+  await upstreamJob.getByRole('button', { name: 'Show error' }).click();
+  await expect(upstreamJob.getByText('Upstream API error', { exact: true })).toBeVisible();
+  await expect(upstreamJob.getByRole('button', { name: 'Hide error' })).toBeVisible();
+  await upstreamJob.getByRole('button', { name: 'Hide error' }).click();
+  await expect(upstreamJob.getByText('Upstream API error', { exact: true })).toBeHidden();
 });
 
 test('gallery url state restores filters, lightbox, and job history tab', async ({ page }) => {

@@ -3,7 +3,7 @@
   import type { GenerateJobStatus } from '$lib/api/types';
   import { t } from '$lib/i18n';
   import { formatBeijingTime, operationLabel, stageLabel, statusLabel } from '$lib/utils/format';
-  import { isActiveJobStatus } from '$lib/utils/jobs';
+  import { isActiveJobStatus, isFailureJobStatus } from '$lib/utils/jobs';
   import { dialog } from '$lib/actions/dialog';
 
   type JobsTab = 'running' | 'history';
@@ -31,10 +31,17 @@
   let internalActiveTab: JobsTab = 'running';
   let historyScrollEl: HTMLDivElement | null = null;
   let historyLoadMoreRequest = false;
+  let expandedErrorIds = new Set<string>();
 
   $: if (!open && internalActiveTab !== 'running') internalActiveTab = 'running';
+  $: if (!open && expandedErrorIds.size) expandedErrorIds = new Set<string>();
   $: if (open && internalActiveTab !== activeTab) internalActiveTab = activeTab;
   $: if (open && internalActiveTab === 'history' && historyLoaded && historyHasMore && !historyLoading) void fillHistoryViewportIfNeeded();
+  $: if (expandedErrorIds.size) {
+    const currentIds = new Set(historyJobs.map((job) => job.job_id));
+    const nextIds = new Set([...expandedErrorIds].filter((jobId) => currentIds.has(jobId)));
+    if (nextIds.size !== expandedErrorIds.size) expandedErrorIds = nextIds;
+  }
 
   function selectTab(tab: JobsTab) {
     internalActiveTab = tab;
@@ -83,6 +90,28 @@
 
   function jobMeta(job: GenerateJobStatus) {
     return [job.model, job.size, job.api_preset_name].filter(Boolean).join(' / ');
+  }
+
+  function historyStageLabel(job: GenerateJobStatus, labels: Record<string, string>) {
+    if (!job.stage) return '';
+    if (!isFailureJobStatus(job.status)) return stageLabel(job, labels);
+    return labels[job.stage] || job.stage.replaceAll('_', ' ');
+  }
+
+  function jobErrorMessage(job: GenerateJobStatus) {
+    if (!isFailureJobStatus(job.status)) return '';
+    return (job.error || job.message || '').trim();
+  }
+
+  function isErrorExpanded(jobId: string) {
+    return expandedErrorIds.has(jobId);
+  }
+
+  function toggleError(jobId: string) {
+    const nextIds = new Set(expandedErrorIds);
+    if (nextIds.has(jobId)) nextIds.delete(jobId);
+    else nextIds.add(jobId);
+    expandedErrorIds = nextIds;
   }
 
   let visibleJobIds = new Set<string>();
@@ -190,7 +219,7 @@
                       <span class={`text-xs font-medium ${statusClass(job)}`}>{statusLabel(job.status, $t.statuses)}</span>
                     </div>
                     <p class="mt-2 line-clamp-2 text-sm text-zinc-200">{job.prompt || $t.common.untitledJob}</p>
-                    <p class="mt-1 truncate text-xs text-zinc-500">{stageLabel(job, $t.stages)}</p>
+                    <p class="mt-1 truncate text-xs text-zinc-500">{historyStageLabel(job, $t.stages)}</p>
                     <div class="mt-3 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-zinc-500">
                       {#if jobMeta(job)}
                         <span>{jobMeta(job)}</span>
@@ -200,6 +229,21 @@
                         <span>{$t.common.duration}: {job.duration}</span>
                       {/if}
                     </div>
+                    {#if jobErrorMessage(job)}
+                      <div class="mt-3">
+                        <button
+                          type="button"
+                          class="control-focus rounded-lg border border-red-500/35 px-3 py-2 text-xs font-medium text-red-200 hover:bg-red-500/10"
+                          aria-expanded={isErrorExpanded(job.job_id)}
+                          on:click={() => toggleError(job.job_id)}
+                        >
+                          {isErrorExpanded(job.job_id) ? $t.jobs.hideError : $t.jobs.showError}
+                        </button>
+                        {#if isErrorExpanded(job.job_id)}
+                          <pre class="mt-3 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-red-500/25 bg-red-950/20 p-3 text-xs leading-relaxed text-red-100">{jobErrorMessage(job)}</pre>
+                        {/if}
+                      </div>
+                    {/if}
                     <div class="mt-4 flex flex-wrap justify-end gap-2">
                       <button type="button" class="control-focus rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800" on:click={() => onUseJob(job)}>
                         {$t.jobs.useAsPrompt}

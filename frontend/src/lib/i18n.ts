@@ -106,6 +106,8 @@ const en = {
     historyLoading: 'Loading history...',
     useAsPrompt: 'Use as prompt',
     retry: 'Retry',
+    showError: 'Show error',
+    hideError: 'Hide error',
     retryUnavailable: 'Running jobs cannot be retried yet.',
     cancelSelected: 'Cancel Selected'
   },
@@ -484,6 +486,8 @@ const zh: TranslationSchema<typeof en> = {
     historyLoading: '正在加载历史...',
     useAsPrompt: '复用提示词',
     retry: '重试',
+    showError: '显示错误',
+    hideError: '隐藏错误',
     retryUnavailable: '运行中的任务暂不能重试。',
     cancelSelected: '取消所选任务'
   },
