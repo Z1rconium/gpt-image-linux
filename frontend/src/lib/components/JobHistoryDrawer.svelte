@@ -242,7 +242,13 @@
                     <p class="mt-2 line-clamp-2 text-sm text-zinc-200">{job.prompt || $t.common.untitledJob}</p>
                     <p class="mt-1 truncate text-xs text-zinc-500">{historyStageLabel(job, $t.stages)}</p>
                     {#if jobErrorMessage(job, $t.messages.jobFailed)}
-                      <p hidden={!isErrorExpanded(job.job_id)} class="mt-1 whitespace-pre-wrap break-words text-xs leading-relaxed text-red-300">{jobErrorMessage(job, $t.messages.jobFailed)}</p>
+                      <div
+                        class:hidden={!isErrorExpanded(job.job_id)}
+                        class="mt-2 rounded-lg border border-red-500/25 bg-red-950/30 px-3 py-2 text-xs leading-relaxed text-red-300"
+                        aria-hidden={!isErrorExpanded(job.job_id)}
+                      >
+                        {jobErrorMessage(job, $t.messages.jobFailed)}
+                      </div>
                     {/if}
                     <div class="mt-3 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-zinc-500">
                       {#if jobMeta(job)}
