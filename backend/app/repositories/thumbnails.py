@@ -123,20 +123,6 @@ def _write_thumbnail_from_path(
     return True
 
 
-def create_thumbnail(image_bytes: bytes, filename: str) -> str | None:
-    thumbnail_filename = thumbnail_filename_for_image(filename)
-    if not thumbnail_filename:
-        return None
-
-    thumbnail_path = safe_thumbnail_path(thumbnail_filename)
-    if not thumbnail_path:
-        return None
-
-    if not _write_thumbnail_file(image_bytes, filename, thumbnail_path):
-        return None
-    return thumbnail_filename
-
-
 def create_thumbnail_temp(image_bytes: bytes, filename: str) -> tuple[str, Path] | None:
     thumbnail_filename = thumbnail_filename_for_image(filename)
     if not thumbnail_filename:
@@ -213,11 +199,3 @@ def delete_thumbnail(filename: str):
     if thumbnail_path and thumbnail_path.is_file():
         thumbnail_path.unlink()
 
-
-def delete_all_thumbnails():
-    thumbnails_dir = Path(config.THUMBNAILS_DIR)
-    if not thumbnails_dir.exists():
-        return
-    for path in thumbnails_dir.iterdir():
-        if path.is_file() and path.suffix.lower() == THUMBNAIL_EXTENSION:
-            path.unlink()

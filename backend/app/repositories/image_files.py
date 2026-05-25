@@ -214,16 +214,6 @@ def safe_thumbnail_path(filename: str) -> Path | None:
     return _safe_path(filename, config.THUMBNAILS_DIR, {THUMBNAIL_EXTENSION})
 
 
-def save_image_to_disk(image_bytes: bytes, filename: str) -> Path:
-    validate_image_bytes(image_bytes, filename=filename)
-    path = safe_image_path(filename)
-    if not path:
-        raise ValueError(f"Invalid image filename: {filename}")
-    with open(path, "wb") as f:
-        f.write(image_bytes)
-    return path
-
-
 def save_image_to_temp(image_bytes: bytes, filename: str) -> Path:
     validate_image_bytes(image_bytes, filename=filename)
     path = safe_image_path(filename)
