@@ -99,6 +99,7 @@ const en = {
     historyTab: 'History',
     selectAll: 'Select All',
     refresh: 'Refresh',
+    clearHistory: 'Clear',
     errorsOnly: 'Errors only',
     noRunning: 'No running jobs',
     noRunningHint: 'Queued and running jobs will show here.',
@@ -270,7 +271,10 @@ const en = {
     deletePresetTitle: 'Delete preset?',
     deletePresetMessage: (name: string) => `Delete preset "${name}"?`,
     deleteSnippetTitle: 'Delete prompt snippet?',
-    deleteSnippetMessage: (name: string) => `Delete "${name}"?`
+    deleteSnippetMessage: (name: string) => `Delete "${name}"?`,
+    clearJobHistoryTitle: 'Clear all job history?',
+    clearJobHistoryMessage: 'This removes all finished generation/edit job records from local SQLite.',
+    clearJobHistoryDetail: 'Gallery images and queued/running jobs are not deleted.'
   },
   sizeDialog: {
     title: 'Image Size',
@@ -324,6 +328,7 @@ const en = {
     promptSnippetDeleted: 'Prompt snippet deleted',
     imageUrlCopied: 'Image URL copied',
     jobLoadedIntoPrompt: 'Job parameters loaded',
+    jobHistoryCleared: 'Job history cleared',
     editRetryNeedsSource: 'Choose an edit source before retrying this edit job',
     editSourceLimit: (max: number) => `At most ${max} edit source images are supported`,
     editSourceSomeSkipped: (max: number) => `Some selected files were skipped because the edit source limit is ${max}`,
@@ -482,6 +487,7 @@ const zh: TranslationSchema<typeof en> = {
     historyTab: '历史',
     selectAll: '全选',
     refresh: '刷新',
+    clearHistory: '清空',
     errorsOnly: '仅错误',
     noRunning: '没有运行中的任务',
     noRunningHint: '排队中和运行中的任务会显示在这里。',
@@ -653,7 +659,10 @@ const zh: TranslationSchema<typeof en> = {
     deletePresetTitle: '删除预设？',
     deletePresetMessage: (name) => `删除预设“${name}”？`,
     deleteSnippetTitle: '删除提示词片段？',
-    deleteSnippetMessage: (name) => `删除“${name}”？`
+    deleteSnippetMessage: (name) => `删除“${name}”？`,
+    clearJobHistoryTitle: '清空全部任务历史？',
+    clearJobHistoryMessage: '这会从本地 SQLite 删除全部已结束的生成/编辑任务记录。',
+    clearJobHistoryDetail: '图库图片和排队中/运行中的任务不会被删除。'
   },
   sizeDialog: {
     title: '图像尺寸',
@@ -707,6 +716,7 @@ const zh: TranslationSchema<typeof en> = {
     promptSnippetDeleted: '提示词片段已删除',
     imageUrlCopied: '图片链接已复制',
     jobLoadedIntoPrompt: '任务参数已回填',
+    jobHistoryCleared: '任务历史已清空',
     editRetryNeedsSource: '重试编辑任务前，请先选择编辑源图片',
     editSourceLimit: (max) => `最多支持 ${max} 张编辑源图片`,
     editSourceSomeSkipped: (max) => `部分已选文件被跳过，因为编辑源上限是 ${max} 张`,

@@ -120,6 +120,28 @@ function createJobsStore() {
     await loadJobHistory({ failedOnly });
   }
 
+  async function clearJobHistory() {
+    const seq = ++historyRequestSeq;
+    update((current) => ({
+      ...current,
+      historyLoading: true
+    }));
+    try {
+      await apiFetch('/api/generate/jobs/history', { method: 'DELETE' }, 'clearing job history');
+      if (seq !== historyRequestSeq) return;
+      update((current) => ({
+        ...current,
+        historyJobs: [],
+        historyLoaded: true,
+        historyHasMore: false,
+        historyLoading: false
+      }));
+    } catch (error) {
+      if (seq === historyRequestSeq) update((current) => ({ ...current, historyLoading: false }));
+      throw error;
+    }
+  }
+
   function startJobsPolling() {
     if (jobsPollingTimer) return;
     void loadJobs();
@@ -284,6 +306,7 @@ function createJobsStore() {
     loadMoreJobHistory,
     refreshHistoryIfLoaded,
     setHistoryFailedOnly,
+    clearJobHistory,
     startJobsEvents,
     toggleSelection,
     toggleAll,

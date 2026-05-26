@@ -63,6 +63,7 @@ __all__ = [
     "add_to_gallery_sync",
     "backfill_missing_gallery_bytes",
     "close_database_connections",
+    "clear_generate_job_history",
     "delete_all_gallery_images",
     "delete_gallery_image",
     "delete_gallery_images",
@@ -2253,6 +2254,21 @@ def list_generate_jobs(
             params.append(offset)
         rows = conn.execute(sql, params).fetchall()
     return [_generate_job_from_row(row) for row in rows]
+
+
+def clear_generate_job_history() -> int:
+    _ensure_database()
+    with _connect() as conn:
+        with _transaction(conn):
+            placeholders = ", ".join("?" for _ in ACTIVE_GENERATE_JOB_STATUSES)
+            cursor = conn.execute(
+                f"""
+                DELETE FROM generate_jobs
+                WHERE status NOT IN ({placeholders})
+                """,
+                tuple(sorted(ACTIVE_GENERATE_JOB_STATUSES)),
+            )
+            return cursor.rowcount
 
 
 def mark_active_generate_jobs_interrupted() -> int:

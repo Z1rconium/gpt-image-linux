@@ -632,6 +632,27 @@
     showToast($t.messages.jobLoadedIntoPrompt);
   }
 
+  async function clearJobHistory() {
+    const confirmed = await confirmStore.confirm({
+      title: $t.confirm.clearJobHistoryTitle,
+      message: $t.confirm.clearJobHistoryMessage,
+      details: [$t.confirm.clearJobHistoryDetail],
+      confirmLabel: $t.common.clear,
+      cancelLabel: $t.confirm.cancel,
+      closeLabel: $t.confirm.closeLabel,
+      variant: 'danger'
+    });
+    if (!confirmed) return;
+
+    try {
+      await jobsStore.clearJobHistory();
+      showToast($t.messages.jobHistoryCleared);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : $t.messages.requestFailed;
+      showToast(message || $t.messages.requestFailed, 'error');
+    }
+  }
+
   function retryJob(job: GenerateJobStatus) {
     form = jobToPromptForm(job, lastActivePresetDefaultModel);
     closeJobsDrawer();
@@ -761,6 +782,7 @@
   onRefreshHistory={jobsStore.loadJobHistory}
   onLoadMoreHistory={jobsStore.loadMoreJobHistory}
   onHistoryFailedOnlyChange={jobsStore.setHistoryFailedOnly}
+  onClearHistory={clearJobHistory}
   onToggle={jobsStore.toggleSelection}
   onToggleAll={jobsStore.toggleAll}
   onCancelSelected={jobsStore.cancelSelected}

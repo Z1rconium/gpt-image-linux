@@ -3503,6 +3503,35 @@ def test_generate_jobs_history_failed_only_filters_error_statuses(client):
     assert {job["job_id"] for job in resp.json()} == {"history-error", "history-upstream"}
 
 
+def test_clear_generate_jobs_history_deletes_only_terminal_jobs(client):
+    for job_id, status in [
+        ("history-success", "success"),
+        ("history-error", "error"),
+        ("active-running", "running"),
+    ]:
+        storage.upsert_generate_job(
+            {
+                "job_id": job_id,
+                "status": status,
+                "operation": "generation",
+                "prompt": job_id,
+                "size": "1024x1024",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-01T00:00:00+00:00",
+                "completed_at": "2026-01-01T00:00:00+00:00" if status != "running" else None,
+                "error": "failed" if status == "error" else None,
+            }
+        )
+
+    resp = client.delete("/api/generate/jobs/history")
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "success"
+    assert storage.get_generate_job("history-success") is None
+    assert storage.get_generate_job("history-error") is None
+    assert storage.get_generate_job("active-running") is not None
+
+
 def test_validation_422_and_global_500(tmp_path, monkeypatch):
     _configure_runtime(tmp_path)
     with TestClient(backend_main.app, raise_server_exceptions=False) as client:

@@ -113,6 +113,15 @@ async def stream_generate_jobs(request: Request):
     )
 
 
+@router.delete("/api/generate/jobs/history", response_model=MessageResponse)
+async def clear_generate_job_history():
+    deleted_count = await asyncio.to_thread(storage.clear_generate_job_history)
+    return MessageResponse(
+        status="success",
+        message=f"Deleted {deleted_count} job history entr{'y' if deleted_count == 1 else 'ies'}",
+    )
+
+
 @router.get("/api/generate/{job_id}", response_model=GenerateJobStatus)
 async def get_generate_job(job_id: str):
     job = app.state.generate_jobs.get(job_id) or await asyncio.to_thread(storage.get_generate_job, job_id)

@@ -24,6 +24,7 @@
   export let onRefreshHistory: () => MaybePromise = () => {};
   export let onLoadMoreHistory: () => MaybePromise = () => {};
   export let onHistoryFailedOnlyChange: (failedOnly: boolean) => MaybePromise = () => {};
+  export let onClearHistory: () => MaybePromise = () => {};
   export let onToggle: (jobId: string) => void = () => {};
   export let onToggleAll: () => void = () => {};
   export let onCancelSelected: () => MaybePromise = () => {};
@@ -191,6 +192,14 @@
               />
               <span>{$t.jobs.errorsOnly}</span>
             </label>
+            <button
+              type="button"
+              class="control-focus rounded-lg border border-red-500/40 px-3 py-2 text-xs font-medium text-red-200 hover:bg-red-500/10 disabled:cursor-not-allowed disabled:opacity-40"
+              disabled={historyLoading}
+              on:click={onClearHistory}
+            >
+              {$t.jobs.clearHistory}
+            </button>
           {/if}
           <button type="button" class="control-focus rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40" disabled={internalActiveTab === 'history' && historyLoading} on:click={refreshCurrentTab}>
             {$t.jobs.refresh}

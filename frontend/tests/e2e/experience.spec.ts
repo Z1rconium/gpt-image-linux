@@ -266,7 +266,7 @@ async function mockApi(page: Page, options: MockOptions = {}) {
   let promptSnippets = [...(options.promptSnippets ?? basePromptSnippets)];
   let promptSnippetCounter = promptSnippets.length + 1;
   const runningJobs = options.runningJobs ?? [];
-  const historyJobs = options.historyJobs ?? [job('history-1', 'saved prompt')];
+  let historyJobs = options.historyJobs ?? [job('history-1', 'saved prompt')];
 
   await page.addInitScript(() => {
     localStorage.setItem('gpt-image-panel-language', 'en');
@@ -431,6 +431,11 @@ async function mockApi(page: Page, options: MockOptions = {}) {
       const includeFinished = url.searchParams.get('include_finished') === 'true';
       const failedOnly = url.searchParams.get('failed_only') === 'true';
       await route.fulfill(json(includeFinished ? (failedOnly ? historyJobs.filter(isErrorJob) : historyJobs) : runningJobs));
+      return;
+    }
+    if (url.pathname === '/api/generate/jobs/history' && request.method() === 'DELETE') {
+      historyJobs = [];
+      await route.fulfill(json({ status: 'success', message: 'Deleted job history' }));
       return;
     }
     if (url.pathname === '/api/generate/jobs/events') {
@@ -778,6 +783,25 @@ test('job history shows detailed terminal statuses', async ({ page }) => {
   await jobsDrawer.getByLabel('Errors only').uncheck();
   await expect(jobsDrawer.getByText('cancelled prompt')).toBeVisible();
   await expect(jobsDrawer.getByText('interrupted prompt')).toBeVisible();
+});
+
+test('job history clear removes persisted history rows', async ({ page }) => {
+  await loadApp(page, {
+    historyJobs: [job('history-1', 'saved prompt'), job('history-2', 'another saved prompt')]
+  });
+
+  await page.getByRole('button', { name: 'Job History' }).click();
+  const jobsDrawer = page.getByRole('dialog', { name: 'Job History' });
+  await jobsDrawer.getByRole('button', { name: 'History', exact: true }).click();
+  await expect(jobsDrawer.getByText('saved prompt', { exact: true })).toBeVisible();
+
+  await jobsDrawer.getByRole('button', { name: 'Clear' }).click();
+  const confirmDialog = page.getByRole('dialog', { name: 'Clear all job history?' });
+  await expect(confirmDialog.getByText('local SQLite')).toBeVisible();
+  await confirmDialog.getByRole('button', { name: 'Clear' }).click();
+
+  await expect(jobsDrawer.getByText('No job history')).toBeVisible();
+  await expect(jobsDrawer.getByText('saved prompt', { exact: true })).toBeHidden();
 });
 
 test('gallery url state restores filters, lightbox, and job history tab', async ({ page }) => {
