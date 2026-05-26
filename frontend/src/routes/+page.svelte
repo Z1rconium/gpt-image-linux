@@ -346,6 +346,14 @@
     void settingsStore.checkPresetHealth(presetId);
   }
 
+  function loadPromptOptimizerSystemPrompt() {
+    return settingsStore.loadPromptOptimizerSystemPrompt();
+  }
+
+  function savePromptOptimizerSystemPrompt(systemPrompt: string) {
+    return settingsStore.savePromptOptimizerSystemPrompt(systemPrompt, showToast);
+  }
+
   function updatePreviewFromJob(job: GenerateJobStatus) {
     previewStore.setPreview(jobsStore.previewFromJob(job, $previewStore));
     if (job.status !== 'queued' && job.status !== 'running') {
@@ -763,6 +771,8 @@
   onActivate={activatePreset}
   onDelete={deletePreset}
   onHealthCheck={checkPresetHealth}
+  onLoadPromptOptimizerSystemPrompt={loadPromptOptimizerSystemPrompt}
+  onSavePromptOptimizerSystemPrompt={savePromptOptimizerSystemPrompt}
 />
 
 <PromptSnippetsDrawer

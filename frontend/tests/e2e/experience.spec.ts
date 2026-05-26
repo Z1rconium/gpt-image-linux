@@ -289,6 +289,7 @@ async function mockApi(page: Page, options: MockOptions = {}) {
   let promptSnippets = [...(options.promptSnippets ?? basePromptSnippets)];
   let promptSnippetCounter = promptSnippets.length + 1;
   let mockedSettings = cloneSettings(options.settings ?? settingsResponse);
+  let optimizerSystemPrompt = 'Default optimizer system prompt';
   const runningJobs = options.runningJobs ?? [];
   let historyJobs = options.historyJobs ?? [job('history-1', 'saved prompt')];
 
@@ -409,6 +410,28 @@ async function mockApi(page: Page, options: MockOptions = {}) {
           optimized_prompt: `Optimized ${body.prompt}`,
           model: 'gpt-4o-mini',
           duration_ms: 12
+        })
+      );
+      return;
+    }
+    if (url.pathname === '/api/prompt/optimizer-system-prompt' && request.method() === 'GET') {
+      await route.fulfill(
+        json({
+          system_prompt: optimizerSystemPrompt,
+          default_system_prompt: 'Default optimizer system prompt',
+          customized: optimizerSystemPrompt !== 'Default optimizer system prompt'
+        })
+      );
+      return;
+    }
+    if (url.pathname === '/api/prompt/optimizer-system-prompt' && request.method() === 'POST') {
+      const body = JSON.parse(request.postData() || '{}');
+      optimizerSystemPrompt = String(body.system_prompt || '').trim();
+      await route.fulfill(
+        json({
+          system_prompt: optimizerSystemPrompt,
+          default_system_prompt: 'Default optimizer system prompt',
+          customized: true
         })
       );
       return;
@@ -574,6 +597,29 @@ test('settings drawer traps focus and key form controls have accessible names', 
 
   await page.keyboard.press('Escape');
   await expect(drawer).toBeHidden();
+});
+
+test('settings drawer edits the prompt optimizer system prompt', async ({ page }) => {
+  await loadApp(page);
+
+  await page.getByRole('button', { name: 'Settings' }).click();
+  const drawer = page.getByRole('dialog', { name: 'Settings' });
+  await drawer.getByRole('button', { name: 'Edit System Prompt' }).click();
+
+  const editor = page.getByRole('dialog', { name: 'Prompt Optimizer System Prompt' });
+  await expect(editor).toBeVisible();
+  const prompt = editor.getByRole('textbox', { name: 'System prompt' });
+  await expect(prompt).toHaveValue('Default optimizer system prompt');
+
+  await prompt.fill('Custom optimizer system prompt');
+  const saveRequest = page.waitForRequest(
+    (request) => new URL(request.url()).pathname === '/api/prompt/optimizer-system-prompt' && request.method() === 'POST'
+  );
+  await editor.getByRole('button', { name: 'Save' }).click();
+  const request = await saveRequest;
+  expect(request.postDataJSON()).toEqual({ system_prompt: 'Custom optimizer system prompt' });
+  await expect(page.getByRole('status')).toContainText('Prompt Optimizer system prompt saved');
+  await expect(editor).toBeHidden();
 });
 
 test('active preset response format default is applied to prompt form', async ({ page }) => {

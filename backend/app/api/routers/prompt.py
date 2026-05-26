@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 from fastapi import APIRouter, HTTPException
@@ -8,15 +9,58 @@ from ..presets import (
 )
 from ...integrations.prompt_optimizer_client import (
     OptimizerTimeoutError,
+    PROMPT_OPTIMIZER_SYSTEM_PROMPT,
     UpstreamOptimizerError,
+    has_custom_prompt_optimizer_system_prompt,
+    load_prompt_optimizer_system_prompt,
     optimize_prompt,
+    save_prompt_optimizer_system_prompt,
     validate_optimizer_endpoint,
 )
-from ...schemas.models import PromptOptimizeRequest, PromptOptimizeResponse
+from ...schemas.models import (
+    PromptOptimizeRequest,
+    PromptOptimizeResponse,
+    PromptOptimizerSystemPromptRequest,
+    PromptOptimizerSystemPromptResponse,
+)
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _system_prompt_response(system_prompt: str) -> PromptOptimizerSystemPromptResponse:
+    return PromptOptimizerSystemPromptResponse(
+        system_prompt=system_prompt,
+        default_system_prompt=PROMPT_OPTIMIZER_SYSTEM_PROMPT,
+        customized=has_custom_prompt_optimizer_system_prompt(),
+    )
+
+
+@router.get(
+    "/api/prompt/optimizer-system-prompt",
+    response_model=PromptOptimizerSystemPromptResponse,
+)
+async def get_prompt_optimizer_system_prompt():
+    system_prompt = await asyncio.to_thread(load_prompt_optimizer_system_prompt)
+    return _system_prompt_response(system_prompt)
+
+
+@router.post(
+    "/api/prompt/optimizer-system-prompt",
+    response_model=PromptOptimizerSystemPromptResponse,
+)
+async def update_prompt_optimizer_system_prompt(
+    req: PromptOptimizerSystemPromptRequest,
+):
+    try:
+        system_prompt = await asyncio.to_thread(
+            save_prompt_optimizer_system_prompt,
+            req.system_prompt,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return _system_prompt_response(system_prompt)
 
 
 @router.post("/api/prompt/optimize", response_model=PromptOptimizeResponse)
@@ -52,6 +96,7 @@ async def optimize_prompt_endpoint(req: PromptOptimizeRequest):
             image_model=req.model,
             size=req.size,
             quality=req.quality,
+            system_prompt=await asyncio.to_thread(load_prompt_optimizer_system_prompt),
         )
     except OptimizerTimeoutError as e:
         raise HTTPException(status_code=504, detail=str(e)) from e

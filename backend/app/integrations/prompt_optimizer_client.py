@@ -1,7 +1,10 @@
 import asyncio
 import logging
+import os
 import re
+import tempfile
 import time
+from pathlib import Path
 from urllib.parse import urlsplit
 
 import aiohttp
@@ -45,6 +48,8 @@ Take the user's short image description and rewrite it into a detailed, high-qua
 - If Target language is "zh-CN", output in Simplified Chinese (简体中文).
 """
 
+PROMPT_OPTIMIZER_SYSTEM_PROMPT_FILENAME = "prompt_optimizer_system_prompt.md"
+PROMPT_OPTIMIZER_SYSTEM_PROMPT_MAX_CHARS = 20000
 _MARKDOWN_FENCE_RE = re.compile(r"^```[a-z]*\n|\n```$", re.MULTILINE)
 
 
@@ -64,6 +69,62 @@ def _clean_output(text: str, max_chars: int) -> str:
     if len(cleaned) > max_chars:
         cleaned = cleaned[:max_chars]
     return cleaned
+
+
+def prompt_optimizer_system_prompt_path() -> Path:
+    return Path(config.DATA_DIR) / PROMPT_OPTIMIZER_SYSTEM_PROMPT_FILENAME
+
+
+def has_custom_prompt_optimizer_system_prompt() -> bool:
+    return prompt_optimizer_system_prompt_path().is_file()
+
+
+def _normalize_system_prompt(system_prompt: str) -> str:
+    normalized = system_prompt.replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not normalized:
+        raise ValueError("Prompt optimizer system prompt must not be empty")
+    if len(normalized) > PROMPT_OPTIMIZER_SYSTEM_PROMPT_MAX_CHARS:
+        raise ValueError(
+            f"Prompt optimizer system prompt must be at most {PROMPT_OPTIMIZER_SYSTEM_PROMPT_MAX_CHARS} characters"
+        )
+    return normalized
+
+
+def load_prompt_optimizer_system_prompt() -> str:
+    path = prompt_optimizer_system_prompt_path()
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return PROMPT_OPTIMIZER_SYSTEM_PROMPT
+
+    try:
+        return _normalize_system_prompt(raw)
+    except ValueError:
+        return PROMPT_OPTIMIZER_SYSTEM_PROMPT
+
+
+def save_prompt_optimizer_system_prompt(system_prompt: str) -> str:
+    normalized = _normalize_system_prompt(system_prompt)
+    path = prompt_optimizer_system_prompt_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=str(path.parent),
+        text=True,
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as file:
+            file.write(normalized)
+            file.write("\n")
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
+
+    return normalized
 
 
 def validate_optimizer_endpoint(api_url: str) -> None:
@@ -114,6 +175,7 @@ async def optimize_prompt(
     image_model: str | None = None,
     size: str | None = None,
     quality: str | None = None,
+    system_prompt: str | None = None,
     timeout_seconds: float | None = None,
     max_output_chars: int | None = None,
 ) -> tuple[str, str, int]:
@@ -131,7 +193,14 @@ async def optimize_prompt(
     payload = {
         "model": model,
         "messages": [
-            {"role": "system", "content": PROMPT_OPTIMIZER_SYSTEM_PROMPT},
+            {
+                "role": "system",
+                "content": (
+                    _normalize_system_prompt(system_prompt)
+                    if system_prompt is not None
+                    else PROMPT_OPTIMIZER_SYSTEM_PROMPT
+                ),
+            },
             {
                 "role": "user",
                 "content": _build_user_prompt(

@@ -53,6 +53,12 @@ export type PromptOptimizerSettingsInput = {
   api_key?: string | null;
 };
 
+export type PromptOptimizerSystemPromptResponse = {
+  system_prompt: string;
+  default_system_prompt: string;
+  customized: boolean;
+};
+
 export type SettingsInput = {
   active_preset_id?: string | null;
   preset_name?: string | null;

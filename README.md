@@ -257,18 +257,19 @@ curl http://localhost:9090/health
 10. optionally enter a global SOCKS5 proxy such as `socks5://127.0.0.1:1080`
 11. optionally enter a global Webhook URL for completed generation/edit jobs
 12. optionally configure Prompt Optimizer with an endpoint URL, model, and API key/env ref
-13. optionally run Health check for the saved preset
-14. click Save Preset
-15. enter a prompt
-16. click Prompt Helper tags to append common modifiers
-17. click Optimize to rewrite the prompt through the server-side optimizer
-18. open Prompts in the header to save or reuse prompt snippets; using a snippet replaces the current prompt
-19. choose generation options, including API path for per-request upstream routing
-20. click Generate
-21. optionally upload one or more edit reference images, pick "Edit this image" in Gallery/Lightbox, or combine both; uploads append to the current edit sources and Clear removes all edit sources
-22. click Edits to run image-to-image
-23. use Gallery/Lightbox "Use prompt" or "Use all" to reuse historical prompt text or full parameters
-24. view preview and gallery
+13. optionally click Edit System Prompt in the Prompt Optimizer settings to edit the optimizer system prompt stored at `DATA_DIR/prompt_optimizer_system_prompt.md`
+14. optionally run Health check for the saved preset
+15. click Save Preset
+16. enter a prompt
+17. click Prompt Helper tags to append common modifiers
+18. click Optimize to rewrite the prompt through the server-side optimizer
+19. open Prompts in the header to save or reuse prompt snippets; using a snippet replaces the current prompt
+20. choose generation options, including API path for per-request upstream routing
+21. click Generate
+22. optionally upload one or more edit reference images, pick "Edit this image" in Gallery/Lightbox, or combine both; uploads append to the current edit sources and Clear removes all edit sources
+23. click Edits to run image-to-image
+24. use Gallery/Lightbox "Use prompt" or "Use all" to reuse historical prompt text or full parameters
+25. view preview and gallery
 
 ## API paths
 
@@ -410,6 +411,8 @@ The panel supports these upstream paths. The API base URL may either omit or inc
 | `POST` | `/api/settings` | Save the active API preset |
 | `GET` | `/api/settings` | Get current settings and presets |
 | `POST` | `/api/prompt/optimize` | Rewrite a prompt through the server-side optimizer |
+| `GET` | `/api/prompt/optimizer-system-prompt` | Read the Prompt Optimizer system prompt, falling back to the built-in default |
+| `POST` | `/api/prompt/optimizer-system-prompt` | Save the Prompt Optimizer system prompt to `DATA_DIR/prompt_optimizer_system_prompt.md` |
 | `GET` | `/api/prompt-snippets` | List prompt snippets, optionally filtered by `query` |
 | `POST` | `/api/prompt-snippets` | Create a prompt snippet |
 | `PATCH` | `/api/prompt-snippets/{snippet_id}` | Update a prompt snippet title, prompt, or favorite flag |
@@ -451,7 +454,7 @@ The panel supports these upstream paths. The API base URL may either omit or inc
 - SQLite repository operations use short-lived connections with WAL enabled at startup; app shutdown and tests call the storage close hook so connection lifecycle stays explicit
 - generation and edit share one queue (`MAX_ACTIVE_GENERATE_JOBS` + `MAX_QUEUED_GENERATE_JOBS`), all edit source images are staged under `DATA_DIR/edit-sources` and additionally capped by `MAX_PENDING_EDIT_SOURCE_MB`, support cancellation, and persist terminal history including `completed_at`
 - batch generation (`n > 1`) consumes one public queue/running slot; the parent job aggregates successful child results into `images[]`, while Gallery metadata keeps the user-requested `n`
-- Prompt Optimizer uses its own server-side Chat Completions-compatible endpoint config, resolves API key env refs on the backend, and does not consume generation/edit queue capacity.
+- Prompt Optimizer uses its own server-side Chat Completions-compatible endpoint config, resolves API key env refs on the backend, stores its editable system prompt in `DATA_DIR/prompt_optimizer_system_prompt.md`, and does not consume generation/edit queue capacity.
 - SSE is the primary progress channel; `/api/generate/jobs` provides list/history (`include_finished=true`, optional `limit`/`offset`, optional `failed_only=true`), `/api/generate/jobs/history` clears terminal history, and `/api/generate/jobs/events` streams debounced live job-list changes from memory
 - terminal job history includes `stage_timings` for `upstream_wait`, `download_decode`, `validate`, `thumbnail`, and `db_insert`; slow gallery queries are logged with query filters and totals and counted in metrics; optional metrics include queue depth, running jobs, failure ratios, job-stage latencies, and slow SQLite query counters; terminal job statuses distinguish `cancelled`, `interrupted`, and `upstream_error` in addition to the generic `error`
 - upstream JSON/SSE bodies are read with a `MAX_UPSTREAM_JSON_MB` cap before parsing, and upstream image URL downloads are revalidated (SSRF-aware, no blind redirect follow) and bounded by `MAX_FILE_SIZE_MB`

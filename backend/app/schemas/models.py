@@ -191,6 +191,23 @@ class PromptOptimizerSettingsRequest(BaseModel):
     api_key: Optional[str] = None
 
 
+class PromptOptimizerSystemPromptResponse(BaseModel):
+    system_prompt: str
+    default_system_prompt: str
+    customized: bool = False
+
+
+class PromptOptimizerSystemPromptRequest(BaseModel):
+    system_prompt: str = Field(..., min_length=1, max_length=20000)
+
+    @field_validator("system_prompt")
+    @classmethod
+    def validate_system_prompt(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("system_prompt must not be empty")
+        return value
+
+
 class PromptOptimizeRequest(BaseModel):
     prompt: str = Field(..., min_length=1, max_length=4000)
     target_language: Literal["en", "zh-CN", "same"] = "en"

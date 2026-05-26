@@ -1,6 +1,15 @@
 <script lang="ts">
   import { t } from '$lib/i18n';
-  import type { ApiPath, ApiPreset, PresetHealthResponse, PresetHealthStatus, ResponseFormatDefault, SettingsInput, SettingsResponse } from '$lib/api/types';
+  import type {
+    ApiPath,
+    ApiPreset,
+    PresetHealthResponse,
+    PresetHealthStatus,
+    PromptOptimizerSystemPromptResponse,
+    ResponseFormatDefault,
+    SettingsInput,
+    SettingsResponse
+  } from '$lib/api/types';
   import { dialog } from '$lib/actions/dialog';
   import { RESPONSE_FORMAT_OPTIONS, normalizeResponseFormat } from '$lib/utils/promptForm';
 
@@ -17,6 +26,18 @@
   export let onActivate: (presetId: string) => Promise<void> | void = () => {};
   export let onDelete: (presetId: string) => Promise<void> | void = () => {};
   export let onHealthCheck: (presetId: string) => Promise<void> | void = () => {};
+  export let onLoadPromptOptimizerSystemPrompt: () => Promise<PromptOptimizerSystemPromptResponse> = async () => ({
+    system_prompt: '',
+    default_system_prompt: '',
+    customized: false
+  });
+  export let onSavePromptOptimizerSystemPrompt: (systemPrompt: string) => Promise<PromptOptimizerSystemPromptResponse> = async (
+    systemPrompt
+  ) => ({
+    system_prompt: systemPrompt,
+    default_system_prompt: '',
+    customized: true
+  });
 
   let activePresetId = '';
   let presetName = '';
@@ -34,6 +55,11 @@
   let promptOptimizerModel = 'gpt-4o-mini';
   let promptOptimizerApiKey = '';
   let promptOptimizerApiKeyInputType = 'password';
+  let systemPromptOpen = false;
+  let systemPromptLoading = false;
+  let systemPromptSaving = false;
+  let systemPromptText = '';
+  let systemPromptError = '';
 
   $: activePreset = settings?.presets.find((preset) => preset.id === settings.active_preset_id) || settings?.presets[0] || null;
   $: if (settings && activePreset) {
@@ -63,6 +89,10 @@
   }
   $: apiKeyInputType = apiKey.trim().startsWith('${') && apiKey.trim().endsWith('}') ? 'text' : 'password';
   $: promptOptimizerApiKeyInputType = promptOptimizerApiKey.trim().startsWith('${') && promptOptimizerApiKey.trim().endsWith('}') ? 'text' : 'password';
+  $: if (!open && systemPromptOpen) {
+    systemPromptOpen = false;
+    systemPromptError = '';
+  }
 
   async function save() {
     const proxyValue = upstreamSocks5Proxy.trim();
@@ -126,6 +156,45 @@
     if (status === 'ok') return 'border-emerald-500/40 text-emerald-300';
     if (status === 'warning') return 'border-amber-500/40 text-amber-300';
     return 'border-red-500/40 text-red-300';
+  }
+
+  async function openSystemPromptEditor() {
+    systemPromptOpen = true;
+    systemPromptLoading = true;
+    systemPromptError = '';
+    try {
+      const response = await onLoadPromptOptimizerSystemPrompt();
+      systemPromptText = response.system_prompt;
+    } catch (error) {
+      systemPromptError = error instanceof Error ? error.message : $t.messages.requestFailed;
+    } finally {
+      systemPromptLoading = false;
+    }
+  }
+
+  function closeSystemPromptEditor() {
+    if (systemPromptSaving) return;
+    systemPromptOpen = false;
+    systemPromptError = '';
+  }
+
+  async function saveSystemPrompt() {
+    const nextSystemPrompt = systemPromptText.trim();
+    if (!nextSystemPrompt) {
+      systemPromptError = $t.settings.systemPromptRequired;
+      return;
+    }
+    systemPromptSaving = true;
+    systemPromptError = '';
+    try {
+      const response = await onSavePromptOptimizerSystemPrompt(nextSystemPrompt);
+      systemPromptText = response.system_prompt;
+      systemPromptOpen = false;
+    } catch (error) {
+      systemPromptError = error instanceof Error ? error.message : $t.messages.requestFailed;
+    } finally {
+      systemPromptSaving = false;
+    }
   }
 </script>
 
@@ -261,6 +330,13 @@
                 <input bind:value={promptOptimizerApiKey} type={promptOptimizerApiKeyInputType} class="control-focus w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2.5 font-mono text-sm text-zinc-100 focus:border-emerald-500" />
                 <span class="mt-1.5 block text-xs text-zinc-500">{$t.settings.apiKeyHint}</span>
               </label>
+              <button
+                type="button"
+                class="control-focus w-full rounded-lg border border-zinc-700 px-3 py-2.5 text-sm font-semibold text-zinc-200 transition-colors hover:border-zinc-600 hover:bg-zinc-800"
+                on:click={openSystemPromptEditor}
+              >
+                {$t.settings.editSystemPrompt}
+              </button>
             </div>
           </section>
         </div>
@@ -310,5 +386,59 @@
         </div>
       </div>
     </aside>
+
+    {#if systemPromptOpen}
+      <div class="fixed inset-0 z-[70] flex items-center justify-center bg-black/70 p-4">
+        <button class="absolute inset-0" type="button" tabindex="-1" aria-label={$t.settings.closeSystemPromptEditor} on:click={closeSystemPromptEditor}></button>
+        <div
+          class="fade-in relative flex max-h-[88vh] w-full max-w-3xl flex-col rounded-xl border border-zinc-800 bg-zinc-900 shadow-2xl"
+          aria-labelledby="system-prompt-dialog-title"
+          use:dialog={{ open: systemPromptOpen, onClose: closeSystemPromptEditor }}
+        >
+          <div class="flex items-start justify-between gap-4 border-b border-zinc-800 p-5">
+            <div class="min-w-0">
+              <h2 id="system-prompt-dialog-title" class="text-base font-semibold text-zinc-100">{$t.settings.systemPromptTitle}</h2>
+              <p class="mt-1 text-xs leading-5 text-zinc-500">{$t.settings.systemPromptHint}</p>
+            </div>
+            <button type="button" class="control-focus rounded-lg p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100" aria-label={$t.settings.closeSystemPromptEditor} on:click={closeSystemPromptEditor}>
+              x
+            </button>
+          </div>
+
+          <div class="min-h-0 flex-1 overflow-y-auto p-5">
+            {#if systemPromptLoading}
+              <div class="rounded-lg border border-zinc-800 bg-zinc-950/60 p-4 text-sm text-zinc-400">{$t.settings.systemPromptLoading}</div>
+            {:else}
+              <label class="block">
+                <span class="mb-2 block text-xs font-medium text-zinc-400">{$t.settings.systemPromptLabel}</span>
+                <textarea
+                  bind:value={systemPromptText}
+                  class="control-focus min-h-[420px] w-full resize-y rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-3 font-mono text-xs leading-5 text-zinc-100 focus:border-emerald-500"
+                  spellcheck="false"
+                  data-autofocus
+                ></textarea>
+              </label>
+            {/if}
+            {#if systemPromptError}
+              <div class="mt-3 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-200">{systemPromptError}</div>
+            {/if}
+          </div>
+
+          <div class="flex justify-end gap-3 border-t border-zinc-800 p-5">
+            <button type="button" class="control-focus rounded-lg border border-zinc-700 px-4 py-2 text-sm text-zinc-300 hover:bg-zinc-800" on:click={closeSystemPromptEditor}>
+              {$t.common.close}
+            </button>
+            <button
+              type="button"
+              disabled={systemPromptLoading || systemPromptSaving}
+              class="control-focus rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
+              on:click={saveSystemPrompt}
+            >
+              {systemPromptSaving ? $t.settings.systemPromptSaving : $t.settings.systemPromptSave}
+            </button>
+          </div>
+        </div>
+      </div>
+    {/if}
   </div>
 {/if}

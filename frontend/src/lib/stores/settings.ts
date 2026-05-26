@@ -2,7 +2,7 @@ import { derived, get, writable } from 'svelte/store';
 import { apiFetch } from '$lib/api/client';
 import { t } from '$lib/i18n';
 import { confirmStore } from '$lib/stores/confirm';
-import type { PresetHealthResponse, SettingsInput, SettingsResponse } from '$lib/api/types';
+import type { PresetHealthResponse, PromptOptimizerSystemPromptResponse, SettingsInput, SettingsResponse } from '$lib/api/types';
 import type { ToastVariant } from '$lib/stores/ui';
 
 type ShowToast = (message: string, variant?: ToastVariant) => void;
@@ -122,6 +122,28 @@ function createSettingsStore() {
     }
   }
 
+  async function loadPromptOptimizerSystemPrompt() {
+    return apiFetch<PromptOptimizerSystemPromptResponse>(
+      '/api/prompt/optimizer-system-prompt',
+      {},
+      'loading prompt optimizer system prompt'
+    );
+  }
+
+  async function savePromptOptimizerSystemPrompt(systemPrompt: string, showToast: ShowToast) {
+    const response = await apiFetch<PromptOptimizerSystemPromptResponse>(
+      '/api/prompt/optimizer-system-prompt',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ system_prompt: systemPrompt })
+      },
+      'saving prompt optimizer system prompt'
+    );
+    showToast(get(t).messages.promptOptimizerSystemPromptSaved);
+    return response;
+  }
+
   return {
     subscribe,
     loadSettings,
@@ -129,7 +151,9 @@ function createSettingsStore() {
     createPreset,
     activatePreset,
     deletePreset,
-    checkPresetHealth
+    checkPresetHealth,
+    loadPromptOptimizerSystemPrompt,
+    savePromptOptimizerSystemPrompt
   };
 }
 

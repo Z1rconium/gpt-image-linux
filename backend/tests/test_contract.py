@@ -1054,6 +1054,44 @@ def test_prompt_optimizer_settings_mask_preserve_and_clear(client):
     assert storage.load_prompt_optimizer_settings()["api_key"] == ""
 
 
+def test_prompt_optimizer_system_prompt_file_roundtrip(client):
+    from backend.app.integrations.prompt_optimizer_client import (
+        PROMPT_OPTIMIZER_SYSTEM_PROMPT,
+        load_prompt_optimizer_system_prompt,
+        prompt_optimizer_system_prompt_path,
+    )
+
+    initial = client.get("/api/prompt/optimizer-system-prompt")
+
+    assert initial.status_code == 200
+    assert initial.json() == {
+        "system_prompt": PROMPT_OPTIMIZER_SYSTEM_PROMPT,
+        "default_system_prompt": PROMPT_OPTIMIZER_SYSTEM_PROMPT,
+        "customized": False,
+    }
+
+    updated = client.post(
+        "/api/prompt/optimizer-system-prompt",
+        json={"system_prompt": "  Custom optimizer prompt\n"},
+    )
+
+    assert updated.status_code == 200
+    assert updated.json()["system_prompt"] == "Custom optimizer prompt"
+    assert updated.json()["customized"] is True
+    assert (
+        prompt_optimizer_system_prompt_path().read_text(encoding="utf-8")
+        == "Custom optimizer prompt\n"
+    )
+    assert load_prompt_optimizer_system_prompt() == "Custom optimizer prompt"
+
+    empty = client.post(
+        "/api/prompt/optimizer-system-prompt",
+        json={"system_prompt": "   "},
+    )
+    assert empty.status_code == 422
+    assert load_prompt_optimizer_system_prompt() == "Custom optimizer prompt"
+
+
 def test_prompt_optimize_disabled_returns_400(client):
     resp = client.post("/api/prompt/optimize", json={"prompt": "tiny robot"})
 
@@ -1079,6 +1117,11 @@ def test_prompt_optimize_success_uses_configured_upstream(client, monkeypatch):
         ),
     )
     assert configured.status_code == 200
+    custom_system_prompt = client.post(
+        "/api/prompt/optimizer-system-prompt",
+        json={"system_prompt": "Custom optimizer prompt"},
+    )
+    assert custom_system_prompt.status_code == 200
     seen: dict[str, object] = {}
 
     async def fake_optimize_prompt(**kwargs):
@@ -1109,6 +1152,7 @@ def test_prompt_optimize_success_uses_configured_upstream(client, monkeypatch):
     assert seen["api_key"] == "optimizer-key"
     assert seen["model"] == "prompt-model"
     assert seen["image_api_path"] == "/v1/responses"
+    assert seen["system_prompt"] == "Custom optimizer prompt"
 
 
 def test_prompt_optimize_upstream_error_and_timeout(client, monkeypatch):
