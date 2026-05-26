@@ -15,7 +15,7 @@
   export let onSave: (body: SettingsInput) => Promise<void> | void = () => {};
   export let onCreate: () => Promise<void> | void = () => {};
   export let onActivate: (presetId: string) => Promise<void> | void = () => {};
-  export let onDelete: () => Promise<void> | void = () => {};
+  export let onDelete: (presetId: string) => Promise<void> | void = () => {};
   export let onHealthCheck: (presetId: string) => Promise<void> | void = () => {};
 
   let activePresetId = '';
@@ -28,6 +28,7 @@
   let upstreamSocks5Proxy = '';
   let webhookUrl = '';
   let apiKeyInputType = 'password';
+  let activatingPresetId = '';
   let promptOptimizerEnabled = false;
   let promptOptimizerApiUrl = '';
   let promptOptimizerModel = 'gpt-4o-mini';
@@ -94,6 +95,16 @@
     return preset.has_api_key ? preset.api_key_masked : $t.common.noKey;
   }
 
+  async function activateSelectedPreset(presetId: string) {
+    if (!presetId || presetId === settings?.active_preset_id || activatingPresetId) return;
+    activatingPresetId = presetId;
+    try {
+      await onActivate(presetId);
+    } finally {
+      activatingPresetId = '';
+    }
+  }
+
   async function checkHealth() {
     if (!activePresetId) return;
     await onHealthCheck(activePresetId);
@@ -143,9 +154,9 @@
             </button>
             <button
               type="button"
-              disabled={!settings || settings.presets.length <= 1}
+              disabled={!settings || settings.presets.length <= 1 || !activePresetId || Boolean(activatingPresetId)}
               class="control-focus rounded-lg border border-zinc-700 px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40"
-              on:click={onDelete}
+              on:click={() => onDelete(activePresetId)}
             >
               {$t.settings.deletePreset}
             </button>
@@ -161,7 +172,7 @@
                   ? 'border-emerald-500/70 bg-emerald-500/10 text-zinc-100'
                   : 'border-zinc-800 bg-zinc-950/40 text-zinc-300 hover:border-zinc-700 hover:bg-zinc-800/70'
               }`}
-              on:click={() => onActivate(preset.id)}
+              on:click={() => activateSelectedPreset(preset.id)}
             >
               <div class="flex items-start justify-between gap-3">
                 <div class="min-w-0">
@@ -169,7 +180,7 @@
                   <div class="mt-1 truncate font-mono text-xs text-zinc-500">{preset.api_url || $t.common.noApiUrl}</div>
                 </div>
                 <span class="shrink-0 rounded-md border border-zinc-700 px-2 py-0.5 text-[11px] font-medium text-zinc-500">
-                  {preset.id === settings?.active_preset_id ? $t.common.active : $t.common.switch}
+                  {activatingPresetId === preset.id ? $t.settings.switchingPreset : preset.id === settings?.active_preset_id ? $t.common.active : $t.common.switch}
                 </span>
               </div>
               <div class="mt-2 flex items-center justify-between gap-3 text-xs text-zinc-500">

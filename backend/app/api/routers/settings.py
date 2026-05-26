@@ -161,11 +161,14 @@ async def delete_settings_preset(preset_id: str):
     if delete_index is None:
         raise HTTPException(status_code=404, detail="Preset not found")
 
-    deleting_active = get_active_preset()["id"] == preset_id
+    active_preset_id = getattr(app.state, "active_preset_id", presets[0]["id"])
     presets.pop(delete_index)
-    if deleting_active:
+    app.state.api_presets = presets
+    if not any(preset["id"] == active_preset_id for preset in presets):
         fallback = presets[min(delete_index, len(presets) - 1)]
         apply_api_preset(fallback)
+    else:
+        app.state.active_preset_id = active_preset_id
 
     await asyncio.to_thread(persist_api_settings)
 

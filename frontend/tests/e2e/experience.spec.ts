@@ -253,6 +253,26 @@ function isErrorJob(candidate: unknown) {
   return status === 'error' || status === 'upstream_error';
 }
 
+function cloneSettings(settings: Record<string, unknown>) {
+  return structuredClone(settings) as typeof settingsResponse;
+}
+
+function applyActivePresetFields(settings: typeof settingsResponse) {
+  const active = settings.presets.find((preset) => preset.id === settings.active_preset_id) || settings.presets[0];
+  if (!active) return settings;
+  return {
+    ...settings,
+    active_preset_id: active.id,
+    api_url: active.api_url,
+    api_key_masked: active.api_key_masked,
+    has_api_key: active.has_api_key,
+    api_key_source: active.api_key_source,
+    api_path: active.api_path,
+    default_model: active.default_model,
+    default_response_format: active.default_response_format
+  };
+}
+
 function manyGalleryImages(count: number) {
   return Array.from({ length: count }, (_, index) => ({
     ...baseGalleryImages[index % baseGalleryImages.length],
@@ -268,7 +288,7 @@ async function mockApi(page: Page, options: MockOptions = {}) {
   let galleryImages = [...(options.galleryImages ?? baseGalleryImages)];
   let promptSnippets = [...(options.promptSnippets ?? basePromptSnippets)];
   let promptSnippetCounter = promptSnippets.length + 1;
-  const mockedSettings = options.settings ?? settingsResponse;
+  let mockedSettings = cloneSettings(options.settings ?? settingsResponse);
   const runningJobs = options.runningJobs ?? [];
   let historyJobs = options.historyJobs ?? [job('history-1', 'saved prompt')];
 
@@ -299,6 +319,40 @@ async function mockApi(page: Page, options: MockOptions = {}) {
       return;
     }
     if (url.pathname === '/api/settings') {
+      await route.fulfill(json(mockedSettings));
+      return;
+    }
+    if (url.pathname.match(/^\/api\/settings\/presets\/[^/]+\/activate$/) && request.method() === 'POST') {
+      const id = decodeURIComponent(url.pathname.split('/').at(-2) || '');
+      if (!mockedSettings.presets.some((preset) => preset.id === id)) {
+        await route.fulfill(json({ detail: 'Preset not found' }, 404));
+        return;
+      }
+      mockedSettings = applyActivePresetFields({ ...mockedSettings, active_preset_id: id });
+      await route.fulfill(json(mockedSettings));
+      return;
+    }
+    if (url.pathname.match(/^\/api\/settings\/presets\/[^/]+$/) && request.method() === 'DELETE') {
+      const id = decodeURIComponent(url.pathname.split('/').pop() || '');
+      if (mockedSettings.presets.length <= 1) {
+        await route.fulfill(json({ detail: 'At least one preset is required' }, 400));
+        return;
+      }
+      const deleteIndex = mockedSettings.presets.findIndex((preset) => preset.id === id);
+      if (deleteIndex < 0) {
+        await route.fulfill(json({ detail: 'Preset not found' }, 404));
+        return;
+      }
+      const nextPresets = mockedSettings.presets.filter((preset) => preset.id !== id);
+      const nextActiveId =
+        mockedSettings.active_preset_id === id
+          ? nextPresets[Math.min(deleteIndex, nextPresets.length - 1)].id
+          : mockedSettings.active_preset_id;
+      mockedSettings = applyActivePresetFields({
+        ...mockedSettings,
+        active_preset_id: nextActiveId,
+        presets: nextPresets
+      });
       await route.fulfill(json(mockedSettings));
       return;
     }
@@ -544,6 +598,40 @@ test('active preset response format default is applied to prompt form', async ({
     prompt: 'preset response format prompt',
     response_format: 'b64_json'
   });
+});
+
+test('settings drawer deletes the active preset and switches to fallback', async ({ page }) => {
+  await loadApp(page, {
+    settings: {
+      ...settingsResponse,
+      presets: [
+        ...settingsResponse.presets,
+        {
+          ...settingsResponse.presets[0],
+          id: 'alt',
+          name: 'Alt preset',
+          default_model: 'alt-model',
+          default_response_format: 'b64_json'
+        }
+      ]
+    }
+  });
+
+  await page.getByRole('button', { name: 'Settings' }).click();
+  const drawer = page.getByRole('dialog', { name: 'Settings' });
+  await expect(drawer).toContainText('Default');
+  await expect(drawer).toContainText('Alt preset');
+
+  await drawer.getByRole('button', { name: 'Delete' }).click();
+  const confirm = page.getByRole('dialog', { name: 'Delete preset?' });
+  await expect(confirm).toContainText('Delete preset "Default"?');
+  await confirm.getByRole('button', { name: 'Delete' }).click();
+
+  await expect(page.getByRole('status')).toContainText('Preset deleted');
+  await expect(drawer.getByText('Default', { exact: true })).toHaveCount(0);
+  await expect(drawer).toContainText('Alt preset');
+  await expect(page.getByRole('main').getByRole('textbox', { name: 'Model' })).toHaveValue('alt-model');
+  await expect(page.getByRole('main').getByLabel('Response format')).toHaveValue('b64_json');
 });
 
 test('generation, gallery edit source, batch favorite, and lightbox flows work with mocked API', async ({ page }) => {

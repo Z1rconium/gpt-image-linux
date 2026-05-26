@@ -84,14 +84,14 @@ function createSettingsStore() {
     showToast(get(t).messages.presetSwitched);
   }
 
-  async function deleteActivePreset(showToast: ShowToast) {
+  async function deletePreset(presetId: string, showToast: ShowToast) {
     const current = get(settingsStore).settings;
     if (!current || current.presets.length <= 1) return;
-    const active = current.presets.find((preset) => preset.id === current.active_preset_id);
-    if (!active) return;
+    const target = current.presets.find((preset) => preset.id === presetId) || current.presets.find((preset) => preset.id === current.active_preset_id);
+    if (!target) return;
     const confirmed = await confirmStore.confirm({
       title: get(t).confirm.deletePresetTitle,
-      message: get(t).confirm.deletePresetMessage(active.name || get(t).common.untitledPreset),
+      message: get(t).confirm.deletePresetMessage(target.name || get(t).common.untitledPreset),
       confirmLabel: get(t).settings.deletePreset,
       cancelLabel: get(t).confirm.cancel,
       closeLabel: get(t).confirm.closeLabel,
@@ -99,7 +99,7 @@ function createSettingsStore() {
     });
     if (!confirmed) return;
     const settings = await apiFetch<SettingsResponse>(
-      `/api/settings/presets/${encodeURIComponent(active.id)}`,
+      `/api/settings/presets/${encodeURIComponent(target.id)}`,
       { method: 'DELETE' },
       'deleting preset'
     );
@@ -128,7 +128,7 @@ function createSettingsStore() {
     saveSettings,
     createPreset,
     activatePreset,
-    deleteActivePreset,
+    deletePreset,
     checkPresetHealth
   };
 }

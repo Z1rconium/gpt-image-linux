@@ -335,11 +335,11 @@
   }
 
   function activatePreset(presetId: string) {
-    void settingsStore.activatePreset(presetId, showToast);
+    return settingsStore.activatePreset(presetId, showToast);
   }
 
-  function deleteActivePreset() {
-    void settingsStore.deleteActivePreset(showToast);
+  function deletePreset(presetId: string) {
+    return settingsStore.deletePreset(presetId, showToast);
   }
 
   function checkPresetHealth(presetId: string) {
@@ -761,7 +761,7 @@
   onSave={saveSettings}
   onCreate={createPreset}
   onActivate={activatePreset}
-  onDelete={deleteActivePreset}
+  onDelete={deletePreset}
   onHealthCheck={checkPresetHealth}
 />
 

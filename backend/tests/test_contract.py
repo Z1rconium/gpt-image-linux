@@ -820,6 +820,17 @@ def test_settings_and_presets(client):
     assert created.json()["default_model"] == "gpt-image-2-preview"
     assert created.json()["default_response_format"] == "b64_json"
 
+    deleted = client.delete(f"/api/settings/presets/{created.json()['active_preset_id']}")
+    assert deleted.status_code == 200
+    assert len(deleted.json()["presets"]) == 1
+    assert deleted.json()["active_preset_id"] == body["active_preset_id"]
+    assert all(preset["name"] != "Alt" for preset in deleted.json()["presets"])
+
+    reloaded = client.get("/api/settings")
+    assert reloaded.status_code == 200
+    assert len(reloaded.json()["presets"]) == 1
+    assert all(preset["name"] != "Alt" for preset in reloaded.json()["presets"])
+
 
 def test_build_upstream_url_accepts_openai_style_v1_base():
     from backend.app.core.api_paths import build_upstream_url
