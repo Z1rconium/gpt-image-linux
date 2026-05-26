@@ -42,6 +42,7 @@ type MockOptions = {
   editUploadFailure?: boolean;
   galleryImages?: GalleryImageFixture[];
   promptSnippets?: PromptSnippetFixture[];
+  settings?: Record<string, unknown>;
   generatedJob?: unknown;
   runningJobs?: unknown[];
   historyJobs?: unknown[];
@@ -102,6 +103,7 @@ const settingsResponse = {
   api_key_source: 'stored',
   api_path: '/v1/images/generations',
   default_model: 'preset-default-model',
+  default_response_format: 'url',
   has_upstream_socks5_proxy: false,
   upstream_socks5_proxy_masked: '',
   has_webhook_url: true,
@@ -124,7 +126,8 @@ const settingsResponse = {
       has_api_key: true,
       api_key_source: 'stored',
       api_path: '/v1/images/generations',
-      default_model: 'preset-default-model'
+      default_model: 'preset-default-model',
+      default_response_format: 'url'
     }
   ]
 };
@@ -265,6 +268,7 @@ async function mockApi(page: Page, options: MockOptions = {}) {
   let galleryImages = [...(options.galleryImages ?? baseGalleryImages)];
   let promptSnippets = [...(options.promptSnippets ?? basePromptSnippets)];
   let promptSnippetCounter = promptSnippets.length + 1;
+  const mockedSettings = options.settings ?? settingsResponse;
   const runningJobs = options.runningJobs ?? [];
   let historyJobs = options.historyJobs ?? [job('history-1', 'saved prompt')];
 
@@ -295,7 +299,7 @@ async function mockApi(page: Page, options: MockOptions = {}) {
       return;
     }
     if (url.pathname === '/api/settings') {
-      await route.fulfill(json(settingsResponse));
+      await route.fulfill(json(mockedSettings));
       return;
     }
     if (url.pathname === '/api/prompt-snippets' && request.method() === 'GET') {
@@ -498,11 +502,13 @@ test('settings drawer traps focus and key form controls have accessible names', 
   await loadApp(page);
 
   await expect(page.getByRole('textbox', { name: 'Model' })).toHaveValue('preset-default-model');
+  await expect(page.getByLabel('Response format')).toHaveValue('url');
   await page.getByRole('button', { name: 'Settings' }).click();
   const drawer = page.getByRole('dialog', { name: 'Settings' });
   await expect(drawer).toBeVisible();
   await expect(page.getByLabel('API URL')).toHaveValue('https://api.example.com');
   await expect(page.getByLabel('Default model')).toHaveValue('preset-default-model');
+  await expect(page.getByLabel('Default response format')).toHaveValue('url');
   await expect(page.getByLabel('Webhook URL')).toHaveValue('https://hooks.example.com/***');
   await expect(drawer).toContainText('Literal keys are saved as plaintext.');
   await expect(page.getByLabel('Filter prompt')).toBeVisible();
@@ -514,6 +520,30 @@ test('settings drawer traps focus and key form controls have accessible names', 
 
   await page.keyboard.press('Escape');
   await expect(drawer).toBeHidden();
+});
+
+test('active preset response format default is applied to prompt form', async ({ page }) => {
+  await loadApp(page, {
+    settings: {
+      ...settingsResponse,
+      default_response_format: 'b64_json',
+      presets: settingsResponse.presets.map((preset) => ({
+        ...preset,
+        default_response_format: 'b64_json'
+      }))
+    }
+  });
+
+  await expect(page.getByLabel('Response format')).toHaveValue('b64_json');
+
+  const generateRequest = page.waitForRequest((request) => new URL(request.url()).pathname === '/api/generate');
+  await page.getByRole('textbox', { name: 'Prompt', exact: true }).fill('preset response format prompt');
+  await page.getByRole('button', { name: 'Generate', exact: true }).click();
+  const request = await generateRequest;
+  expect(request.postDataJSON()).toMatchObject({
+    prompt: 'preset response format prompt',
+    response_format: 'b64_json'
+  });
 });
 
 test('generation, gallery edit source, batch favorite, and lightbox flows work with mocked API', async ({ page }) => {

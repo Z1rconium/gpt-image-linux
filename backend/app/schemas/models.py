@@ -7,6 +7,7 @@ from ..core.validators import normalize_socks5_proxy_url, normalize_webhook_url
 
 ApiPath = Literal["/v1/images/generations", "/v1/responses", "/v1/chat/completions"]
 ApiKeySource = Literal["empty", "stored", "env"]
+ResponseFormatDefault = Literal["", "url", "b64_json"]
 PresetHealthStatus = Literal["ok", "warning", "error"]
 GenerateJobStatusValue = Literal[
     "queued",
@@ -26,6 +27,7 @@ class ApiPresetResponse(BaseModel):
     api_url: str
     api_path: ApiPath
     default_model: str
+    default_response_format: ResponseFormatDefault = "url"
     api_key_masked: str
     has_api_key: bool
     api_key_source: ApiKeySource = "empty"
@@ -45,6 +47,7 @@ class PresetCreateRequest(BaseModel):
     )
     api_path: Optional[ApiPath] = None
     default_model: Optional[str] = None
+    default_response_format: Optional[ResponseFormatDefault] = None
     source_preset_id: Optional[str] = None
 
 
@@ -62,6 +65,7 @@ class SettingsRequest(BaseModel):
     )
     api_path: ApiPath = "/v1/images/generations"
     default_model: Optional[str] = None
+    default_response_format: Optional[ResponseFormatDefault] = None
     upstream_socks5_proxy: Optional[str] = Field(
         default=None,
         description=(
@@ -103,6 +107,7 @@ class SettingsResponse(BaseModel):
     api_key_env_var: Optional[str] = None
     api_path: ApiPath
     default_model: str
+    default_response_format: ResponseFormatDefault = "url"
     has_upstream_socks5_proxy: bool = False
     upstream_socks5_proxy_masked: str = ""
     has_webhook_url: bool = False

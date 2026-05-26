@@ -34,7 +34,7 @@ Key characteristics:
 
 ## Features
 
-- API preset management: base URL/path/key, per-preset default model, global SOCKS5 upstream proxy, and global Webhook URL
+- API preset management: base URL/path/key, per-preset default model and response format, global SOCKS5 upstream proxy, and global Webhook URL
 - prompt helper tags, server-side prompt optimization, independent prompt snippets, and gallery prompt/parameter reuse
 - generation and image-editing (`/v1/images/edits`) with size/quality/format/compression/quantity controls and up to 16 edit reference images
 - preview + job history with SSE progress, multi-image result previews, `completed_at`, elapsed time, per-job stage timings, loading states, detailed terminal statuses, an errors-only history filter, clear-all for persisted history, cancel for queued/running jobs, and reuse/retry from persisted history
@@ -252,22 +252,23 @@ curl http://localhost:9090/health
 5. enter the API base URL
 6. choose the API path
 7. enter the preset default model; the Generate/Edit form's Model field defaults to the active preset's value
-8. enter the API key, or an env ref such as `${OPENAI_API_KEY}`; literal keys are stored as plaintext in SQLite, so prefer env refs
-9. optionally enter a global SOCKS5 proxy such as `socks5://127.0.0.1:1080`
-10. optionally enter a global Webhook URL for completed generation/edit jobs
-11. optionally configure Prompt Optimizer with an endpoint URL, model, and API key/env ref
-12. optionally run Health check for the saved preset
-13. click Save Preset
-14. enter a prompt
-15. click Prompt Helper tags to append common modifiers
-16. click Optimize to rewrite the prompt through the server-side optimizer
-17. open Prompts in the header to save or reuse prompt snippets; using a snippet replaces the current prompt
-18. choose generation options, including API path for per-request upstream routing
-19. click Generate
-20. optionally upload one or more edit reference images, pick "Edit this image" in Gallery/Lightbox, or combine both; uploads append to the current edit sources and Clear removes all edit sources
-21. click Edits to run image-to-image
-22. use Gallery/Lightbox "Use prompt" or "Use all" to reuse historical prompt text or full parameters
-23. view preview and gallery
+8. choose the preset default Response Format; the Generate/Edit form's Response format field defaults to the active preset's value
+9. enter the API key, or an env ref such as `${OPENAI_API_KEY}`; literal keys are stored as plaintext in SQLite, so prefer env refs
+10. optionally enter a global SOCKS5 proxy such as `socks5://127.0.0.1:1080`
+11. optionally enter a global Webhook URL for completed generation/edit jobs
+12. optionally configure Prompt Optimizer with an endpoint URL, model, and API key/env ref
+13. optionally run Health check for the saved preset
+14. click Save Preset
+15. enter a prompt
+16. click Prompt Helper tags to append common modifiers
+17. click Optimize to rewrite the prompt through the server-side optimizer
+18. open Prompts in the header to save or reuse prompt snippets; using a snippet replaces the current prompt
+19. choose generation options, including API path for per-request upstream routing
+20. click Generate
+21. optionally upload one or more edit reference images, pick "Edit this image" in Gallery/Lightbox, or combine both; uploads append to the current edit sources and Clear removes all edit sources
+22. click Edits to run image-to-image
+23. use Gallery/Lightbox "Use prompt" or "Use all" to reuse historical prompt text or full parameters
+24. view preview and gallery
 
 ## API paths
 
@@ -336,7 +337,7 @@ The panel supports these upstream paths. The API base URL may either omit or inc
 - Format: `PNG`, `JPEG`, or `WebP`
 - Compression: disabled for `PNG`; `0-100` for `JPEG` and `WebP`
 - Quantity: integer from `1` to `10`; the field can be cleared while editing, and Generate/Edit will restore an empty value to `1` on submit
-- Response Format: `url` by default in the UI, with `none` and `b64_json` still available; `none` omits the `response_format` parameter
+- Response Format: defaults to the active preset's value (`url` by default), with `none` and `b64_json` still available; `none` omits the `response_format` parameter
 
 ## Import and upload limits
 
@@ -532,7 +533,7 @@ GPT Image Panel 是一个轻量级 FastAPI Web 界面，用于图像生成和图
 
 ## 功能
 
-- API 预设管理：base URL/path/key、每个预设的默认 model、全局 SOCKS5 上游代理和全局 Webhook URL
+- API 预设管理：base URL/path/key、每个预设的默认 model 和 Response Format、全局 SOCKS5 上游代理和全局 Webhook URL
 - 提示词助手标签、服务端提示词优化器、独立提示词收藏夹，以及 Gallery 提示词/参数复用
 - 图像生成 + 图生图编辑（`/v1/images/edits`），支持尺寸/质量/格式/压缩率/数量等参数，并支持最多 16 张编辑参考图
 - 预览 + 历史任务：SSE 进度、多图结果预览、`completed_at`、耗时、任务分段耗时、加载状态、细分终态状态、仅错误历史筛选、清空持久化历史、排队/运行任务取消，以及从持久化历史复用/重试
@@ -750,22 +751,23 @@ curl http://localhost:9090/health
 5. 填写 API Base URL
 6. 选择 API Path
 7. 填写该预设的默认模型；Generate/Edit 表单里的 Model 默认值会使用当前预设的值
-8. 填写 API Key，或填写 `${OPENAI_API_KEY}` 这类环境变量引用；直接填写的 key 会以明文保存到 SQLite，优先用环境变量引用
-9. 可选：填写全局 SOCKS5 代理，例如 `socks5://127.0.0.1:1080`
-10. 可选：填写全局 Webhook URL，用于生成/编辑任务完成回调
-11. 可选：配置提示词优化器的 endpoint URL、模型和 API Key/环境变量引用
-12. 可选：对已保存预设执行 Health check
-13. 点击 Save Preset
-14. 输入提示词
-15. 点击提示词助手标签追加常用修饰词
-16. 点击 Optimize 通过服务端优化器改写提示词
-17. 点击右上角提示词按钮保存或复用提示词片段；使用片段会替换当前提示词
-18. 选择生成参数；需要逐次复用不同上游路径时可直接选择 API Path
-19. 点击 Generate
-20. 也可以上传一张或多张编辑参考图、在 Gallery/Lightbox 中选择 “Edit this image”，或两者组合；上传会追加到当前编辑源，Clear 会清空全部编辑源
-21. 点击 Edits 执行图生图
-22. 在 Gallery/Lightbox 使用 “Use prompt” 或 “Use all” 复用历史提示词或完整参数
-23. 查看预览和 Gallery
+8. 选择该预设的默认 Response Format；Generate/Edit 表单里的 Response format 默认值会使用当前预设的值
+9. 填写 API Key，或填写 `${OPENAI_API_KEY}` 这类环境变量引用；直接填写的 key 会以明文保存到 SQLite，优先用环境变量引用
+10. 可选：填写全局 SOCKS5 代理，例如 `socks5://127.0.0.1:1080`
+11. 可选：填写全局 Webhook URL，用于生成/编辑任务完成回调
+12. 可选：配置提示词优化器的 endpoint URL、模型和 API Key/环境变量引用
+13. 可选：对已保存预设执行 Health check
+14. 点击 Save Preset
+15. 输入提示词
+16. 点击提示词助手标签追加常用修饰词
+17. 点击 Optimize 通过服务端优化器改写提示词
+18. 点击右上角提示词按钮保存或复用提示词片段；使用片段会替换当前提示词
+19. 选择生成参数；需要逐次复用不同上游路径时可直接选择 API Path
+20. 点击 Generate
+21. 也可以上传一张或多张编辑参考图、在 Gallery/Lightbox 中选择 “Edit this image”，或两者组合；上传会追加到当前编辑源，Clear 会清空全部编辑源
+22. 点击 Edits 执行图生图
+23. 在 Gallery/Lightbox 使用 “Use prompt” 或 “Use all” 复用历史提示词或完整参数
+24. 查看预览和 Gallery
 
 ## 支持的 API Path
 
@@ -834,7 +836,7 @@ curl http://localhost:9090/health
 - Format：`PNG`、`JPEG`、`WebP`
 - Compression：`PNG` 不可用；`JPEG` 和 `WebP` 可设置 `0-100`
 - Quantity：`1` 到 `10`；编辑时可以先清空，提交 Generate/Edit 时如果为空会自动回填为 `1`
-- Response Format：界面默认 `url`，仍可选 `none` 和 `b64_json`；`none` 会省略 `response_format` 参数
+- Response Format：默认使用当前预设的值（默认 `url`），仍可选 `none` 和 `b64_json`；`none` 会省略 `response_format` 参数
 
 ## 导入与上传限制
 

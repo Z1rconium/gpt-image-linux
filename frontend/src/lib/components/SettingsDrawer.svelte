@@ -1,7 +1,8 @@
 <script lang="ts">
   import { t } from '$lib/i18n';
-  import type { ApiPath, ApiPreset, PresetHealthResponse, PresetHealthStatus, SettingsInput, SettingsResponse } from '$lib/api/types';
+  import type { ApiPath, ApiPreset, PresetHealthResponse, PresetHealthStatus, ResponseFormatDefault, SettingsInput, SettingsResponse } from '$lib/api/types';
   import { dialog } from '$lib/actions/dialog';
+  import { RESPONSE_FORMAT_OPTIONS, normalizeResponseFormat } from '$lib/utils/promptForm';
 
   const MASKED_API_KEY_VALUE = '********';
 
@@ -21,6 +22,7 @@
   let presetName = '';
   let apiUrl = '';
   let defaultModel = '';
+  let defaultResponseFormat: ResponseFormatDefault = 'url';
   let apiKey = '';
   let apiPath: ApiPath = '/v1/images/generations';
   let upstreamSocks5Proxy = '';
@@ -45,6 +47,7 @@
           ? MASKED_API_KEY_VALUE
           : '';
     apiPath = activePreset.api_path || settings.api_path || '/v1/images/generations';
+    defaultResponseFormat = normalizeResponseFormat(activePreset.default_response_format ?? settings.default_response_format, 'url');
     upstreamSocks5Proxy = settings.has_upstream_socks5_proxy ? settings.upstream_socks5_proxy_masked : '';
     webhookUrl = settings.has_webhook_url ? settings.webhook_url_masked : '';
     promptOptimizerEnabled = Boolean(settings.prompt_optimizer?.enabled);
@@ -70,6 +73,7 @@
       preset_name: presetName.trim(),
       api_url: apiUrl.trim(),
       default_model: defaultModel.trim(),
+      default_response_format: defaultResponseFormat,
       api_key: apiKey.trim() === MASKED_API_KEY_VALUE ? null : apiKey.trim(),
       api_path: apiPath,
       upstream_socks5_proxy: proxyValue === currentProxyMask ? null : proxyValue,
@@ -196,6 +200,14 @@
           <label class="block">
             <span class="mb-1.5 block text-xs font-medium text-zinc-400">{$t.settings.defaultModel}</span>
             <input bind:value={defaultModel} class="control-focus w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2.5 font-mono text-sm text-zinc-100 focus:border-emerald-500" placeholder="gpt-image-2" />
+          </label>
+          <label class="block">
+            <span class="mb-1.5 block text-xs font-medium text-zinc-400">{$t.settings.defaultResponseFormat}</span>
+            <select bind:value={defaultResponseFormat} class="control-focus w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2.5 text-sm text-zinc-100 focus:border-emerald-500">
+              {#each RESPONSE_FORMAT_OPTIONS as responseFormat}
+                <option value={responseFormat}>{responseFormat || $t.promptForm.defaultResponseFormat}</option>
+              {/each}
+            </select>
           </label>
           <label class="block">
             <span class="mb-1.5 block text-xs font-medium text-zinc-400">{$t.settings.apiKey}</span>

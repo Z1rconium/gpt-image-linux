@@ -1,5 +1,6 @@
 export type ApiPath = '/v1/images/generations' | '/v1/responses' | '/v1/chat/completions';
 export type ApiKeySource = 'empty' | 'stored' | 'env';
+export type ResponseFormatDefault = '' | 'url' | 'b64_json';
 export type PresetHealthStatus = 'ok' | 'warning' | 'error';
 export type GenerateJobStatusValue = 'queued' | 'running' | 'success' | 'error' | 'cancelled' | 'interrupted' | 'upstream_error';
 export type GalleryExportJobStatusValue = 'queued' | 'running' | 'success' | 'error';
@@ -10,6 +11,7 @@ export type ApiPreset = {
   api_url: string;
   api_path: ApiPath;
   default_model: string;
+  default_response_format: ResponseFormatDefault;
   api_key_masked: string;
   has_api_key: boolean;
   api_key_source: ApiKeySource;
@@ -25,6 +27,7 @@ export type SettingsResponse = {
   api_key_env_var?: string | null;
   api_path: ApiPath;
   default_model: string;
+  default_response_format: ResponseFormatDefault;
   has_upstream_socks5_proxy: boolean;
   upstream_socks5_proxy_masked: string;
   has_webhook_url: boolean;
@@ -57,6 +60,7 @@ export type SettingsInput = {
   api_key?: string | null;
   api_path: ApiPath;
   default_model?: string | null;
+  default_response_format?: ResponseFormatDefault | null;
   upstream_socks5_proxy?: string | null;
   webhook_url?: string | null;
   prompt_optimizer?: PromptOptimizerSettingsInput | null;

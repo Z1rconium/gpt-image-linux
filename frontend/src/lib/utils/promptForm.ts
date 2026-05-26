@@ -1,7 +1,8 @@
-import type { ApiPath, GalleryEntry, GenerateJobStatus } from '$lib/api/types';
+import type { ApiPath, GalleryEntry, GenerateJobStatus, ResponseFormatDefault } from '$lib/api/types';
 import { DEFAULT_PROMPT_MODEL, DEFAULT_QUANTITY, initialPromptFormState, type PromptFormState } from '$lib/stores/preview';
 
 const GENERATION_API_PATHS: ApiPath[] = ['/v1/images/generations', '/v1/responses', '/v1/chat/completions'];
+export const RESPONSE_FORMAT_OPTIONS: ResponseFormatDefault[] = ['', 'url', 'b64_json'];
 
 export function normalizeApiPath(value: string | null | undefined, fallback: ApiPath = initialPromptFormState.apiPath): ApiPath {
   return GENERATION_API_PATHS.includes(value as ApiPath) ? (value as ApiPath) : fallback;
@@ -17,8 +18,12 @@ export function normalizeJobOutputFormat(value: string | null | undefined): Prom
   return initialPromptFormState.outputFormat;
 }
 
+export function normalizeResponseFormat(value: string | null | undefined, fallback: ResponseFormatDefault = ''): ResponseFormatDefault {
+  return RESPONSE_FORMAT_OPTIONS.includes(value as ResponseFormatDefault) ? (value as ResponseFormatDefault) : fallback;
+}
+
 export function normalizeJobResponseFormat(value: string | null | undefined): PromptFormState['responseFormat'] {
-  return value === 'url' || value === 'b64_json' ? value : '';
+  return normalizeResponseFormat(value);
 }
 
 export function clampQuantity(value: number | string | null | undefined): number {

@@ -5,7 +5,12 @@ from fastapi import HTTPException
 
 from .app_state import app
 from ..core import settings as config
-from ..core.api_paths import normalize_api_path, normalize_api_preset, normalize_default_model
+from ..core.api_paths import (
+    normalize_api_path,
+    normalize_api_preset,
+    normalize_default_model,
+    normalize_default_response_format,
+)
 from ..core.validators import (
     mask_socks5_proxy_url,
     mask_webhook_url,
@@ -163,6 +168,11 @@ def get_api_presets() -> list[dict]:
             "api_key": getattr(app.state, "api_key", config.DEFAULT_API_KEY),
             "api_path": getattr(app.state, "api_path", config.DEFAULT_API_PATH),
             "default_model": getattr(app.state, "default_model", ""),
+            "default_response_format": getattr(
+                app.state,
+                "default_response_format",
+                "url",
+            ),
         }
     )
     app.state.api_presets = [preset]
@@ -197,6 +207,9 @@ def apply_api_preset(preset: dict):
     app.state.default_model = normalize_default_model(
         preset.get("default_model"),
         app.state.api_path,
+    )
+    app.state.default_response_format = normalize_default_response_format(
+        preset.get("default_response_format")
     )
     app.state.active_preset_id = preset["id"]
 
@@ -246,6 +259,9 @@ def serialize_api_preset(preset: dict) -> ApiPresetResponse:
             preset.get("default_model"),
             preset.get("api_path", "/v1/images/generations"),
         ),
+        default_response_format=normalize_default_response_format(
+            preset.get("default_response_format")
+        ),
         **key_fields,
     )
 
@@ -264,6 +280,9 @@ def build_settings_response() -> SettingsResponse:
         default_model=normalize_default_model(
             active_preset.get("default_model"),
             active_preset.get("api_path", "/v1/images/generations"),
+        ),
+        default_response_format=normalize_default_response_format(
+            active_preset.get("default_response_format")
         ),
         **upstream_socks5_proxy_response_fields(),
         **webhook_url_response_fields(),

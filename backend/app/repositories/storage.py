@@ -269,6 +269,7 @@ def _default_settings() -> dict:
                 "api_key": config.DEFAULT_API_KEY,
                 "api_path": config.DEFAULT_API_PATH,
                 "default_model": default_model_for_api_path(config.DEFAULT_API_PATH),
+                "default_response_format": "url",
             }
         ],
         "prompt_optimizer": _default_prompt_optimizer_settings(),
@@ -518,6 +519,7 @@ def _ensure_database():
                     api_key TEXT NOT NULL,
                     api_path TEXT NOT NULL,
                     default_model TEXT NOT NULL,
+                    default_response_format TEXT NOT NULL DEFAULT 'url',
                     position INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
@@ -684,6 +686,10 @@ def _migrate_api_presets_schema(conn: sqlite3.Connection):
     columns = _table_columns(conn, "api_presets")
     if "default_model" not in columns:
         conn.execute("ALTER TABLE api_presets ADD COLUMN default_model TEXT")
+    if "default_response_format" not in columns:
+        conn.execute(
+            "ALTER TABLE api_presets ADD COLUMN default_response_format TEXT NOT NULL DEFAULT 'url'"
+        )
     conn.execute(
         """
         UPDATE api_presets
@@ -699,6 +705,15 @@ def _migrate_api_presets_schema(conn: sqlite3.Connection):
             str(config.DEFAULT_RESPONSES_MODEL or "").strip(),
             default_model_for_api_path("/v1/images/generations"),
         ),
+    )
+    conn.execute(
+        """
+        UPDATE api_presets
+        SET default_response_format = ?
+        WHERE default_response_format IS NULL
+            OR trim(default_response_format) NOT IN ('', 'url', 'b64_json')
+        """,
+        ("url",),
     )
 
 
@@ -816,11 +831,12 @@ def _replace_settings_on_conn(conn: sqlite3.Connection, settings: dict):
                 api_key,
                 api_path,
                 default_model,
+                default_response_format,
                 position,
                 created_at,
                 updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 preset["id"],
@@ -829,6 +845,7 @@ def _replace_settings_on_conn(conn: sqlite3.Connection, settings: dict):
                 preset["api_key"],
                 preset["api_path"],
                 preset["default_model"],
+                preset["default_response_format"],
                 position,
                 now,
                 now,
@@ -858,7 +875,7 @@ def _replace_settings_on_conn(conn: sqlite3.Connection, settings: dict):
 def _load_settings_from_conn(conn: sqlite3.Connection) -> dict | None:
     rows = conn.execute(
         """
-        SELECT id, name, api_url, api_key, api_path, default_model
+        SELECT id, name, api_url, api_key, api_path, default_model, default_response_format
         FROM api_presets
         ORDER BY position ASC, id ASC
         """
@@ -874,6 +891,7 @@ def _load_settings_from_conn(conn: sqlite3.Connection) -> dict | None:
             "api_key": row["api_key"],
             "api_path": row["api_path"],
             "default_model": row["default_model"],
+            "default_response_format": row["default_response_format"],
         }
         for row in rows
     ]

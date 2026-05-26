@@ -25,7 +25,13 @@ from ..presets import (
 )
 from ...core import settings as config
 from ...core import validators as ssrf
-from ...core.api_paths import ALLOWED_API_PATHS, build_upstream_url, normalize_api_path, normalize_default_model
+from ...core.api_paths import (
+    ALLOWED_API_PATHS,
+    build_upstream_url,
+    normalize_api_path,
+    normalize_default_model,
+    normalize_default_response_format,
+)
 from ...integrations import upstream_client as proxy
 from ...schemas.models import (
     PresetCreateRequest,
@@ -57,6 +63,10 @@ async def update_settings(req: SettingsRequest):
         preset["default_model"] = normalize_default_model(
             req.default_model,
             preset["api_path"],
+        )
+    if req.default_response_format is not None:
+        preset["default_response_format"] = normalize_default_response_format(
+            req.default_response_format
         )
     if req.upstream_socks5_proxy is not None:
         current_proxy = get_upstream_socks5_proxy()
@@ -115,6 +125,11 @@ async def create_settings_preset(req: PresetCreateRequest):
     preset["default_model"] = normalize_default_model(
         req.default_model if req.default_model is not None else source.get("default_model"),
         preset["api_path"],
+    )
+    preset["default_response_format"] = normalize_default_response_format(
+        req.default_response_format
+        if req.default_response_format is not None
+        else source.get("default_response_format")
     )
     presets.append(preset)
     apply_api_preset(preset)

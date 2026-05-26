@@ -778,7 +778,9 @@ def test_settings_and_presets(client):
     assert body["presets"]
     assert body["active_preset_id"]
     assert body["default_model"] == "gpt-image-2"
+    assert body["default_response_format"] == "url"
     assert body["presets"][0]["default_model"] == "gpt-image-2"
+    assert body["presets"][0]["default_response_format"] == "url"
 
     updated = client.post(
         "/api/settings",
@@ -789,11 +791,13 @@ def test_settings_and_presets(client):
             "api_key": "new-key",
             "api_path": "/v1/responses",
             "default_model": "gpt-image-2-preview",
+            "default_response_format": "b64_json",
         },
     )
     assert updated.status_code == 200
     assert updated.json()["api_path"] == "/v1/responses"
     assert updated.json()["default_model"] == "gpt-image-2-preview"
+    assert updated.json()["default_response_format"] == "b64_json"
 
     chat_updated = client.post(
         "/api/settings",
@@ -808,11 +812,13 @@ def test_settings_and_presets(client):
     assert chat_updated.status_code == 200
     assert chat_updated.json()["api_path"] == "/v1/chat/completions"
     assert chat_updated.json()["default_model"] == "gpt-image-2-preview"
+    assert chat_updated.json()["default_response_format"] == "b64_json"
 
     created = client.post("/api/settings/presets", json={"name": "Alt"})
     assert created.status_code == 200
     assert len(created.json()["presets"]) == 2
     assert created.json()["default_model"] == "gpt-image-2-preview"
+    assert created.json()["default_response_format"] == "b64_json"
 
 
 def test_build_upstream_url_accepts_openai_style_v1_base():

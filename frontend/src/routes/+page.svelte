@@ -24,6 +24,7 @@
     PromptSnippet,
     PromptSnippetCreateInput,
     PromptSnippetUpdateInput,
+    ResponseFormatDefault,
     SettingsInput,
     SettingsResponse
   } from '$lib/api/types';
@@ -45,6 +46,7 @@
     galleryEntryToPromptOnly,
     jobToPromptForm,
     normalizeApiPath,
+    normalizeResponseFormat,
     normalizeSubmissionQuantity
   } from '$lib/utils/promptForm';
 
@@ -57,6 +59,7 @@
   let editPreviewLabel = '';
   let lastActivePresetId = '';
   let lastActivePresetDefaultModel = DEFAULT_PROMPT_MODEL;
+  let lastActivePresetDefaultResponseFormat: ResponseFormatDefault = initialPromptFormState.responseFormat;
   let urlSyncReady = false;
   let applyingUrlState = false;
   let urlSyncQueued = false;
@@ -85,7 +88,7 @@
       optimizerSettings.model.trim() &&
       optimizerSettings.has_api_key
   );
-  $: syncFormModelToActivePreset($settingsStore.settings);
+  $: syncFormDefaultsToActivePreset($settingsStore.settings);
 
   async function loadInitialData() {
     await Promise.all([settingsStore.loadSettings(), jobsStore.loadJobs(), applyUrlStateToApp()]);
@@ -283,15 +286,22 @@
     return normalizeApiPath(preset?.api_path || settings?.api_path, initialPromptFormState.apiPath);
   }
 
-  function syncFormModelToActivePreset(settings: SettingsResponse | null) {
+  function presetDefaultResponseFormat(settings: SettingsResponse | null): ResponseFormatDefault {
+    const preset = activePreset(settings);
+    return normalizeResponseFormat(preset?.default_response_format ?? settings?.default_response_format, initialPromptFormState.responseFormat);
+  }
+
+  function syncFormDefaultsToActivePreset(settings: SettingsResponse | null) {
     const preset = activePreset(settings);
     const nextPresetId = preset?.id || '';
     const nextDefaultModel = presetDefaultModel(settings);
     const nextApiPath = presetApiPath(settings);
+    const nextDefaultResponseFormat = presetDefaultResponseFormat(settings);
     if (
       nextPresetId === lastActivePresetId &&
       nextDefaultModel === lastActivePresetDefaultModel &&
-      nextApiPath === lastActivePresetApiPath
+      nextApiPath === lastActivePresetApiPath &&
+      nextDefaultResponseFormat === lastActivePresetDefaultResponseFormat
     ) {
       return;
     }
@@ -304,12 +314,16 @@
     if (!form.apiPath || form.apiPath === lastActivePresetApiPath) {
       updates.apiPath = nextApiPath;
     }
+    if (nextPresetId !== lastActivePresetId || nextDefaultResponseFormat !== lastActivePresetDefaultResponseFormat) {
+      updates.responseFormat = nextDefaultResponseFormat;
+    }
     if (Object.keys(updates).length) {
       form = { ...form, ...updates };
     }
     lastActivePresetId = nextPresetId;
     lastActivePresetDefaultModel = nextDefaultModel;
     lastActivePresetApiPath = nextApiPath;
+    lastActivePresetDefaultResponseFormat = nextDefaultResponseFormat;
   }
 
   function saveSettings(body: SettingsInput) {

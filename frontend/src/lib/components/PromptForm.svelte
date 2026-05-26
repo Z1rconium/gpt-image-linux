@@ -2,7 +2,7 @@
   import PromptHelperPanel from '$lib/components/PromptHelperPanel.svelte';
   import { t } from '$lib/i18n';
   import type { PromptFormState } from '$lib/stores/preview';
-  import { sanitizeQuantityInput } from '$lib/utils/promptForm';
+  import { RESPONSE_FORMAT_OPTIONS, sanitizeQuantityInput } from '$lib/utils/promptForm';
 
   export let form: PromptFormState;
   export let loading = false;
@@ -149,9 +149,9 @@
     <label class="block">
       <span class="mb-1.5 block text-xs font-medium text-zinc-400">{$t.promptForm.responseFormat}</span>
       <select bind:value={form.responseFormat} disabled={promptOnlyMode || loading} class="control-focus w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2.5 text-sm text-zinc-100 focus:border-emerald-500 disabled:cursor-not-allowed disabled:opacity-50">
-        <option value="">{$t.promptForm.defaultResponseFormat}</option>
-        <option value="url">url</option>
-        <option value="b64_json">b64_json</option>
+        {#each RESPONSE_FORMAT_OPTIONS as responseFormat}
+          <option value={responseFormat}>{responseFormat || $t.promptForm.defaultResponseFormat}</option>
+        {/each}
       </select>
     </label>
 
