@@ -55,6 +55,7 @@ def _configure_runtime(tmp_path: Path, *, access_key: str = "", allow_unauthenti
     config.ACCESS_LOCKOUT_SECONDS = 300
     config.IP_ALLOWLIST = ""
     config.TRUST_PROXY_HEADERS = False
+    config.TRUSTED_PROXY_IPS = ""
     config.CSRF_ORIGIN_CHECK_ENABLED = True
     config.UPSTREAM_HOST_ALLOWLIST = ""
     config.WEBHOOK_HOST_ALLOWLIST = ""
@@ -82,6 +83,12 @@ def _configure_runtime(tmp_path: Path, *, access_key: str = "", allow_unauthenti
     config.PROMPT_OPTIMIZER_TIMEOUT_SECONDS = 60
     config.PROMPT_OPTIMIZER_MAX_OUTPUT_CHARS = 4000
     config.PROMPT_OPTIMIZER_HOST_ALLOWLIST = ""
+    config.MAX_SSE_SUBSCRIBERS_GLOBAL = 200
+    config.MAX_SSE_SUBSCRIBERS_PER_IP = 10
+    config.SSE_CONNECTION_TTL_SECONDS = 3600
+
+    import backend.app.core.security as _sec
+    _sec._trusted_proxy_networks = None
 
     storage.close_database_connections()
     storage._db_initialized = False
@@ -756,19 +763,28 @@ def test_csrf_origin_check_uses_referer_when_origin_is_absent(client):
 
 def test_csrf_origin_check_respects_trusted_forwarded_proto(client):
     config.TRUST_PROXY_HEADERS = True
+    config.TRUSTED_PROXY_IPS = "127.0.0.0/8"
+    import backend.app.core.security as _sec
+    _sec._trusted_proxy_networks = None
+    # TestClient uses "testclient" as client host; patch is_trusted_proxy to accept it
+    original_is_trusted = _sec.is_trusted_proxy
+    _sec.is_trusted_proxy = lambda _host: True
 
-    resp = client.post(
-        "/api/settings/presets",
-        headers={
-            "Host": "127.0.0.1:9090",
-            "Origin": "https://panel.example.com",
-            "X-Forwarded-Proto": "https",
-            "X-Forwarded-Host": "panel.example.com",
-        },
-        json={"name": "Proxy Preset"},
-    )
+    try:
+        resp = client.post(
+            "/api/settings/presets",
+            headers={
+                "Host": "127.0.0.1:9090",
+                "Origin": "https://panel.example.com",
+                "X-Forwarded-Proto": "https",
+                "X-Forwarded-Host": "panel.example.com",
+            },
+            json={"name": "Proxy Preset"},
+        )
 
-    assert resp.status_code == 200
+        assert resp.status_code == 200
+    finally:
+        _sec.is_trusted_proxy = original_is_trusted
 
 
 def test_settings_and_presets(client):

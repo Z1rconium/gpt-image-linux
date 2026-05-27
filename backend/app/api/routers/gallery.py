@@ -21,6 +21,8 @@ from ..gallery_archive import (
     write_gallery_zip_file,
 )
 from ..jobs import publish_queue, serialize_sse_event
+from ..sse_limiter import sse_limiter
+from ...core import security as auth
 from ...core import settings as config
 from ...core.observability import metrics
 from ...core.utils import utc_now
@@ -527,6 +529,10 @@ async def stream_gallery_export_job(job_id: str, request: Request):
     if not job:
         raise HTTPException(status_code=404, detail="Gallery export job not found")
 
+    client_ip = auth.get_client_ip(request)
+    if not await sse_limiter.acquire(client_ip):
+        raise HTTPException(status_code=429, detail="Too many SSE connections")
+
     queue: asyncio.Queue = asyncio.Queue(maxsize=20)
     subscribers_by_job = _gallery_export_subscribers()
     subscribers = subscribers_by_job.setdefault(job_id, set())
@@ -534,9 +540,12 @@ async def stream_gallery_export_job(job_id: str, request: Request):
     publish_queue(queue, {"event": "export", "data": _gallery_export_payload(job)})
 
     async def event_stream():
+        start = time.monotonic()
         try:
             while True:
                 if await request.is_disconnected():
+                    break
+                if time.monotonic() - start > config.SSE_CONNECTION_TTL_SECONDS:
                     break
                 try:
                     item = await asyncio.wait_for(queue.get(), timeout=15)
@@ -552,6 +561,7 @@ async def stream_gallery_export_job(job_id: str, request: Request):
             subscribers.discard(queue)
             if not subscribers:
                 subscribers_by_job.pop(job_id, None)
+            await sse_limiter.release(client_ip)
 
     return StreamingResponse(
         event_stream(),

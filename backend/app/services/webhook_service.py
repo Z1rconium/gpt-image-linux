@@ -10,6 +10,7 @@ import aiohttp
 
 from ..core import settings as config
 from ..core import validators as ssrf
+from ..core.safe_connector import create_safe_connector
 from ..core.utils import utc_now
 
 logger = logging.getLogger(__name__)
@@ -102,7 +103,9 @@ async def deliver_webhook(webhook_url: str, job: dict[str, Any]):
     timeout = aiohttp.ClientTimeout(total=config.WEBHOOK_TIMEOUT_SECONDS)
     last_error = None
 
-    async with aiohttp.ClientSession(timeout=timeout) as session:
+    async with aiohttp.ClientSession(
+        timeout=timeout, connector=create_safe_connector()
+    ) as session:
         for attempt in range(1, attempts + 1):
             try:
                 async with session.post(

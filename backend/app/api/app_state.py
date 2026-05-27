@@ -6,6 +6,7 @@ from pathlib import Path
 
 from fastapi import FastAPI
 
+from ..core import security as auth
 from ..core import settings as config
 from ..repositories import storage
 
@@ -62,6 +63,8 @@ async def lifespan(app: FastAPI):
             "ACCESS_KEY is required. Set ACCESS_KEY, or set "
             "ALLOW_UNAUTHENTICATED=true to explicitly run without authentication."
         )
+
+    auth.validate_proxy_config()
 
     Path(config.IMAGES_DIR).mkdir(parents=True, exist_ok=True)
     Path(config.THUMBNAILS_DIR).mkdir(parents=True, exist_ok=True)

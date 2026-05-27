@@ -4,6 +4,7 @@ import logging
 from typing import Any
 
 from ..core import settings as config
+from ..core.safe_connector import create_safe_connector
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +107,8 @@ class SessionPool:
         self._schedule_retired_session_closes()
         timeout = _timeout_for_kind(timeout_kind)
         connector = _build_socks5_connector(proxy_key or None)
+        if connector is None:
+            connector = create_safe_connector()
         session = aiohttp.ClientSession(timeout=timeout, connector=connector)
         self._sessions[key] = session
         return session

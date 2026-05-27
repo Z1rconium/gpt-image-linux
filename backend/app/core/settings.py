@@ -83,6 +83,11 @@ THUMBNAIL_MAX_SIDE = max(1, int(os.getenv("THUMBNAIL_MAX_SIDE", "512")))
 DATA_DIR = os.getenv("DATA_DIR", "./data")
 DATABASE_FILE = os.getenv("DATABASE_FILE", os.path.join(DATA_DIR, "app.sqlite3"))
 
+# ── SSE connection limits ────────────────────────────────────────
+MAX_SSE_SUBSCRIBERS_GLOBAL = max(1, int(os.getenv("MAX_SSE_SUBSCRIBERS_GLOBAL", "200")))
+MAX_SSE_SUBSCRIBERS_PER_IP = max(1, int(os.getenv("MAX_SSE_SUBSCRIBERS_PER_IP", "10")))
+SSE_CONNECTION_TTL_SECONDS = max(60, int(os.getenv("SSE_CONNECTION_TTL_SECONDS", "3600")))
+
 # ── Prompt optimizer ────────────────────────────────────────────
 PROMPT_OPTIMIZER_ENABLED = env_flag("PROMPT_OPTIMIZER_ENABLED")
 PROMPT_OPTIMIZER_API_URL = os.getenv("PROMPT_OPTIMIZER_API_URL", "").strip()
