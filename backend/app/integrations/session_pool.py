@@ -31,7 +31,7 @@ _TIMEOUTS = {
 
 
 def _prompt_optimizer_timeout() -> aiohttp.ClientTimeout:
-    total = max(float(config.PROMPT_OPTIMIZER_TIMEOUT_SECONDS or 20), 0.1)
+    total = max(float(config.PROMPT_OPTIMIZER_TIMEOUT_SECONDS or 60), 0.1)
     connect = min(total, 10.0)
     return aiohttp.ClientTimeout(
         total=total,

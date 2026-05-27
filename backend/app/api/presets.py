@@ -112,7 +112,16 @@ def _default_prompt_optimizer_settings() -> dict:
         "api_url": config.PROMPT_OPTIMIZER_API_URL,
         "api_key": config.PROMPT_OPTIMIZER_API_KEY,
         "model": config.PROMPT_OPTIMIZER_MODEL,
+        "timeout_seconds": config.PROMPT_OPTIMIZER_TIMEOUT_SECONDS,
     }
+
+
+def _coerce_positive_int(value, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
 
 
 def normalize_prompt_optimizer_settings(raw: dict | None) -> dict:
@@ -125,6 +134,10 @@ def normalize_prompt_optimizer_settings(raw: dict | None) -> dict:
         "api_key": str(raw.get("api_key") or "").strip(),
         "model": str(raw.get("model") or defaults["model"]).strip()
         or defaults["model"],
+        "timeout_seconds": _coerce_positive_int(
+            raw.get("timeout_seconds"),
+            defaults["timeout_seconds"],
+        ),
     }
 
 
@@ -299,6 +312,10 @@ def build_prompt_optimizer_settings_response(raw: dict | None) -> PromptOptimize
         api_url=str(raw.get("api_url", "")).strip(),
         model=str(raw.get("model") or config.PROMPT_OPTIMIZER_MODEL).strip()
         or config.PROMPT_OPTIMIZER_MODEL,
+        timeout_seconds=_coerce_positive_int(
+            raw.get("timeout_seconds"),
+            config.PROMPT_OPTIMIZER_TIMEOUT_SECONDS,
+        ),
         **key_fields,
     )
 
@@ -344,6 +361,11 @@ def apply_prompt_optimizer_settings(
         current["api_url"] = req_optimizer.api_url.strip()
     if hasattr(req_optimizer, "model") and req_optimizer.model is not None:
         current["model"] = req_optimizer.model.strip()
+    if (
+        hasattr(req_optimizer, "timeout_seconds")
+        and req_optimizer.timeout_seconds is not None
+    ):
+        current["timeout_seconds"] = int(req_optimizer.timeout_seconds)
     if hasattr(req_optimizer, "api_key") and req_optimizer.api_key is not None:
         key = req_optimizer.api_key.strip()
         if key and key != MASKED_API_KEY_VALUE:

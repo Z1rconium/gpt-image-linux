@@ -71,6 +71,7 @@ async def optimize_prompt_endpoint(req: PromptOptimizeRequest):
 
     api_url = str(settings.get("api_url", "")).strip()
     model = str(settings.get("model", "gpt-4o-mini")).strip() or "gpt-4o-mini"
+    timeout_seconds = int(settings.get("timeout_seconds") or 60)
     api_key = resolve_prompt_optimizer_api_key(settings)
 
     if not api_url:
@@ -97,6 +98,7 @@ async def optimize_prompt_endpoint(req: PromptOptimizeRequest):
             size=req.size,
             quality=req.quality,
             system_prompt=await asyncio.to_thread(load_prompt_optimizer_system_prompt),
+            timeout_seconds=timeout_seconds,
         )
     except OptimizerTimeoutError as e:
         raise HTTPException(status_code=504, detail=str(e)) from e

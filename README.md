@@ -256,7 +256,7 @@ curl http://localhost:9090/health
 9. enter the API key, or an env ref such as `${OPENAI_API_KEY}`; literal keys are stored as plaintext in SQLite, so prefer env refs
 10. optionally enter a global SOCKS5 proxy such as `socks5://127.0.0.1:1080`
 11. optionally enter a global Webhook URL for completed generation/edit jobs
-12. optionally configure Prompt Optimizer with an endpoint URL, model, and API key/env ref
+12. optionally configure Prompt Optimizer with an endpoint URL, model, timeout seconds, and API key/env ref
 13. optionally click Edit System Prompt in the Prompt Optimizer settings to edit the optimizer system prompt stored at `DATA_DIR/prompt_optimizer_system_prompt.md`
 14. optionally run Health check for the saved preset
 15. click Save Preset
@@ -362,7 +362,7 @@ The panel supports these upstream paths. The API base URL may either omit or inc
 | `PROMPT_OPTIMIZER_API_URL` | empty | Full Chat Completions-compatible endpoint URL used by the prompt optimizer |
 | `PROMPT_OPTIMIZER_API_KEY` | empty | Prompt optimizer API key; prefer an env ref such as `${OPENAI_API_KEY}` because literal keys are stored as plaintext in SQLite |
 | `PROMPT_OPTIMIZER_MODEL` | `gpt-4o-mini` | Prompt optimizer model |
-| `PROMPT_OPTIMIZER_TIMEOUT_SECONDS` | `20` | Prompt optimizer request timeout in seconds |
+| `PROMPT_OPTIMIZER_TIMEOUT_SECONDS` | `60` | Prompt optimizer request timeout in seconds |
 | `PROMPT_OPTIMIZER_MAX_OUTPUT_CHARS` | `4000` | Max optimized prompt length returned to the textarea |
 | `PROMPT_OPTIMIZER_HOST_ALLOWLIST` | empty | Optional comma-separated hostname allowlist for the optimizer endpoint |
 | `APP_VERSION` | `VERSION` file | Override the app version shown in the UI and returned by `/api/version`; read on each request |
@@ -454,7 +454,7 @@ The panel supports these upstream paths. The API base URL may either omit or inc
 - SQLite repository operations use short-lived connections with WAL enabled at startup; app shutdown and tests call the storage close hook so connection lifecycle stays explicit
 - generation and edit share one queue (`MAX_ACTIVE_GENERATE_JOBS` + `MAX_QUEUED_GENERATE_JOBS`), all edit source images are staged under `DATA_DIR/edit-sources` and additionally capped by `MAX_PENDING_EDIT_SOURCE_MB`, support cancellation, and persist terminal history including `completed_at`
 - batch generation (`n > 1`) consumes one public queue/running slot; the parent job aggregates successful child results into `images[]`, while Gallery metadata keeps the user-requested `n`
-- Prompt Optimizer uses its own server-side Chat Completions-compatible endpoint config, resolves API key env refs on the backend, stores its editable system prompt in `DATA_DIR/prompt_optimizer_system_prompt.md`, and does not consume generation/edit queue capacity.
+- Prompt Optimizer uses its own server-side Chat Completions-compatible endpoint config and user-configurable request timeout, resolves API key env refs on the backend, stores its editable system prompt in `DATA_DIR/prompt_optimizer_system_prompt.md`, and does not consume generation/edit queue capacity.
 - SSE is the primary progress channel; `/api/generate/jobs` provides list/history (`include_finished=true`, optional `limit`/`offset`, optional `failed_only=true`), `/api/generate/jobs/history` clears terminal history, and `/api/generate/jobs/events` streams debounced live job-list changes from memory
 - terminal job history includes `stage_timings` for `upstream_wait`, `download_decode`, `validate`, `thumbnail`, and `db_insert`; slow gallery queries are logged with query filters and totals and counted in metrics; optional metrics include queue depth, running jobs, failure ratios, job-stage latencies, and slow SQLite query counters; terminal job statuses distinguish `cancelled`, `interrupted`, and `upstream_error` in addition to the generic `error`
 - upstream JSON/SSE bodies are read with a `MAX_UPSTREAM_JSON_MB` cap before parsing, and upstream image URL downloads are revalidated (SSRF-aware, no blind redirect follow) and bounded by `MAX_FILE_SIZE_MB`
@@ -758,7 +758,7 @@ curl http://localhost:9090/health
 9. 填写 API Key，或填写 `${OPENAI_API_KEY}` 这类环境变量引用；直接填写的 key 会以明文保存到 SQLite，优先用环境变量引用
 10. 可选：填写全局 SOCKS5 代理，例如 `socks5://127.0.0.1:1080`
 11. 可选：填写全局 Webhook URL，用于生成/编辑任务完成回调
-12. 可选：配置提示词优化器的 endpoint URL、模型和 API Key/环境变量引用
+12. 可选：配置提示词优化器的 endpoint URL、模型、超时时间和 API Key/环境变量引用
 13. 可选：对已保存预设执行 Health check
 14. 点击 Save Preset
 15. 输入提示词
@@ -863,7 +863,7 @@ curl http://localhost:9090/health
 | `PROMPT_OPTIMIZER_API_URL` | 空 | 提示词优化器使用的完整 Chat Completions 兼容 endpoint URL |
 | `PROMPT_OPTIMIZER_API_KEY` | 空 | 提示词优化器 API Key；优先使用 `${OPENAI_API_KEY}` 这类环境变量引用，直接填写的 key 会以明文保存到 SQLite |
 | `PROMPT_OPTIMIZER_MODEL` | `gpt-4o-mini` | 提示词优化器模型 |
-| `PROMPT_OPTIMIZER_TIMEOUT_SECONDS` | `20` | 提示词优化请求超时时间（秒） |
+| `PROMPT_OPTIMIZER_TIMEOUT_SECONDS` | `60` | 提示词优化请求超时时间（秒） |
 | `PROMPT_OPTIMIZER_MAX_OUTPUT_CHARS` | `4000` | 回填到文本框的优化后提示词最大长度 |
 | `PROMPT_OPTIMIZER_HOST_ALLOWLIST` | 空 | 可选的优化器 endpoint 主机名白名单，逗号分隔 |
 | `APP_VERSION` | `VERSION` 文件 | 覆盖界面显示和 `/api/version` 返回的当前应用版本；每次请求实时读取 |
@@ -953,7 +953,7 @@ curl http://localhost:9090/health
 - SQLite 仓储操作使用短连接，并在启动时启用 WAL；应用 shutdown 和测试 reset 会调用 storage close hook，连接生命周期保持显式
 - 生成与编辑共用队列（`MAX_ACTIVE_GENERATE_JOBS` + `MAX_QUEUED_GENERATE_JOBS`）；所有编辑源图先落到 `DATA_DIR/edit-sources` 并额外受 `MAX_PENDING_EDIT_SOURCE_MB` 总量限制；支持取消，并持久化终态历史（含 `completed_at`）
 - 批量生成（`n > 1`）只占一个公开队列/运行槽；父任务会把成功子结果聚合到 `images[]`，Gallery 元数据保留用户请求的 `n`
-- 提示词优化器使用独立的服务端 Chat Completions 兼容 endpoint 配置，在后端解析 API Key 环境变量引用，不占用生成/编辑任务队列容量。
+- 提示词优化器使用独立的服务端 Chat Completions 兼容 endpoint 配置和用户可配置请求超时时间，在后端解析 API Key 环境变量引用，不占用生成/编辑任务队列容量。
 - SSE 是主进度通道；`/api/generate/jobs` 提供列表/历史（`include_finished=true`，可选 `limit`/`offset`，可选 `failed_only=true`），`/api/generate/jobs/history` 清空终态历史，`/api/generate/jobs/events` 从内存推送 debounce 后的实时任务列表变化
 - 任务终态历史包含 `stage_timings`：`upstream_wait`、`download_decode`、`validate`、`thumbnail`、`db_insert`；慢 Gallery 查询日志会带筛选条件与 total，并计入 metrics；可选 metrics 包含队列深度、运行中任务数、失败率、任务分段耗时和慢 SQLite 查询数；终态状态区分 `cancelled`、`interrupted` 和 `upstream_error`，同时保留通用 `error`
 - 上游 JSON/SSE 响应会在解析前受 `MAX_UPSTREAM_JSON_MB` 限制；上游图片 URL 下载会做 SSRF/重定向目标复核，并受 `MAX_FILE_SIZE_MB` 限制

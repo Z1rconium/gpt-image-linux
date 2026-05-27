@@ -53,6 +53,7 @@
   let promptOptimizerEnabled = false;
   let promptOptimizerApiUrl = '';
   let promptOptimizerModel = 'gpt-4o-mini';
+  let promptOptimizerTimeoutSeconds: number | string = 60;
   let promptOptimizerApiKey = '';
   let promptOptimizerApiKeyInputType = 'password';
   let systemPromptOpen = false;
@@ -80,6 +81,7 @@
     promptOptimizerEnabled = Boolean(settings.prompt_optimizer?.enabled);
     promptOptimizerApiUrl = settings.prompt_optimizer?.api_url || '';
     promptOptimizerModel = settings.prompt_optimizer?.model || 'gpt-4o-mini';
+    promptOptimizerTimeoutSeconds = settings.prompt_optimizer?.timeout_seconds || 60;
     promptOptimizerApiKey =
       settings.prompt_optimizer?.api_key_source === 'env' && settings.prompt_optimizer.api_key_env_var
         ? `\${${settings.prompt_optimizer.api_key_env_var}}`
@@ -92,6 +94,16 @@
   $: if (!open && systemPromptOpen) {
     systemPromptOpen = false;
     systemPromptError = '';
+  }
+
+  function normalizePromptOptimizerTimeout() {
+    const parsed = Number.parseInt(String(promptOptimizerTimeoutSeconds), 10);
+    promptOptimizerTimeoutSeconds = Number.isFinite(parsed) && parsed > 0 ? parsed : 60;
+  }
+
+  function promptOptimizerTimeoutValue() {
+    const parsed = Number.parseInt(String(promptOptimizerTimeoutSeconds), 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 60;
   }
 
   async function save() {
@@ -113,6 +125,7 @@
         enabled: promptOptimizerEnabled,
         api_url: promptOptimizerApiUrl.trim(),
         model: promptOptimizerModel.trim(),
+        timeout_seconds: promptOptimizerTimeoutValue(),
         api_key: promptOptimizerApiKey.trim() === MASKED_API_KEY_VALUE ? null : promptOptimizerApiKey.trim()
       }
     });
@@ -324,6 +337,18 @@
               <label class="block">
                 <span class="mb-1.5 block text-xs font-medium text-zinc-400">{$t.settings.promptOptimizerModel}</span>
                 <input bind:value={promptOptimizerModel} class="control-focus w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2.5 font-mono text-sm text-zinc-100 focus:border-emerald-500" placeholder="gpt-4o-mini" />
+              </label>
+              <label class="block">
+                <span class="mb-1.5 block text-xs font-medium text-zinc-400">{$t.settings.promptOptimizerTimeout}</span>
+                <input
+                  bind:value={promptOptimizerTimeoutSeconds}
+                  type="number"
+                  min="1"
+                  step="1"
+                  inputmode="numeric"
+                  class="control-focus w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2.5 font-mono text-sm text-zinc-100 focus:border-emerald-500"
+                  on:blur={normalizePromptOptimizerTimeout}
+                />
               </label>
               <label class="block">
                 <span class="mb-1.5 block text-xs font-medium text-zinc-400">{$t.settings.promptOptimizerApiKey}</span>

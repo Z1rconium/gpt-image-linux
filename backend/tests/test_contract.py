@@ -79,7 +79,7 @@ def _configure_runtime(tmp_path: Path, *, access_key: str = "", allow_unauthenti
     config.PROMPT_OPTIMIZER_API_URL = ""
     config.PROMPT_OPTIMIZER_API_KEY = ""
     config.PROMPT_OPTIMIZER_MODEL = "gpt-4o-mini"
-    config.PROMPT_OPTIMIZER_TIMEOUT_SECONDS = 20
+    config.PROMPT_OPTIMIZER_TIMEOUT_SECONDS = 60
     config.PROMPT_OPTIMIZER_MAX_OUTPUT_CHARS = 4000
     config.PROMPT_OPTIMIZER_HOST_ALLOWLIST = ""
 
@@ -997,6 +997,7 @@ def test_prompt_optimizer_settings_mask_preserve_and_clear(client):
     settings = client.get("/api/settings").json()
     assert settings["prompt_optimizer"]["enabled"] is False
     assert settings["prompt_optimizer"]["has_api_key"] is False
+    assert settings["prompt_optimizer"]["timeout_seconds"] == 60
 
     updated = client.post(
         "/api/settings",
@@ -1006,6 +1007,7 @@ def test_prompt_optimizer_settings_mask_preserve_and_clear(client):
                 "enabled": True,
                 "api_url": "https://example.com/v1/chat/completions",
                 "model": "gpt-4o-mini",
+                "timeout_seconds": 75,
                 "api_key": "optimizer-secret",
             },
         ),
@@ -1017,10 +1019,12 @@ def test_prompt_optimizer_settings_mask_preserve_and_clear(client):
     assert optimizer["enabled"] is True
     assert optimizer["api_url"] == "https://example.com/v1/chat/completions"
     assert optimizer["model"] == "gpt-4o-mini"
+    assert optimizer["timeout_seconds"] == 75
     assert optimizer["has_api_key"] is True
     assert optimizer["api_key_source"] == "stored"
     assert "optimizer-secret" not in json.dumps(body)
     assert storage.load_prompt_optimizer_settings()["api_key"] == "optimizer-secret"
+    assert storage.load_prompt_optimizer_settings()["timeout_seconds"] == 75
 
     preserved = client.post(
         "/api/settings",
@@ -1030,12 +1034,14 @@ def test_prompt_optimizer_settings_mask_preserve_and_clear(client):
                 "enabled": True,
                 "api_url": "https://example.com/v1/chat/completions",
                 "model": "gpt-4o-mini",
+                "timeout_seconds": 90,
                 "api_key": "********",
             },
         ),
     )
     assert preserved.status_code == 200
     assert storage.load_prompt_optimizer_settings()["api_key"] == "optimizer-secret"
+    assert storage.load_prompt_optimizer_settings()["timeout_seconds"] == 90
 
     cleared = client.post(
         "/api/settings",
@@ -1045,6 +1051,7 @@ def test_prompt_optimizer_settings_mask_preserve_and_clear(client):
                 "enabled": False,
                 "api_url": "",
                 "model": "gpt-4o-mini",
+                "timeout_seconds": 60,
                 "api_key": "",
             },
         ),
@@ -1052,6 +1059,21 @@ def test_prompt_optimizer_settings_mask_preserve_and_clear(client):
     assert cleared.status_code == 200
     assert cleared.json()["prompt_optimizer"]["has_api_key"] is False
     assert storage.load_prompt_optimizer_settings()["api_key"] == ""
+
+    invalid_timeout = client.post(
+        "/api/settings",
+        json=_settings_payload(
+            cleared.json(),
+            prompt_optimizer={
+                "enabled": False,
+                "api_url": "",
+                "model": "gpt-4o-mini",
+                "timeout_seconds": 0,
+                "api_key": "",
+            },
+        ),
+    )
+    assert invalid_timeout.status_code == 422
 
 
 def test_prompt_optimizer_system_prompt_file_roundtrip(client):
@@ -1112,6 +1134,7 @@ def test_prompt_optimize_success_uses_configured_upstream(client, monkeypatch):
                 "enabled": True,
                 "api_url": "https://example.com/v1/chat/completions",
                 "model": "prompt-model",
+                "timeout_seconds": 45,
                 "api_key": "optimizer-key",
             },
         ),
@@ -1151,6 +1174,7 @@ def test_prompt_optimize_success_uses_configured_upstream(client, monkeypatch):
     assert seen["api_url"] == "https://example.com/v1/chat/completions"
     assert seen["api_key"] == "optimizer-key"
     assert seen["model"] == "prompt-model"
+    assert seen["timeout_seconds"] == 45
     assert seen["image_api_path"] == "/v1/responses"
     assert seen["system_prompt"] == "Custom optimizer prompt"
 

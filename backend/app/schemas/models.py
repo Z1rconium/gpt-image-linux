@@ -178,6 +178,7 @@ class PromptOptimizerSettingsResponse(BaseModel):
     enabled: bool = False
     api_url: str = ""
     model: str = "gpt-4o-mini"
+    timeout_seconds: int = 60
     api_key_masked: str = "***"
     has_api_key: bool = False
     api_key_source: ApiKeySource = "empty"
@@ -188,6 +189,7 @@ class PromptOptimizerSettingsRequest(BaseModel):
     enabled: Optional[bool] = None
     api_url: Optional[str] = None
     model: Optional[str] = None
+    timeout_seconds: Optional[int] = Field(default=None, ge=1)
     api_key: Optional[str] = None
 
 

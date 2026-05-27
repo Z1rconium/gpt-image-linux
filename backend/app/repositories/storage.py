@@ -290,7 +290,16 @@ def _default_prompt_optimizer_settings() -> dict:
         "api_url": config.PROMPT_OPTIMIZER_API_URL,
         "api_key": config.PROMPT_OPTIMIZER_API_KEY,
         "model": config.PROMPT_OPTIMIZER_MODEL,
+        "timeout_seconds": config.PROMPT_OPTIMIZER_TIMEOUT_SECONDS,
     }
+
+
+def _coerce_positive_int(value, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
 
 
 def _normalize_prompt_optimizer_settings(settings: dict | None) -> dict:
@@ -303,6 +312,10 @@ def _normalize_prompt_optimizer_settings(settings: dict | None) -> dict:
         "api_key": str(settings.get("api_key") or "").strip(),
         "model": str(settings.get("model") or default["model"]).strip()
         or default["model"],
+        "timeout_seconds": _coerce_positive_int(
+            settings.get("timeout_seconds"),
+            default["timeout_seconds"],
+        ),
     }
 
 

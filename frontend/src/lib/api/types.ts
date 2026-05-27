@@ -40,6 +40,7 @@ export type PromptOptimizerSettings = {
   enabled: boolean;
   api_url: string;
   model: string;
+  timeout_seconds: number;
   api_key_masked: string;
   has_api_key: boolean;
   api_key_source: ApiKeySource;
@@ -50,6 +51,7 @@ export type PromptOptimizerSettingsInput = {
   enabled?: boolean | null;
   api_url?: string | null;
   model?: string | null;
+  timeout_seconds?: number | null;
   api_key?: string | null;
 };
 
