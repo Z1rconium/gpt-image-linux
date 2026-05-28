@@ -142,6 +142,16 @@ def parse_sse_events(response_text: str) -> list[dict[str, Any]]:
     return events
 
 
+def is_json_content_type(content_type: str) -> bool:
+    media_type = content_type.split(";", 1)[0].strip().lower()
+    return media_type == "application/json" or media_type.endswith("+json")
+
+
+def looks_like_json_body(response_text: str) -> bool:
+    stripped = response_text.lstrip()
+    return stripped.startswith("{") or stripped.startswith("[")
+
+
 def append_unique_image_result(
     images: list[dict[str, str]],
     seen: set[tuple[str, str]],
@@ -656,7 +666,9 @@ async def parse_upstream_json_response(
         progress("received_api_response", "Received upstream API response")
 
     content_type = resp.headers.get("Content-Type", "")
-    is_json_response = "application/json" in content_type
+    is_json_response = is_json_content_type(content_type) or looks_like_json_body(
+        response_text
+    )
 
     if status >= 400:
         raise_upstream_error(status, response_text, is_json_response, api_path)
@@ -693,8 +705,12 @@ async def parse_upstream_chat_completion_response(
         progress("received_api_response", "Received upstream API response")
 
     content_type = resp.headers.get("Content-Type", "")
-    is_json_response = "application/json" in content_type
-    is_sse_response = "text/event-stream" in content_type or response_text.lstrip().startswith("data:")
+    is_json_response = is_json_content_type(content_type) or looks_like_json_body(
+        response_text
+    )
+    is_sse_response = "text/event-stream" in content_type or response_text.lstrip().startswith(
+        "data:"
+    )
 
     if status >= 400:
         raise_upstream_error(status, response_text, is_json_response, api_path)

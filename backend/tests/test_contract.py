@@ -3512,6 +3512,56 @@ def test_upstream_json_response_rejects_stream_over_limit(tmp_path):
         )
 
 
+def test_upstream_json_response_accepts_json_body_with_wrong_content_type(tmp_path):
+    _configure_runtime(tmp_path)
+    from backend.app.integrations import upstream_client
+
+    image_b64 = base64.b64encode(PNG_BYTES).decode("ascii")
+    response_body = json.dumps(
+        {"created": 1779943365, "data": [{"b64_json": image_b64}]}
+    ).encode("utf-8")
+    resp = _FakeResponse(
+        200,
+        {"Content-Type": "text/plain; charset=utf-8"},
+        [response_body],
+    )
+
+    result, response_text = asyncio.run(
+        upstream_client.parse_upstream_json_response(
+            resp,
+            "/v1/images/generations",
+            None,
+        )
+    )
+
+    assert result["data"][0]["b64_json"] == image_b64
+    assert response_text.startswith('{"created":')
+
+
+def test_upstream_chat_response_accepts_json_body_with_wrong_content_type(tmp_path):
+    _configure_runtime(tmp_path)
+    from backend.app.integrations import upstream_client
+
+    response_body = json.dumps(
+        {"choices": [{"message": {"content": "https://example.com/generated.png"}}]}
+    ).encode("utf-8")
+    resp = _FakeResponse(
+        200,
+        {"Content-Type": "text/plain"},
+        [response_body],
+    )
+
+    result, _response_text = asyncio.run(
+        upstream_client.parse_upstream_chat_completion_response(
+            resp,
+            "/v1/chat/completions",
+            None,
+        )
+    )
+
+    assert result["choices"][0]["message"]["content"] == "https://example.com/generated.png"
+
+
 def test_image_url_download_rejects_private_peer_ip(client):
     session = _FakeSession(
         [
