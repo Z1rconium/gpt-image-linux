@@ -584,22 +584,8 @@ def _ensure_database():
                     sort_seq INTEGER
                 );
 
-                CREATE INDEX IF NOT EXISTS idx_gallery_entries_sort_seq
-                    ON gallery_entries(sort_seq DESC);
-                CREATE INDEX IF NOT EXISTS idx_gallery_entries_created_at
-                    ON gallery_entries(created_at DESC, sort_seq DESC);
                 CREATE INDEX IF NOT EXISTS idx_gallery_entries_filename
                     ON gallery_entries(filename);
-                CREATE INDEX IF NOT EXISTS idx_gallery_entries_missing_bytes_filename
-                    ON gallery_entries(filename) WHERE bytes IS NULL;
-                CREATE INDEX IF NOT EXISTS idx_gallery_entries_model_created_at
-                    ON gallery_entries(model, created_at DESC, sort_seq DESC);
-                CREATE INDEX IF NOT EXISTS idx_gallery_entries_preset_created_at
-                    ON gallery_entries(api_preset_name, created_at DESC, sort_seq DESC);
-                CREATE INDEX IF NOT EXISTS idx_gallery_entries_size_created_at
-                    ON gallery_entries(size, created_at DESC, sort_seq DESC);
-                CREATE INDEX IF NOT EXISTS idx_gallery_entries_filename_bytes
-                    ON gallery_entries(filename, bytes) WHERE bytes IS NOT NULL;
 
 
                 CREATE TABLE IF NOT EXISTS generate_jobs (
@@ -646,8 +632,6 @@ def _ensure_database():
                     updated_at TEXT NOT NULL
                 );
 
-                CREATE INDEX IF NOT EXISTS idx_prompt_snippets_favorite_updated_at
-                    ON prompt_snippets(favorite DESC, updated_at DESC);
                 """
             )
             _migrate_api_presets_schema(conn)
