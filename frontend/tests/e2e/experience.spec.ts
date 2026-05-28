@@ -988,8 +988,8 @@ test('gallery url state restores filters, lightbox, and job history tab', async 
   await mockApi(page);
   await page.goto('/?prompt=Second&favorite=true&image=img-2&jobs=history');
 
-  await expect(page.getByLabel('Filter prompt')).toHaveValue('Second');
-  await expect(page).toHaveURL(/prompt=Second/);
+  await expect(page.getByLabel('Filter prompt')).toHaveValue('');
+  await expect(page).not.toHaveURL(/prompt=Second/);
   await expect(page).toHaveURL(/favorite=true/);
 
   const lightbox = page.getByRole('dialog', { name: 'Image Details' });
@@ -1006,8 +1006,13 @@ test('gallery url state restores filters, lightbox, and job history tab', async 
   await expect(jobsDrawer.getByText('saved prompt')).toBeVisible();
   await expect(page).toHaveURL(/jobs=history/);
 
+  const promptFilterRequest = page.waitForRequest((request) => {
+    const url = new URL(request.url());
+    return request.method() === 'GET' && url.pathname === '/api/gallery' && url.searchParams.get('prompt') === 'First';
+  });
   await page.getByLabel('Filter prompt').fill('First');
-  await expect(page).toHaveURL(/prompt=First/);
+  await promptFilterRequest;
+  await expect(page).not.toHaveURL(/prompt=First/);
 });
 
 test('gallery page input jumps to the requested page on Enter', async ({ page }) => {

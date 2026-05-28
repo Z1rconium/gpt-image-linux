@@ -18,6 +18,11 @@ from ..core.api_paths import default_model_for_api_path, normalize_api_preset
 from ..core.constants import ACTIVE_GENERATE_JOB_STATUSES
 from ..core.observability import observe_job_stage
 from ..core.utils import utc_now
+from ..core.validators import (
+    normalize_secret_env_ref_or_plaintext,
+    normalize_socks5_proxy_url,
+    normalize_webhook_url,
+)
 from ..schemas.models import GalleryEntry, GalleryFilterOptions, PromptSnippet
 from .image_files import (
     IMAGE_CONTENT_TYPE_FORMATS,
@@ -79,6 +84,7 @@ __all__ = [
     "get_gallery_entry",
     "get_gallery_entries_by_ids",
     "get_gallery_filter_options",
+    "is_gallery_filename_referenced",
     "get_gallery_page",
     "get_gallery_total_bytes",
     "get_generate_job",
@@ -190,6 +196,8 @@ UPSTREAM_SOCKS5_PROXY_KEY = "upstream_socks5_proxy"
 WEBHOOK_URL_KEY = "webhook_url"
 PROMPT_OPTIMIZER_SETTINGS_KEY = "prompt_optimizer_settings"
 SQLITE_TIMEOUT_SECONDS = 30.0
+DATA_DIR_MODE = 0o700
+DATA_FILE_MODE = 0o600
 GALLERY_FTS_VERSION_KEY = "gallery_fts_version"
 GALLERY_FTS_VERSION = "trigram-v1"
 GALLERY_FTS_MIN_QUERY_LENGTH = 3
@@ -224,6 +232,47 @@ def _remove_verified_thumbnail(filename: str):
 def _clear_verified_thumbnails():
     with _verified_thumbnails_lock:
         _verified_thumbnails.clear()
+
+
+def _normalize_stored_api_key(value: str | None) -> str:
+    return normalize_secret_env_ref_or_plaintext(
+        value,
+        field_name="API key",
+    )
+
+
+def _normalize_stored_socks5_proxy(value: str | None) -> str:
+    return normalize_secret_env_ref_or_plaintext(
+        value,
+        field_name="SOCKS5 proxy URL",
+        normalizer=normalize_socks5_proxy_url,
+    )
+
+
+def _normalize_stored_webhook_url(value: str | None) -> str:
+    return normalize_secret_env_ref_or_plaintext(
+        value,
+        field_name="Webhook URL",
+        normalizer=normalize_webhook_url,
+    )
+
+
+def _chmod_path(path: Path, mode: int) -> None:
+    if os.name == "nt" or not path.exists():
+        return
+    try:
+        os.chmod(path, mode)
+    except OSError as e:
+        logger.warning("Failed to chmod %s to %#o: %s", path, mode, e)
+
+
+def _secure_data_storage_permissions() -> None:
+    data_dir = Path(config.DATA_DIR)
+    database_path = Path(config.DATABASE_FILE)
+    for directory in {data_dir, database_path.parent}:
+        _chmod_path(directory, DATA_DIR_MODE)
+    for suffix in ("", "-wal", "-shm"):
+        _chmod_path(Path(f"{database_path}{suffix}"), DATA_FILE_MODE)
 
 
 
@@ -263,14 +312,16 @@ def _invalidate_gallery_total_bytes_cache():
 def _default_settings() -> dict:
     return {
         "active_preset_id": "default",
-        "upstream_socks5_proxy": config.DEFAULT_UPSTREAM_SOCKS5_PROXY,
+        "upstream_socks5_proxy": _normalize_stored_socks5_proxy(
+            config.DEFAULT_UPSTREAM_SOCKS5_PROXY
+        ),
         "webhook_url": "",
         "presets": [
             {
                 "id": "default",
                 "name": "Default",
                 "api_url": config.DEFAULT_API_URL.rstrip("/"),
-                "api_key": config.DEFAULT_API_KEY,
+                "api_key": _normalize_stored_api_key(config.DEFAULT_API_KEY),
                 "api_path": config.DEFAULT_API_PATH,
                 "default_model": default_model_for_api_path(config.DEFAULT_API_PATH),
                 "default_response_format": "url",
@@ -292,7 +343,7 @@ def _default_prompt_optimizer_settings() -> dict:
     return {
         "enabled": config.PROMPT_OPTIMIZER_ENABLED,
         "api_url": config.PROMPT_OPTIMIZER_API_URL,
-        "api_key": config.PROMPT_OPTIMIZER_API_KEY,
+        "api_key": _normalize_stored_api_key(config.PROMPT_OPTIMIZER_API_KEY),
         "model": config.PROMPT_OPTIMIZER_MODEL,
         "timeout_seconds": config.PROMPT_OPTIMIZER_TIMEOUT_SECONDS,
     }
@@ -313,7 +364,7 @@ def _normalize_prompt_optimizer_settings(settings: dict | None) -> dict:
     return {
         "enabled": _coerce_bool(settings.get("enabled"), default["enabled"]),
         "api_url": str(settings.get("api_url") or "").strip(),
-        "api_key": str(settings.get("api_key") or "").strip(),
+        "api_key": _normalize_stored_api_key(settings.get("api_key")),
         "model": str(settings.get("model") or default["model"]).strip()
         or default["model"],
         "timeout_seconds": _coerce_positive_int(
@@ -331,6 +382,7 @@ def _ensure_directories():
     Path(config.THUMBNAILS_DIR).mkdir(parents=True, exist_ok=True)
     Path(config.DATA_DIR).mkdir(parents=True, exist_ok=True)
     Path(config.DATABASE_FILE).parent.mkdir(parents=True, exist_ok=True)
+    _secure_data_storage_permissions()
     _dirs_initialized = True
 
 
@@ -364,6 +416,7 @@ def _open_connection() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA busy_timeout = 30000")
+    _secure_data_storage_permissions()
     return conn
 
 
@@ -513,10 +566,12 @@ def _ensure_gallery_fts(conn: sqlite3.Connection):
 def _ensure_database():
     global _db_initialized
     if _db_initialized and Path(config.DATABASE_FILE).exists():
+        _secure_data_storage_permissions()
         return
 
     with _db_init_lock:
         if _db_initialized and Path(config.DATABASE_FILE).exists():
+            _secure_data_storage_permissions()
             return
 
         with _connect() as conn:
@@ -638,6 +693,7 @@ def _ensure_database():
             conn.commit()
 
         _db_initialized = True
+        _secure_data_storage_permissions()
 
 
 def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -780,12 +836,12 @@ def _normalize_settings(settings: dict | None) -> dict:
         return _default_settings()
 
     upstream_socks5_proxy = (
-        str(settings.get("upstream_socks5_proxy")).strip()
+        _normalize_stored_socks5_proxy(settings.get("upstream_socks5_proxy"))
         if settings.get("upstream_socks5_proxy") is not None
-        else config.DEFAULT_UPSTREAM_SOCKS5_PROXY
+        else _normalize_stored_socks5_proxy(config.DEFAULT_UPSTREAM_SOCKS5_PROXY)
     )
     webhook_url = (
-        str(settings.get("webhook_url")).strip()
+        _normalize_stored_webhook_url(settings.get("webhook_url"))
         if settings.get("webhook_url") is not None
         else ""
     )
@@ -804,6 +860,9 @@ def _normalize_settings(settings: dict | None) -> dict:
             continue
 
         normalized_preset = normalize_api_preset(preset, f"preset-{index + 1}")
+        normalized_preset["api_key"] = _normalize_stored_api_key(
+            normalized_preset.get("api_key")
+        )
         preset_id = normalized_preset["id"]
         if preset_id in seen_ids:
             continue
@@ -930,13 +989,15 @@ def _load_settings_from_conn(conn: sqlite3.Connection) -> dict | None:
     else:
         optimizer = _default_prompt_optimizer_settings()
 
-    return {
-        "active_preset_id": active_preset_id,
-        "upstream_socks5_proxy": upstream_socks5_proxy,
-        "webhook_url": webhook_url,
-        "presets": presets,
-        "prompt_optimizer": optimizer,
-    }
+    return _normalize_settings(
+        {
+            "active_preset_id": active_preset_id,
+            "upstream_socks5_proxy": upstream_socks5_proxy,
+            "webhook_url": webhook_url,
+            "presets": presets,
+            "prompt_optimizer": optimizer,
+        }
+    )
 
 
 def _normalize_gallery_entry(entry: dict[str, Any]) -> dict[str, Any] | None:
@@ -1255,6 +1316,7 @@ def load_settings() -> dict:
         settings = _default_settings()
         with _transaction(conn):
             _replace_settings_on_conn(conn, settings)
+        _secure_data_storage_permissions()
         return settings
 
 
@@ -1263,6 +1325,7 @@ def save_settings(settings: dict):
     with _connect() as conn:
         with _transaction(conn):
             _replace_settings_on_conn(conn, settings)
+    _secure_data_storage_permissions()
 
 
 def load_prompt_optimizer_settings() -> dict:
@@ -1283,6 +1346,7 @@ def save_prompt_optimizer_settings(settings: dict):
     with _connect() as conn:
         _set_setting_value(conn, PROMPT_OPTIMIZER_SETTINGS_KEY, json.dumps(normalized))
         conn.commit()
+    _secure_data_storage_permissions()
 
 
 def list_prompt_snippets(query: str = "") -> list[PromptSnippet]:
@@ -2468,6 +2532,15 @@ def _is_gallery_filename_referenced_on_conn(
         (filename,),
     ).fetchone()
     return row is not None
+
+
+def is_gallery_filename_referenced(filename: str) -> bool:
+    _ensure_database()
+    normalized = str(filename or "").strip()
+    if not normalized or not safe_image_path(normalized):
+        return False
+    with _connect() as conn:
+        return _is_gallery_filename_referenced_on_conn(conn, normalized)
 
 
 def _delete_gallery_file_if_unreferenced(filename: str) -> bool:

@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import logging
 import mimetypes
 import time
@@ -90,6 +91,22 @@ def build_gallery_filters(
         "date_from": normalize_gallery_date_filter(date_from),
         "date_to": normalize_gallery_date_filter(date_to, end_of_day=True),
         "favorite": favorite,
+    }
+
+
+def _gallery_filters_for_log(filters: dict) -> dict:
+    prompt = str(filters.get("prompt") or "")
+    return {
+        "prompt_present": bool(prompt),
+        "prompt_len": len(prompt),
+        "prompt_hash": hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+        if prompt
+        else None,
+        **{
+            key: value
+            for key, value in filters.items()
+            if key != "prompt" and value not in (None, "", False)
+        },
     }
 
 
@@ -433,11 +450,7 @@ async def get_gallery_handler(
             gallery_page.page,
             gallery_page.page_size,
             gallery_page.total,
-            {
-                key: value
-                for key, value in filters.items()
-                if value not in (None, "", False)
-            },
+            _gallery_filters_for_log(filters),
         )
 
     return GalleryResponse(
@@ -678,6 +691,8 @@ async def _image_file_response(filename: str, *, download: bool = False):
     path = await asyncio.to_thread(storage.safe_image_path, filename)
     if not path or not await asyncio.to_thread(path.exists):
         raise HTTPException(status_code=404, detail="Image not found")
+    if not await asyncio.to_thread(storage.is_gallery_filename_referenced, filename):
+        raise HTTPException(status_code=404, detail="Image not found")
 
     media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
     if download:
@@ -702,6 +717,8 @@ async def serve_image(filename: str):
 
 @router.get("/api/thumb/{filename}")
 async def serve_thumbnail(filename: str):
+    if not await asyncio.to_thread(storage.is_gallery_filename_referenced, filename):
+        raise HTTPException(status_code=404, detail="Thumbnail not found")
     thumbnail_filename = await asyncio.to_thread(
         storage.ensure_thumbnail_for_image,
         filename,

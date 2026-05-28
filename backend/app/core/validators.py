@@ -1,6 +1,58 @@
 import ipaddress
+import os
+import re
 import socket
 from urllib.parse import urlparse, urlsplit, urlunsplit
+
+from . import settings as config
+
+
+ENV_VAR_REF_RE = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$")
+
+
+def get_env_var_ref_name(value: str | None) -> str | None:
+    match = ENV_VAR_REF_RE.match(str(value or "").strip())
+    return match.group(1) if match else None
+
+
+def is_malformed_env_var_ref(value: str | None) -> bool:
+    normalized = str(value or "").strip()
+    return bool(normalized) and ("${" in normalized or "}" in normalized) and not get_env_var_ref_name(normalized)
+
+
+def resolve_env_var_ref(value: str | None) -> str:
+    normalized = str(value or "").strip()
+    env_var = get_env_var_ref_name(normalized)
+    if env_var:
+        return os.getenv(env_var, "").strip()
+    return normalized
+
+
+def normalize_secret_env_ref_or_plaintext(
+    value: str | None,
+    *,
+    field_name: str,
+    normalizer=None,
+) -> str:
+    normalized = str(value or "").strip()
+    if not normalized:
+        return ""
+    if is_malformed_env_var_ref(normalized):
+        raise ValueError(
+            f"{field_name} env ref must be formatted as ${{ENV_VAR_NAME}}."
+        )
+
+    env_var = get_env_var_ref_name(normalized)
+    if env_var:
+        return f"${{{env_var}}}"
+
+    if not config.ALLOW_PLAINTEXT_SECRETS:
+        raise ValueError(
+            f"{field_name} must use ${{ENV_VAR_NAME}} unless "
+            "ALLOW_PLAINTEXT_SECRETS=true."
+        )
+
+    return normalizer(normalized) if normalizer is not None else normalized
 
 
 def _get_private_ip_ranges() -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]:
@@ -242,6 +294,8 @@ def mask_webhook_url(url: str | None) -> str:
     value = str(url or "").strip()
     if not value:
         return ""
+    if get_env_var_ref_name(value):
+        return value
 
     try:
         parsed = urlsplit(value)
@@ -292,6 +346,8 @@ def mask_socks5_proxy_url(url: str | None) -> str:
     value = str(url or "").strip()
     if not value:
         return ""
+    if get_env_var_ref_name(value):
+        return value
 
     try:
         parsed = urlsplit(value)

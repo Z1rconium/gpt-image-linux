@@ -4,6 +4,7 @@ from datetime import datetime
 
 from ..core.api_paths import DEFAULT_IMAGE_MODEL
 from ..core.validators import (
+    normalize_secret_env_ref_or_plaintext,
     normalize_socks5_proxy_url,
     normalize_upstream_base_url,
     normalize_webhook_url,
@@ -51,8 +52,8 @@ class PresetCreateRequest(StrictRequestModel):
         max_length=8192,
         description=(
             "API key for authentication, or ${ENV_VAR_NAME} to resolve from "
-            "the server environment. Literal keys are stored as plaintext in "
-            "SQLite; env refs are preferred."
+            "the server environment. Literal keys require "
+            "ALLOW_PLAINTEXT_SECRETS=true."
         ),
     )
     api_path: Optional[ApiPath] = None
@@ -66,6 +67,16 @@ class PresetCreateRequest(StrictRequestModel):
         if value is None:
             return None
         return normalize_upstream_base_url(value)
+
+    @field_validator("api_key")
+    @classmethod
+    def validate_api_key(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        return normalize_secret_env_ref_or_plaintext(
+            value,
+            field_name="API key",
+        )
 
 
 class SettingsRequest(StrictRequestModel):
@@ -82,8 +93,8 @@ class SettingsRequest(StrictRequestModel):
         max_length=8192,
         description=(
             "API key for authentication, or ${ENV_VAR_NAME} to resolve from "
-            "the server environment. Literal keys are stored as plaintext in "
-            "SQLite; env refs are preferred. Omit/null to keep the current key."
+            "the server environment. Literal keys require "
+            "ALLOW_PLAINTEXT_SECRETS=true. Omit/null to keep the current key."
         ),
     )
     api_path: ApiPath = "/v1/images/generations"
@@ -94,7 +105,9 @@ class SettingsRequest(StrictRequestModel):
         max_length=2048,
         description=(
             "Optional global SOCKS5 proxy for upstream generation/edit API calls. "
-            "Null keeps the current value; an empty string clears it."
+            "Use ${ENV_VAR_NAME} by default; literal values require "
+            "ALLOW_PLAINTEXT_SECRETS=true. Null keeps the current value; "
+            "an empty string clears it."
         ),
     )
     webhook_url: Optional[str] = Field(
@@ -102,7 +115,9 @@ class SettingsRequest(StrictRequestModel):
         max_length=2048,
         description=(
             "Optional global HTTPS webhook callback URL for completed generation/edit jobs. "
-            "Null keeps the current value; an empty string clears it."
+            "Use ${ENV_VAR_NAME} by default; literal values require "
+            "ALLOW_PLAINTEXT_SECRETS=true. Null keeps the current value; "
+            "an empty string clears it."
         ),
     )
     prompt_optimizer: Optional["PromptOptimizerSettingsRequest"] = None
@@ -112,19 +127,37 @@ class SettingsRequest(StrictRequestModel):
     def validate_api_url(cls, value: str) -> str:
         return normalize_upstream_base_url(value)
 
+    @field_validator("api_key")
+    @classmethod
+    def validate_api_key(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        return normalize_secret_env_ref_or_plaintext(
+            value,
+            field_name="API key",
+        )
+
     @field_validator("upstream_socks5_proxy")
     @classmethod
     def validate_upstream_socks5_proxy(cls, value: Optional[str]) -> Optional[str]:
         if value is None:
             return None
-        return normalize_socks5_proxy_url(value)
+        return normalize_secret_env_ref_or_plaintext(
+            value,
+            field_name="SOCKS5 proxy URL",
+            normalizer=normalize_socks5_proxy_url,
+        )
 
     @field_validator("webhook_url")
     @classmethod
     def validate_settings_webhook_url(cls, value: Optional[str]) -> Optional[str]:
         if value is None:
             return None
-        return normalize_webhook_url(value)
+        return normalize_secret_env_ref_or_plaintext(
+            value,
+            field_name="Webhook URL",
+            normalizer=normalize_webhook_url,
+        )
 
 
 class SettingsResponse(BaseModel):
@@ -234,6 +267,16 @@ class PromptOptimizerSettingsRequest(StrictRequestModel):
         if not value.strip():
             return ""
         return normalize_upstream_base_url(value)
+
+    @field_validator("api_key")
+    @classmethod
+    def validate_api_key(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        return normalize_secret_env_ref_or_plaintext(
+            value,
+            field_name="Prompt optimizer API key",
+        )
 
 
 class PromptOptimizerSystemPromptResponse(BaseModel):

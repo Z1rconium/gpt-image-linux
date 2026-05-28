@@ -40,7 +40,7 @@ Key characteristics:
 - preview + job history with SSE progress, multi-image result previews, `completed_at`, elapsed time, per-job stage timings, loading states, detailed terminal statuses, an errors-only history filter, clear-all for persisted history, cancel for queued/running jobs, and reuse/retry from persisted history
 - shared queue and concurrency limits for generation/edit jobs
 - optional global Webhook URL with HTTPS-only validation, SSRF checks, signing, retry, and masked settings responses
-- gallery with filters (FTS-backed prompt search, model, preset, size, date range, favorite), URL-synced page/filter/lightbox/job-history state, direct page-number jump, lightbox previous/next navigation and left/right keyboard shortcuts, “Edit this image”, download, custom delete confirmations with 5-second undo for single images, batch actions with partial-success feedback, delete/delete-all, prompt/image-url copy, and on-demand total-size metadata
+- gallery with filters (FTS-backed prompt search, model, preset, size, date range, favorite), URL-synced page/non-prompt-filter/lightbox/job-history state, direct page-number jump, lightbox previous/next navigation and left/right keyboard shortcuts, “Edit this image”, download, custom delete confirmations with 5-second undo for single images, batch actions with partial-success feedback, delete/delete-all, prompt/image-url copy, and on-demand total-size metadata
 - prompt snippets drawer for reusable prompt templates, stored separately from gallery images in SQLite
 - ZIP export/import (`metadata.json`) with streaming upload, safety validation, low-memory export path, skipped-entry metadata for partial batch downloads, and visible import/export/download progress states
 - access-key gate, Host/public-origin allowlist, IP allowlist/proxy-header support, GitHub version badge, and CSP nonce injection
@@ -225,6 +225,7 @@ npm run frontend:dev
 ```
 
 Then open `http://localhost:5173`. The Vite dev server proxies `/api` and `/health` to FastAPI at `127.0.0.1:9090`, so browser requests stay same-origin in development.
+It binds to `127.0.0.1` by default; for LAN/external debugging, run `npm run frontend:dev -- --host 0.0.0.0`.
 
 For a single-process local smoke test, build the frontend first and run FastAPI:
 
@@ -253,10 +254,10 @@ curl http://localhost:9090/health
 6. choose the API path
 7. enter the preset default model; the Generate/Edit form's Model field defaults to the active preset's value
 8. choose the preset default Response Format; the Generate/Edit form's Response format field defaults to the active preset's value
-9. enter the API key, or an env ref such as `${OPENAI_API_KEY}`; literal keys are stored as plaintext in SQLite, so prefer env refs
-10. optionally enter a global SOCKS5 proxy such as `socks5://127.0.0.1:1080`
-11. optionally enter a global Webhook URL for completed generation/edit jobs
-12. optionally configure Prompt Optimizer with an endpoint URL, model, timeout seconds, and API key/env ref
+9. enter the API key, or an env ref such as `${OPENAI_API_KEY}`; literal keys require `ALLOW_PLAINTEXT_SECRETS=true`
+10. optionally enter a global SOCKS5 proxy or env ref such as `${UPSTREAM_PROXY_URL}`
+11. optionally enter a global Webhook URL or env ref such as `${WEBHOOK_URL}` for completed generation/edit jobs
+12. optionally configure Prompt Optimizer with an endpoint URL, model, timeout seconds, and API key/env ref; literal keys require `ALLOW_PLAINTEXT_SECRETS=true`
 13. optionally click Edit System Prompt in the Prompt Optimizer settings to edit the optimizer system prompt stored at `DATA_DIR/prompt_optimizer_system_prompt.md`
 14. optionally run Health check for the saved preset
 15. click Save Preset
@@ -310,19 +311,20 @@ The panel supports these upstream paths. The API base URL may either omit or inc
 - checks include API path allowability, HTTPS URL/hostname validation, upstream host allowlist and SSRF DNS/private-IP validation, API key/env-ref presence, and a low-cost `OPTIONS`/`HEAD` upstream probe
 - returned shape is `{ status, checks: [{ name, status, message }] }`, where each status is `ok`, `warning`, or `error`
 - API key env refs use the exact `${ENV_VAR_NAME}` form; the database stores the reference string and generation/edit calls resolve it from the server environment at request time
-- literal API keys are stored as plaintext in SQLite, so env refs are the safer default for anything you expect to keep around
+- literal API keys are rejected by default; set `ALLOW_PLAINTEXT_SECRETS=true` only if you intentionally want plaintext SQLite storage
 
 ## Upstream SOCKS5 proxy
 
 - The Settings drawer has one global `SOCKS5 proxy` field, independent of API presets.
 - Leave it empty for direct upstream API calls.
-- Use `socks5://host:port` or `socks5://user:pass@host:port`; stored proxy passwords are masked in API responses and the UI.
+- Use an env ref such as `${UPSTREAM_PROXY_URL}` by default. Literal values like `socks5://host:port` or `socks5://user:pass@host:port` require `ALLOW_PLAINTEXT_SECRETS=true`; stored proxy passwords are masked in API responses and the UI.
 - The proxy boundary is intentionally narrow: only generation/edit upstream API `POST` calls use it. Preset health checks, webhooks, version checks, frontend `/api/*` requests, and image URL downloads stay direct.
 
 ## Global Webhook URL
 
 - The Settings drawer has one global `Webhook URL` field directly below `SOCKS5 proxy`; it is independent of API presets.
 - Leave it empty to disable job callbacks.
+- Use an env ref such as `${WEBHOOK_URL}` by default. Literal webhook URLs require `ALLOW_PLAINTEXT_SECRETS=true`.
 - When configured, completed generation/edit jobs send signed webhook callbacks to that HTTPS URL.
 - `WEBHOOK_SIGNING_SECRET` is required when a Webhook URL is configured. Stored webhook URLs are masked in API responses and the UI.
 
@@ -354,13 +356,14 @@ The panel supports these upstream paths. The API base URL may either omit or inc
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `DEFAULT_API_URL` | empty | Pre-fill API base URL; may omit or include `/v1` |
-| `DEFAULT_API_KEY` | empty | Pre-fill API key; prefer an env ref such as `${OPENAI_API_KEY}` because literal keys are stored as plaintext in SQLite |
+| `DEFAULT_API_KEY` | empty | Pre-fill API key; use an env ref such as `${OPENAI_API_KEY}` by default. Literal keys require `ALLOW_PLAINTEXT_SECRETS=true` |
 | `DEFAULT_API_PATH` | `/v1/images/generations` | Default upstream path; supported values are `/v1/images/generations`, `/v1/responses`, and `/v1/chat/completions` |
 | `DEFAULT_RESPONSES_MODEL` | `gpt-5.4` | Fallback top-level model used for `/v1/responses` when no request/preset model is provided |
-| `DEFAULT_UPSTREAM_SOCKS5_PROXY` | empty | Optional default global SOCKS5 proxy for generation/edit upstream API calls |
+| `DEFAULT_UPSTREAM_SOCKS5_PROXY` | empty | Optional default global SOCKS5 proxy or env ref for generation/edit upstream API calls |
+| `ALLOW_PLAINTEXT_SECRETS` | `false` | Allow literal API keys / SOCKS5 proxy URLs / Webhook URLs to be persisted in SQLite instead of requiring `${ENV_VAR_NAME}` refs |
 | `PROMPT_OPTIMIZER_ENABLED` | `false` | Enable the server-side prompt optimizer |
 | `PROMPT_OPTIMIZER_API_URL` | empty | Full Chat Completions-compatible endpoint URL used by the prompt optimizer |
-| `PROMPT_OPTIMIZER_API_KEY` | empty | Prompt optimizer API key; prefer an env ref such as `${OPENAI_API_KEY}` because literal keys are stored as plaintext in SQLite |
+| `PROMPT_OPTIMIZER_API_KEY` | empty | Prompt optimizer API key; use an env ref such as `${OPENAI_API_KEY}` by default. Literal keys require `ALLOW_PLAINTEXT_SECRETS=true` |
 | `PROMPT_OPTIMIZER_MODEL` | `gpt-4o-mini` | Prompt optimizer model |
 | `PROMPT_OPTIMIZER_TIMEOUT_SECONDS` | `60` | Prompt optimizer request timeout in seconds |
 | `PROMPT_OPTIMIZER_MAX_OUTPUT_CHARS` | `4000` | Max optimized prompt length returned to the textarea |
@@ -372,7 +375,7 @@ The panel supports these upstream paths. The API base URL may either omit or inc
 | `VERSION_CHECK_TIMEOUT_SECONDS` | `3` | Timeout for each GitHub latest release or branch `VERSION` request |
 | `VERSION_CHECK_BRANCH` | `main` | Branch used for the fallback raw `VERSION` file check |
 | `ENABLE_METRICS` | `false` | Enable `/api/metrics` JSON counters/gauges/rates/latency summaries and Prometheus text output |
-| `SLOW_GALLERY_QUERY_MS` | `200` | Log `/api/gallery` requests at or above this threshold with filters, page, total, and DB query time |
+| `SLOW_GALLERY_QUERY_MS` | `200` | Log `/api/gallery` requests at or above this threshold with prompt presence/length/hash, other filters, page, total, and DB query time |
 | `ACCESS_KEY` | empty | Required by default; all non-health routes require unlock when set |
 | `ALLOW_UNAUTHENTICATED` | `false` | Set `true` to explicitly allow startup without `ACCESS_KEY` |
 | `IP_ALLOWLIST` | empty | Comma-separated allowed IPs/CIDRs |
@@ -457,12 +460,12 @@ The panel supports these upstream paths. The API base URL may either omit or inc
 - app version comes from `APP_VERSION` then `VERSION`; both the local app version and optional GitHub remote check are evaluated on each web-triggered version request. The remote check reads the latest release first, falls back to the configured branch `VERSION`, and can show a `New` badge without blocking usage.
 - when `PUBLIC_ORIGIN` or `ALLOWED_HOSTS` is configured, unknown `Host` or trusted `X-Forwarded-Host` values are rejected before CSRF checks; `Sec-Fetch-Site: same-origin` does not bypass the Host allowlist
 - presets, prompt snippets, and gallery/job data persist only in `DATABASE_FILE`
-- SQLite repository operations use short-lived connections with WAL enabled at startup; app shutdown and tests call the storage close hook so connection lifecycle stays explicit
+- SQLite repository operations use short-lived connections with WAL enabled at startup; `DATA_DIR` is chmodded to `0700`, the SQLite DB/sidecars are chmodded to `0600`, and app shutdown/tests call the storage close hook so connection lifecycle stays explicit
 - generation and edit share one queue measured in image units (`MAX_ACTIVE_GENERATE_JOBS` + `MAX_QUEUED_GENERATE_JOBS`), all edit source images are staged under `DATA_DIR/edit-sources` and additionally capped by `MAX_PENDING_EDIT_SOURCE_MB`, support cancellation, and persist terminal history including `completed_at`
 - batch generation (`n > 1`) consumes `n` queue units; the parent job aggregates successful child results into `images[]`, Gallery metadata keeps the user-requested `n`, and actual upstream child calls are bounded by the global upstream-request semaphore
 - Prompt Optimizer uses its own server-side Chat Completions-compatible endpoint config and user-configurable request timeout/response-size cap, resolves API key env refs on the backend, stores its editable system prompt in `DATA_DIR/prompt_optimizer_system_prompt.md`, and does not consume generation/edit queue capacity.
 - SSE is the primary progress channel; `/api/generate/jobs` provides list/history (`include_finished=true`, optional `limit`/`offset`, optional `failed_only=true`), `/api/generate/jobs/history` clears terminal history, and `/api/generate/jobs/events` streams debounced live job-list changes from memory
-- terminal job history includes `stage_timings` for `upstream_wait`, `download_decode`, `validate`, `thumbnail`, and `db_insert`; slow gallery queries are logged with query filters and totals and counted in metrics; optional metrics include queue depth, running jobs, failure ratios, job-stage latencies, and slow SQLite query counters; terminal job statuses distinguish `cancelled`, `interrupted`, and `upstream_error` in addition to the generic `error`
+- terminal job history includes `stage_timings` for `upstream_wait`, `download_decode`, `validate`, `thumbnail`, and `db_insert`; slow gallery queries are logged with prompt presence/length/hash plus other filters and totals and counted in metrics; optional metrics include queue depth, running jobs, failure ratios, job-stage latencies, and slow SQLite query counters; terminal job statuses distinguish `cancelled`, `interrupted`, and `upstream_error` in addition to the generic `error`
 - upstream JSON/SSE bodies are read with a `MAX_UPSTREAM_JSON_MB` cap before parsing, JSON request bodies are capped by `MAX_JSON_BODY_MB`, and upstream image URL downloads are revalidated (SSRF-aware, no blind redirect follow), fully decoded with Pillow, pixel-limited by `MAX_IMAGE_PIXELS`, and bounded by `MAX_FILE_SIZE_MB`
 - `/api/import` enforces ZIP safety/size/count/compression checks; `/api/download-all` keeps the low-memory streaming path, while tracked export jobs write temp ZIP files so UI progress can cover both packing and transfer
 - gallery stores byte-size metadata and thumbnails (`THUMBNAILS_DIR`), with lazy thumbnail and opt-in byte-size backfill for older images
@@ -548,7 +551,7 @@ GPT Image Panel 是一个轻量级 FastAPI Web 界面，用于图像生成和图
 - 预览 + 历史任务：SSE 进度、多图结果预览、`completed_at`、耗时、任务分段耗时、加载状态、细分终态状态、仅错误历史筛选、清空持久化历史、排队/运行任务取消，以及从持久化历史复用/重试
 - 生成与编辑共享并发和排队限制
 - 可选全局 Webhook URL：HTTPS 校验、SSRF 防护、签名、重试，以及设置响应打码
-- Gallery：筛选（FTS 提示词搜索、模型、预设、尺寸、日期区间、收藏）、URL 同步的 page/filter/lightbox/job history 状态、页码输入跳转、Lightbox 上一张/下一张导航和左右方向键快捷键、”Edit this image”、下载/删除、批量操作部分成功反馈、单图 5 秒撤销删除、复制提示词/图片链接、按需总大小统计
+- Gallery：筛选（FTS 提示词搜索、模型、预设、尺寸、日期区间、收藏）、URL 同步的 page/非提示词筛选/lightbox/job history 状态、页码输入跳转、Lightbox 上一张/下一张导航和左右方向键快捷键、”Edit this image”、下载/删除、批量操作部分成功反馈、单图 5 秒撤销删除、复制提示词/图片链接、按需总大小统计
 - 提示词收藏夹：可复用 prompt 模板，与 Gallery 图片分开存储和管理
 - ZIP 导出导入（含 `metadata.json`）+ 流式上传 + 安全校验 + 低内存导出路径 + 批量下载 skipped metadata + 可见导入/导出/下载进度状态
 - 访问密钥、Host/public origin 白名单、IP 白名单/反向代理头、版本检测、CSP nonce
@@ -733,6 +736,7 @@ npm run frontend:dev
 ```
 
 然后打开 `http://localhost:5173`。Vite dev server 会把 `/api` 和 `/health` 代理到 `127.0.0.1:9090`，浏览器侧仍然是同源路径。
+默认只监听 `127.0.0.1`；如果要做局域网/外网调试，使用 `npm run frontend:dev -- --host 0.0.0.0`。
 
 如果要单进程 smoke test：
 
@@ -761,10 +765,10 @@ curl http://localhost:9090/health
 6. 选择 API Path
 7. 填写该预设的默认模型；Generate/Edit 表单里的 Model 默认值会使用当前预设的值
 8. 选择该预设的默认 Response Format；Generate/Edit 表单里的 Response format 默认值会使用当前预设的值
-9. 填写 API Key，或填写 `${OPENAI_API_KEY}` 这类环境变量引用；直接填写的 key 会以明文保存到 SQLite，优先用环境变量引用
-10. 可选：填写全局 SOCKS5 代理，例如 `socks5://127.0.0.1:1080`
-11. 可选：填写全局 Webhook URL，用于生成/编辑任务完成回调
-12. 可选：配置提示词优化器的 endpoint URL、模型、超时时间和 API Key/环境变量引用
+9. 填写 API Key，或填写 `${OPENAI_API_KEY}` 这类环境变量引用；直接填写的 key 需要显式设置 `ALLOW_PLAINTEXT_SECRETS=true`
+10. 可选：填写全局 SOCKS5 代理，或填写 `${UPSTREAM_PROXY_URL}` 这类环境变量引用
+11. 可选：填写全局 Webhook URL，或填写 `${WEBHOOK_URL}` 这类环境变量引用，用于生成/编辑任务完成回调
+12. 可选：配置提示词优化器的 endpoint URL、模型、超时时间和 API Key/环境变量引用；直接填写的 key 需要显式设置 `ALLOW_PLAINTEXT_SECRETS=true`
 13. 可选：对已保存预设执行 Health check
 14. 点击 Save Preset
 15. 输入提示词
@@ -817,19 +821,20 @@ curl http://localhost:9090/health
 - 检查项包括 API Path 是否允许、HTTPS URL/hostname、上游 host allowlist、SSRF DNS/内网 IP 校验、API Key/环境变量引用是否可用，以及低成本 `OPTIONS`/`HEAD` 上游探测
 - 返回结构为 `{ status, checks: [{ name, status, message }] }`，状态值为 `ok`、`warning` 或 `error`
 - API Key 环境变量引用必须使用完整的 `${ENV_VAR_NAME}` 格式；数据库只保存引用字符串，生成/编辑请求会在执行时从服务端环境变量解析真实值
-- 直接填写的 API Key 会以明文保存到 SQLite，优先使用环境变量引用
+- 默认拒绝直接把 API Key 明文持久化到 SQLite；只有显式设置 `ALLOW_PLAINTEXT_SECRETS=true` 才允许
 
 ## 上游 SOCKS5 代理
 
 - Settings 抽屉提供一个全局 `SOCKS5 代理` 字段，不跟随 API 预设切换。
 - 留空时生成/编辑上游 API 请求保持直连。
-- 支持 `socks5://host:port` 或 `socks5://user:pass@host:port`；保存后的代理密码会在 API 响应和 UI 中打码。
+- 默认使用 `${UPSTREAM_PROXY_URL}` 这类环境变量引用。若直接填写 `socks5://host:port` 或 `socks5://user:pass@host:port`，需要显式设置 `ALLOW_PLAINTEXT_SECRETS=true`；保存后的代理密码会在 API 响应和 UI 中打码。
 - 代理边界刻意收窄：只有生成/编辑的上游 API `POST` 请求会使用 SOCKS5。Preset health check、Webhook、版本检查、前端 `/api/*` 请求和上游返回的图片 URL 下载都保持直连。
 
 ## 全局 Webhook URL
 
 - Settings 抽屉在 `SOCKS5 代理` 下方提供一个全局 `Webhook URL` 字段，不跟随 API 预设切换。
 - 留空时不发送任务回调。
+- 默认使用 `${WEBHOOK_URL}` 这类环境变量引用；若直接填写 webhook URL，需要显式设置 `ALLOW_PLAINTEXT_SECRETS=true`。
 - 配置后，生成/编辑任务完成时会向该 HTTPS URL 发送签名 webhook 回调。
 - 配置 Webhook URL 时需要设置 `WEBHOOK_SIGNING_SECRET`；保存后的 webhook URL 会在 API 响应和 UI 中打码。
 
@@ -902,8 +907,9 @@ curl http://localhost:9090/health
 | `IMAGES_DIR` | `./images` | 图片存储目录 |
 | `THUMBNAILS_DIR` | `./images/thumbs` | Gallery 缩略图生成目录 |
 | `THUMBNAIL_MAX_SIDE` | `512` | 缩略图最大宽/高像素 |
-| `DATA_DIR` | `./data` | SQLite 运行时数据目录 |
-| `DATABASE_FILE` | `./data/app.sqlite3` | 保存 Gallery 元数据和 API 预设的 SQLite 数据库 |
+| `ALLOW_PLAINTEXT_SECRETS` | `false` | 是否允许把 API Key / SOCKS5 代理 URL / Webhook URL 明文持久化到 SQLite；默认要求 `${ENV_VAR_NAME}` 引用 |
+| `DATA_DIR` | `./data` | SQLite 运行时数据目录；启动时会收紧到 `0700` |
+| `DATABASE_FILE` | `./data/app.sqlite3` | 保存 Gallery 元数据和 API 预设的 SQLite 数据库；启动时会收紧到 `0600` |
 | `PYTHON_BASE_IMAGE` | `python:3.11-slim` | Docker 构建基础镜像；Docker Hub 慢或不可访问时可覆盖 |
 | `NODE_BASE_IMAGE` | `node:24-alpine` | Docker 前端构建基础镜像；Docker Hub 慢或不可访问时可覆盖 |
 | `WEBHOOK_SIGNING_SECRET` | 空 | 配置全局 Webhook URL 时需要；用于签名 webhook payload（`X-Webhook-Signature`） |
@@ -962,12 +968,12 @@ curl http://localhost:9090/health
 - 版本读取顺序是 `APP_VERSION` -> `VERSION`；本地版本和可选 GitHub 远端检查都会在每次 Web 端触发版本请求时实时计算。远端检查会先读 latest release，再回退到配置分支的 `VERSION`，仅用于显示 `New`，不会阻塞使用。
 - 配置 `PUBLIC_ORIGIN` 或 `ALLOWED_HOSTS` 后，未知 `Host` 或受信任 `X-Forwarded-Host` 会在 CSRF 检查前被拒绝；`Sec-Fetch-Site: same-origin` 不能绕过 Host 白名单
 - 预设、提示词收藏夹和 Gallery/Job 数据只保存在 `DATABASE_FILE`
-- SQLite 仓储操作使用短连接，并在启动时启用 WAL；应用 shutdown 和测试 reset 会调用 storage close hook，连接生命周期保持显式
+- SQLite 仓储操作使用短连接，并在启动时启用 WAL；`DATA_DIR` 会 chmod 为 `0700`，SQLite 数据库和 sidecar 文件会 chmod 为 `0600`；应用 shutdown 和测试 reset 会调用 storage close hook，连接生命周期保持显式
 - 生成与编辑共用按 image units 计量的队列（`MAX_ACTIVE_GENERATE_JOBS` + `MAX_QUEUED_GENERATE_JOBS`）；所有编辑源图先落到 `DATA_DIR/edit-sources` 并额外受 `MAX_PENDING_EDIT_SOURCE_MB` 总量限制；支持取消，并持久化终态历史（含 `completed_at`）
 - 批量生成（`n > 1`）会占用 `n` 个队列单位；父任务会把成功子结果聚合到 `images[]`，Gallery 元数据保留用户请求的 `n`，真实上游子调用受全局 upstream-request semaphore 限制
 - 提示词优化器使用独立的服务端 Chat Completions 兼容 endpoint 配置和用户可配置请求超时/响应体积上限，在后端解析 API Key 环境变量引用，不占用生成/编辑任务队列容量。
 - SSE 是主进度通道；`/api/generate/jobs` 提供列表/历史（`include_finished=true`，可选 `limit`/`offset`，可选 `failed_only=true`），`/api/generate/jobs/history` 清空终态历史，`/api/generate/jobs/events` 从内存推送 debounce 后的实时任务列表变化
-- 任务终态历史包含 `stage_timings`：`upstream_wait`、`download_decode`、`validate`、`thumbnail`、`db_insert`；慢 Gallery 查询日志会带筛选条件与 total，并计入 metrics；可选 metrics 包含队列深度、运行中任务数、失败率、任务分段耗时和慢 SQLite 查询数；终态状态区分 `cancelled`、`interrupted` 和 `upstream_error`，同时保留通用 `error`
+- 任务终态历史包含 `stage_timings`：`upstream_wait`、`download_decode`、`validate`、`thumbnail`、`db_insert`；慢 Gallery 查询日志只记录提示词是否存在/长度/hash，以及其他筛选条件与 total，并计入 metrics；可选 metrics 包含队列深度、运行中任务数、失败率、任务分段耗时和慢 SQLite 查询数；终态状态区分 `cancelled`、`interrupted` 和 `upstream_error`，同时保留通用 `error`
 - 上游 JSON/SSE 响应会在解析前受 `MAX_UPSTREAM_JSON_MB` 限制，JSON 请求体受 `MAX_JSON_BODY_MB` 限制；上游图片 URL 下载会做 SSRF/重定向目标复核，并会经过 Pillow 完整解码、`MAX_IMAGE_PIXELS` 像素限制和 `MAX_FILE_SIZE_MB` 体积限制
 - `/api/import` 做 ZIP 安全与体积校验；`/api/download-all` 保留低内存流式导出，带进度的导出任务会写入临时 ZIP，让 UI 同时展示打包和传输进度
 - Gallery 持久化图片字节数和缩略图（`THUMBNAILS_DIR`），旧图按需懒补缩略图

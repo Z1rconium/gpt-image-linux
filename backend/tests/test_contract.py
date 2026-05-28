@@ -3,8 +3,10 @@ import base64
 import io
 import json
 import logging
+import os
 import re
 import sqlite3
+import stat
 import threading
 import time
 import zipfile
@@ -43,11 +45,18 @@ def _configure_runtime(tmp_path: Path, *, access_key: str = "", allow_unauthenti
     config.IMAGES_DIR = str(images_dir)
     config.DATA_DIR = str(data_dir)
     config.DATABASE_FILE = str(data_dir / "app.sqlite3")
+    os.environ["TEST_DEFAULT_API_KEY"] = "default-key"
+    os.environ["TEST_OPENAI_API_KEY"] = "env-secret"
+    os.environ["TEST_PROMPT_OPTIMIZER_API_KEY"] = "optimizer-key"
+    os.environ["TEST_UPSTREAM_PROXY_URL"] = "socks5://user:secret@127.0.0.1:1080"
+    os.environ["TEST_WEBHOOK_URL"] = "https://hooks.example.com/services/top-secret?token=hidden"
+
     config.DEFAULT_API_URL = "https://api.example.com"
-    config.DEFAULT_API_KEY = "default-key"
+    config.DEFAULT_API_KEY = "${TEST_DEFAULT_API_KEY}"
     config.DEFAULT_API_PATH = "/v1/images/generations"
     config.DEFAULT_RESPONSES_MODEL = "gpt-5.4"
     config.DEFAULT_UPSTREAM_SOCKS5_PROXY = ""
+    config.ALLOW_PLAINTEXT_SECRETS = False
     config.ACCESS_KEY = access_key
     config.ALLOW_UNAUTHENTICATED = allow_unauthenticated
     config.ACCESS_KEY_COOKIE_NAME = "gpt_image_access"
@@ -556,6 +565,7 @@ def test_frontend_index_uses_csp_nonce(tmp_path, monkeypatch):
     csp = resp.headers["content-security-policy"]
     assert f"'nonce-{nonce}'" in csp
     assert f"script-src-elem 'self' 'nonce-{nonce}'" in csp
+    assert "script-src-attr 'none'" in csp
     assert "'unsafe-inline'" not in csp.split("script-src-elem", 1)[1].split(";", 1)[0]
 
 
@@ -689,7 +699,7 @@ def test_csrf_origin_check_allows_same_origin_state_changes(client):
             "active_preset_id": active_preset_id,
             "preset_name": "Same Origin",
             "api_url": "https://api.example.com",
-            "api_key": "same-origin-key",
+            "api_key": "${TEST_OPENAI_API_KEY}",
             "api_path": "/v1/images/generations",
         },
     )
@@ -715,7 +725,7 @@ def test_csrf_origin_check_allows_same_origin_state_changes(client):
                     "active_preset_id": "default",
                     "preset_name": "Bad Origin",
                     "api_url": "https://api.example.com",
-                    "api_key": "bad-origin-key",
+                    "api_key": "${TEST_OPENAI_API_KEY}",
                     "api_path": "/v1/images/generations",
                 }
             },
@@ -881,7 +891,7 @@ def test_settings_rejects_upstream_url_userinfo_query_and_fragment(client):
                 "active_preset_id": active_preset_id,
                 "preset_name": "Bad URL",
                 "api_url": api_url,
-                "api_key": "key",
+                "api_key": "${TEST_OPENAI_API_KEY}",
                 "api_path": "/v1/images/generations",
             },
         )
@@ -905,7 +915,7 @@ def test_settings_and_presets(client):
             "active_preset_id": body["active_preset_id"],
             "preset_name": "Primary",
             "api_url": "https://api.example.com",
-            "api_key": "new-key",
+            "api_key": "${TEST_OPENAI_API_KEY}",
             "api_path": "/v1/responses",
             "default_model": "gpt-image-2-preview",
             "default_response_format": "b64_json",
@@ -922,7 +932,7 @@ def test_settings_and_presets(client):
             "active_preset_id": body["active_preset_id"],
             "preset_name": "Primary",
             "api_url": "https://api.example.com",
-            "api_key": "new-key",
+            "api_key": "${TEST_OPENAI_API_KEY}",
             "api_path": "/v1/chat/completions",
         },
     )
@@ -984,22 +994,16 @@ def test_settings_global_socks5_proxy_save_mask_preserve_and_clear(client):
         "/api/settings",
         json={
             **base_payload,
-            "upstream_socks5_proxy": "socks5://user:secret@127.0.0.1:1080/",
+            "upstream_socks5_proxy": "${TEST_UPSTREAM_PROXY_URL}",
         },
     )
 
     assert updated.status_code == 200
     updated_body = updated.json()
     assert updated_body["has_upstream_socks5_proxy"] is True
-    assert (
-        updated_body["upstream_socks5_proxy_masked"]
-        == "socks5://user:***@127.0.0.1:1080"
-    )
+    assert updated_body["upstream_socks5_proxy_masked"] == "${TEST_UPSTREAM_PROXY_URL}"
     assert "secret" not in json.dumps(updated_body)
-    assert (
-        storage.load_settings()["upstream_socks5_proxy"]
-        == "socks5://user:secret@127.0.0.1:1080"
-    )
+    assert storage.load_settings()["upstream_socks5_proxy"] == "${TEST_UPSTREAM_PROXY_URL}"
 
     preserved = client.post(
         "/api/settings",
@@ -1009,10 +1013,7 @@ def test_settings_global_socks5_proxy_save_mask_preserve_and_clear(client):
         },
     )
     assert preserved.status_code == 200
-    assert (
-        storage.load_settings()["upstream_socks5_proxy"]
-        == "socks5://user:secret@127.0.0.1:1080"
-    )
+    assert storage.load_settings()["upstream_socks5_proxy"] == "${TEST_UPSTREAM_PROXY_URL}"
 
     cleared = client.post(
         "/api/settings",
@@ -1038,30 +1039,24 @@ def test_settings_global_webhook_url_save_mask_preserve_clear_and_use(client, mo
         "/api/settings",
         json={
             **base_payload,
-            "webhook_url": "https://hooks.example.com/services/top-secret?token=hidden",
+            "webhook_url": "${TEST_WEBHOOK_URL}",
         },
     )
 
     assert updated.status_code == 200
     updated_body = updated.json()
     assert updated_body["has_webhook_url"] is True
-    assert updated_body["webhook_url_masked"] == "https://hooks.example.com/***?***"
+    assert updated_body["webhook_url_masked"] == "${TEST_WEBHOOK_URL}"
     assert "top-secret" not in json.dumps(updated_body)
     assert "hidden" not in json.dumps(updated_body)
-    assert (
-        storage.load_settings()["webhook_url"]
-        == "https://hooks.example.com/services/top-secret?token=hidden"
-    )
+    assert storage.load_settings()["webhook_url"] == "${TEST_WEBHOOK_URL}"
 
     preserved = client.post(
         "/api/settings",
         json={**base_payload, "webhook_url": updated_body["webhook_url_masked"]},
     )
     assert preserved.status_code == 200
-    assert (
-        storage.load_settings()["webhook_url"]
-        == "https://hooks.example.com/services/top-secret?token=hidden"
-    )
+    assert storage.load_settings()["webhook_url"] == "${TEST_WEBHOOK_URL}"
 
     created = client.post("/api/settings/presets", json={"name": "Alt webhook preset"})
     assert created.status_code == 200
@@ -1097,6 +1092,77 @@ def test_settings_global_webhook_url_save_mask_preserve_clear_and_use(client, mo
     assert storage.load_settings()["webhook_url"] == ""
 
 
+@pytest.mark.parametrize(
+    ("payload", "detail"),
+    [
+        (
+            {
+                "preset_name": "Plain API key",
+                "api_url": "https://api.example.com",
+                "api_key": "plain-secret",
+                "api_path": "/v1/images/generations",
+            },
+            "API key must use ${ENV_VAR_NAME} unless ALLOW_PLAINTEXT_SECRETS=true.",
+        ),
+        (
+            {
+                "preset_name": "Plain proxy",
+                "api_url": "https://api.example.com",
+                "api_key": "${TEST_OPENAI_API_KEY}",
+                "api_path": "/v1/images/generations",
+                "upstream_socks5_proxy": "socks5://user:secret@127.0.0.1:1080",
+            },
+            "SOCKS5 proxy URL must use ${ENV_VAR_NAME} unless ALLOW_PLAINTEXT_SECRETS=true.",
+        ),
+        (
+            {
+                "preset_name": "Plain webhook",
+                "api_url": "https://api.example.com",
+                "api_key": "${TEST_OPENAI_API_KEY}",
+                "api_path": "/v1/images/generations",
+                "webhook_url": "https://hooks.example.com/services/top-secret?token=hidden",
+            },
+            "Webhook URL must use ${ENV_VAR_NAME} unless ALLOW_PLAINTEXT_SECRETS=true.",
+        ),
+    ],
+)
+def test_settings_rejects_plaintext_secrets_by_default(client, payload, detail):
+    settings = client.get("/api/settings").json()
+    resp = client.post(
+        "/api/settings",
+        json={
+            "active_preset_id": settings["active_preset_id"],
+            **payload,
+        },
+    )
+
+    assert resp.status_code == 422
+    assert detail in resp.text
+
+
+def test_settings_can_opt_in_to_plaintext_secret_storage(client):
+    config.ALLOW_PLAINTEXT_SECRETS = True
+    settings = client.get("/api/settings").json()
+    resp = client.post(
+        "/api/settings",
+        json={
+            "active_preset_id": settings["active_preset_id"],
+            "preset_name": "Plaintext allowed",
+            "api_url": "https://api.example.com",
+            "api_key": "plain-secret",
+            "api_path": "/v1/images/generations",
+            "upstream_socks5_proxy": "socks5://user:secret@127.0.0.1:1080",
+            "webhook_url": "https://hooks.example.com/services/top-secret?token=hidden",
+        },
+    )
+
+    assert resp.status_code == 200
+    persisted = storage.load_settings()
+    assert persisted["presets"][0]["api_key"] == "plain-secret"
+    assert persisted["upstream_socks5_proxy"] == "socks5://user:secret@127.0.0.1:1080"
+    assert persisted["webhook_url"] == "https://hooks.example.com/services/top-secret?token=hidden"
+
+
 def _settings_payload(settings: dict, **overrides):
     payload = {
         "active_preset_id": settings["active_preset_id"],
@@ -1125,7 +1191,7 @@ def test_prompt_optimizer_settings_mask_preserve_and_clear(client):
                 "api_url": "https://example.com/v1/chat/completions",
                 "model": "gpt-4o-mini",
                 "timeout_seconds": 75,
-                "api_key": "optimizer-secret",
+                "api_key": "${TEST_PROMPT_OPTIMIZER_API_KEY}",
             },
         ),
     )
@@ -1138,9 +1204,10 @@ def test_prompt_optimizer_settings_mask_preserve_and_clear(client):
     assert optimizer["model"] == "gpt-4o-mini"
     assert optimizer["timeout_seconds"] == 75
     assert optimizer["has_api_key"] is True
-    assert optimizer["api_key_source"] == "stored"
+    assert optimizer["api_key_source"] == "env"
+    assert optimizer["api_key_env_var"] == "TEST_PROMPT_OPTIMIZER_API_KEY"
     assert "optimizer-secret" not in json.dumps(body)
-    assert storage.load_prompt_optimizer_settings()["api_key"] == "optimizer-secret"
+    assert storage.load_prompt_optimizer_settings()["api_key"] == "${TEST_PROMPT_OPTIMIZER_API_KEY}"
     assert storage.load_prompt_optimizer_settings()["timeout_seconds"] == 75
 
     preserved = client.post(
@@ -1152,12 +1219,12 @@ def test_prompt_optimizer_settings_mask_preserve_and_clear(client):
                 "api_url": "https://example.com/v1/chat/completions",
                 "model": "gpt-4o-mini",
                 "timeout_seconds": 90,
-                "api_key": "********",
+                "api_key": "${TEST_PROMPT_OPTIMIZER_API_KEY}",
             },
         ),
     )
     assert preserved.status_code == 200
-    assert storage.load_prompt_optimizer_settings()["api_key"] == "optimizer-secret"
+    assert storage.load_prompt_optimizer_settings()["api_key"] == "${TEST_PROMPT_OPTIMIZER_API_KEY}"
     assert storage.load_prompt_optimizer_settings()["timeout_seconds"] == 90
 
     cleared = client.post(
@@ -1191,6 +1258,36 @@ def test_prompt_optimizer_settings_mask_preserve_and_clear(client):
         ),
     )
     assert invalid_timeout.status_code == 422
+
+
+def test_prompt_optimizer_rejects_plaintext_api_key_by_default(client):
+    settings = client.get("/api/settings").json()
+    resp = client.post(
+        "/api/settings",
+        json=_settings_payload(
+            settings,
+            prompt_optimizer={
+                "enabled": True,
+                "api_url": "https://example.com/v1/chat/completions",
+                "model": "gpt-4o-mini",
+                "timeout_seconds": 75,
+                "api_key": "optimizer-secret",
+            },
+        ),
+    )
+
+    assert resp.status_code == 422
+    assert "Prompt optimizer API key must use ${ENV_VAR_NAME} unless ALLOW_PLAINTEXT_SECRETS=true." in resp.text
+
+
+def test_storage_secures_data_directory_and_database_permissions(client):
+    client.get("/api/settings")
+
+    data_dir_mode = stat.S_IMODE(Path(config.DATA_DIR).stat().st_mode)
+    database_mode = stat.S_IMODE(Path(config.DATABASE_FILE).stat().st_mode)
+
+    assert data_dir_mode == 0o700
+    assert database_mode == 0o600
 
 
 def test_prompt_optimizer_system_prompt_file_roundtrip(client):
@@ -1252,7 +1349,7 @@ def test_prompt_optimize_success_uses_configured_upstream(client, monkeypatch):
                 "api_url": "https://example.com/v1/chat/completions",
                 "model": "prompt-model",
                 "timeout_seconds": 45,
-                "api_key": "optimizer-key",
+                "api_key": "${TEST_PROMPT_OPTIMIZER_API_KEY}",
             },
         ),
     )
@@ -1309,7 +1406,7 @@ def test_prompt_optimize_upstream_error_and_timeout(client, monkeypatch):
                 "enabled": True,
                 "api_url": "https://example.com/v1/chat/completions",
                 "model": "prompt-model",
-                "api_key": "optimizer-key",
+                "api_key": "${TEST_PROMPT_OPTIMIZER_API_KEY}",
             },
         ),
     )
@@ -1404,6 +1501,7 @@ def test_prompt_snippets_crud_search_and_validation(client):
 
 
 def test_settings_rejects_invalid_socks5_proxy(client):
+    config.ALLOW_PLAINTEXT_SECRETS = True
     settings = client.get("/api/settings").json()
 
     resp = client.post(
@@ -1423,6 +1521,7 @@ def test_settings_rejects_invalid_socks5_proxy(client):
 
 
 def test_settings_rejects_invalid_global_webhook_url(client):
+    config.ALLOW_PLAINTEXT_SECRETS = True
     settings = client.get("/api/settings").json()
 
     resp = client.post(
@@ -1454,7 +1553,7 @@ def test_socks5_proxy_only_flows_to_generation_and_edit(client, monkeypatch):
             "api_url": "https://api.example.com",
             "api_key": None,
             "api_path": "/v1/images/generations",
-            "upstream_socks5_proxy": "socks5://127.0.0.1:1080",
+            "upstream_socks5_proxy": "${TEST_UPSTREAM_PROXY_URL}",
         },
     )
     assert updated.status_code == 200
@@ -1542,8 +1641,8 @@ def test_socks5_proxy_only_flows_to_generation_and_edit(client, monkeypatch):
     assert edit.status_code == 202
     assert _wait_for_job(client, edit.json()["job_id"])["status"] == "success"
 
-    assert seen["generation_proxy"] == "socks5://127.0.0.1:1080"
-    assert seen["edit_proxy"] == "socks5://127.0.0.1:1080"
+    assert seen["generation_proxy"] == "socks5://user:secret@127.0.0.1:1080"
+    assert seen["edit_proxy"] == "socks5://user:secret@127.0.0.1:1080"
 
 
 def test_preset_health_and_env_api_key_resolution(client, monkeypatch):
@@ -2016,7 +2115,10 @@ def test_gallery_slow_query_logs_filters_page_and_total(client, caplog):
     assert "Slow /api/gallery query" in caplog.text
     assert "page=1" in caplog.text
     assert "total=1" in caplog.text
-    assert "'prompt': 'slow'" in caplog.text
+    assert "'prompt_present': True" in caplog.text
+    assert "'prompt_len': 4" in caplog.text
+    assert "slow query prompt" not in caplog.text
+    assert "'prompt_hash':" in caplog.text
     assert metrics.snapshot()["counters"]["sqlite.slow_queries"] == 1
 
 
@@ -2543,6 +2645,19 @@ def test_gallery_image_download_and_zip(client):
         assert "thumbnail_filename" not in metadata["images"][0]
         assert "thumbnail_url" not in metadata["images"][0]
         assert metadata["images"][0]["sha256"]
+
+
+def test_orphan_gallery_files_are_not_directly_served(client):
+    orphan_path = Path(config.IMAGES_DIR) / "orphan.png"
+    orphan_path.write_bytes(PNG_BYTES)
+
+    image = client.get("/api/image/orphan.png")
+    thumb = client.get("/api/thumb/orphan.png")
+    download = client.get("/api/download/orphan.png")
+
+    assert image.status_code == 404
+    assert thumb.status_code == 404
+    assert download.status_code == 404
 
 
 def test_download_all_deduplicates_shared_filenames(client):
@@ -3790,7 +3905,7 @@ def test_generate_uses_active_preset_default_model_when_model_is_omitted(client)
             "active_preset_id": settings["active_preset_id"],
             "preset_name": "Primary",
             "api_url": settings["api_url"],
-            "api_key": "new-key",
+            "api_key": "${TEST_OPENAI_API_KEY}",
             "api_path": settings["api_path"],
             "default_model": "gpt-image-3",
         },

@@ -68,14 +68,14 @@ async def update_settings(req: SettingsRequest):
             req.default_response_format
         )
     if req.upstream_socks5_proxy is not None:
-        current_proxy = get_upstream_socks5_proxy()
+        current_proxy = get_upstream_socks5_proxy(raw=True)
         requested_proxy = req.upstream_socks5_proxy.strip()
         if current_proxy and requested_proxy == mask_socks5_proxy_url(current_proxy):
             app.state.upstream_socks5_proxy = current_proxy
         else:
             apply_upstream_socks5_proxy(requested_proxy)
     if req.webhook_url is not None:
-        current_webhook_url = get_webhook_url()
+        current_webhook_url = get_webhook_url(raw=True)
         requested_webhook_url = req.webhook_url.strip()
         if current_webhook_url and requested_webhook_url == mask_webhook_url(current_webhook_url):
             app.state.webhook_url = current_webhook_url

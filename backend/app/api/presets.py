@@ -1,5 +1,4 @@
 import os
-import re
 
 from fastapi import HTTPException
 
@@ -12,10 +11,14 @@ from ..core.api_paths import (
     normalize_default_response_format,
 )
 from ..core.validators import (
+    get_env_var_ref_name,
+    is_malformed_env_var_ref,
     mask_socks5_proxy_url,
     mask_webhook_url,
+    normalize_secret_env_ref_or_plaintext,
     normalize_socks5_proxy_url,
     normalize_webhook_url,
+    resolve_env_var_ref,
 )
 from ..repositories import storage
 from ..schemas.models import ApiPresetResponse, PromptOptimizerSettingsResponse, SettingsResponse
@@ -33,25 +36,16 @@ def mask_key(key: str) -> str:
     return key[:4] + "***" + key[-4:]
 
 
-API_KEY_ENV_REF_RE = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$")
-
-
 def get_api_key_env_var(api_key: str) -> str | None:
-    match = API_KEY_ENV_REF_RE.match(str(api_key or "").strip())
-    return match.group(1) if match else None
+    return get_env_var_ref_name(api_key)
 
 
 def is_malformed_api_key_env_ref(api_key: str) -> bool:
-    value = str(api_key or "").strip()
-    return bool(value) and ("${" in value or "}" in value) and not get_api_key_env_var(value)
+    return is_malformed_env_var_ref(api_key)
 
 
 def resolve_api_key(api_key: str) -> str:
-    value = str(api_key or "").strip()
-    env_var = get_api_key_env_var(value)
-    if env_var:
-        return os.getenv(env_var, "").strip()
-    return value
+    return resolve_env_var_ref(api_key)
 
 
 def api_key_response_fields(api_key: str) -> dict:
@@ -145,8 +139,8 @@ def persist_api_settings():
     storage.save_settings(
         {
             "active_preset_id": getattr(app.state, "active_preset_id", "default"),
-            "upstream_socks5_proxy": get_upstream_socks5_proxy(),
-            "webhook_url": get_webhook_url(),
+            "upstream_socks5_proxy": get_upstream_socks5_proxy(raw=True),
+            "webhook_url": get_webhook_url(raw=True),
             "presets": get_api_presets(),
             "prompt_optimizer": get_prompt_optimizer_settings(),
         }
@@ -227,24 +221,40 @@ def apply_api_preset(preset: dict):
     app.state.active_preset_id = preset["id"]
 
 
-def get_upstream_socks5_proxy() -> str:
-    return str(getattr(app.state, "upstream_socks5_proxy", "") or "").strip()
+def get_upstream_socks5_proxy(*, raw: bool = False) -> str:
+    value = str(getattr(app.state, "upstream_socks5_proxy", "") or "").strip()
+    if raw:
+        return value
+    resolved = resolve_env_var_ref(value)
+    return normalize_socks5_proxy_url(resolved) if resolved else ""
 
 
 def apply_upstream_socks5_proxy(value: str | None):
-    app.state.upstream_socks5_proxy = normalize_socks5_proxy_url(value)
+    app.state.upstream_socks5_proxy = normalize_secret_env_ref_or_plaintext(
+        value,
+        field_name="SOCKS5 proxy URL",
+        normalizer=normalize_socks5_proxy_url,
+    )
 
 
-def get_webhook_url() -> str:
-    return str(getattr(app.state, "webhook_url", "") or "").strip()
+def get_webhook_url(*, raw: bool = False) -> str:
+    value = str(getattr(app.state, "webhook_url", "") or "").strip()
+    if raw:
+        return value
+    resolved = resolve_env_var_ref(value)
+    return normalize_webhook_url(resolved) if resolved else ""
 
 
 def apply_webhook_url(value: str | None):
-    app.state.webhook_url = normalize_webhook_url(value)
+    app.state.webhook_url = normalize_secret_env_ref_or_plaintext(
+        value,
+        field_name="Webhook URL",
+        normalizer=normalize_webhook_url,
+    )
 
 
 def upstream_socks5_proxy_response_fields() -> dict:
-    value = get_upstream_socks5_proxy()
+    value = get_upstream_socks5_proxy(raw=True)
     return {
         "has_upstream_socks5_proxy": bool(value),
         "upstream_socks5_proxy_masked": mask_socks5_proxy_url(value),
@@ -252,7 +262,7 @@ def upstream_socks5_proxy_response_fields() -> dict:
 
 
 def webhook_url_response_fields() -> dict:
-    value = get_webhook_url()
+    value = get_webhook_url(raw=True)
     return {
         "has_webhook_url": bool(value),
         "webhook_url_masked": mask_webhook_url(value),
