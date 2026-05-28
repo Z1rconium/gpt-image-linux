@@ -81,16 +81,21 @@ async def lifespan(app: FastAPI):
             "Removed %s stale gallery entries for missing image files",
             removed_gallery_entries,
         )
-    try:
-        backfilled_gallery_bytes = storage.backfill_missing_gallery_bytes()
-    except Exception:
-        logger.warning("Failed to backfill legacy gallery byte sizes", exc_info=True)
-    else:
-        if backfilled_gallery_bytes:
-            logger.info(
-                "Backfilled byte sizes for %s legacy gallery entry record(s)",
-                backfilled_gallery_bytes,
-            )
+    async def _background_backfill_gallery_bytes():
+        await asyncio.sleep(1.0)
+        try:
+            updated = await asyncio.to_thread(storage.backfill_missing_gallery_bytes)
+            if updated:
+                logger.info(
+                    "Backfilled byte sizes for %s legacy gallery entry record(s)",
+                    updated,
+                )
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.warning("Failed to backfill legacy gallery byte sizes", exc_info=True)
+
+    app.state._backfill_task = asyncio.create_task(_background_backfill_gallery_bytes())
     presets.load_api_settings()
     app.state.generate_jobs = {}
     app.state.generate_job_tasks = {}
@@ -115,6 +120,9 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        backfill_task = getattr(app.state, "_backfill_task", None)
+        if backfill_task and not backfill_task.done():
+            backfill_task.cancel()
         broadcast_task = app.state.generate_jobs_broadcast_task
         if broadcast_task and not broadcast_task.done():
             broadcast_task.cancel()
@@ -127,7 +135,7 @@ async def lifespan(app: FastAPI):
             task.cancel()
         for task in tasks:
             task.cancel()
-        awaitables = [task for task in (broadcast_task, gc_task, *tasks, *gallery_export_tasks) if task]
+        awaitables = [task for task in (backfill_task, broadcast_task, gc_task, *tasks, *gallery_export_tasks) if task]
         if awaitables:
             await asyncio.gather(*awaitables, return_exceptions=True)
         for job in getattr(app.state, "gallery_export_jobs", {}).values():

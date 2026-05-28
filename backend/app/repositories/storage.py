@@ -5,7 +5,6 @@ import logging
 import os
 import secrets
 import sqlite3
-_original_sqlite_connect = sqlite3.connect
 import threading
 import time
 from contextlib import contextmanager
@@ -138,8 +137,10 @@ GALLERY_COLUMNS = (
     "favorite",
     "bytes",
     "sha256",
+    "sort_seq",
 )
 REQUIRED_GALLERY_COLUMNS = {"id", "prompt", "size", "filename", "created_at"}
+_GALLERY_INTERNAL_COLUMNS = {"sort_seq"}
 INTEGER_GALLERY_COLUMNS = {
     "image_width",
     "image_height",
@@ -147,6 +148,7 @@ INTEGER_GALLERY_COLUMNS = {
     "n",
     "favorite",
     "bytes",
+    "sort_seq",
 }
 GENERATE_JOB_COLUMNS = (
     "job_id",
@@ -416,62 +418,22 @@ def _open_connection() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA busy_timeout = 30000")
+    conn.execute("PRAGMA synchronous = NORMAL")
     _secure_data_storage_permissions()
     return conn
 
 
-_local = threading.local()
-_all_connections: list[sqlite3.Connection] = []
-_connections_lock = threading.RLock()
-
-
-def _get_thread_connection() -> sqlite3.Connection:
-    if not hasattr(_local, "connection"):
-        conn = _open_connection()
-        _local.connection = conn
-        with _connections_lock:
-            _all_connections.append(conn)
-    return _local.connection
-
-
 @contextmanager
 def _connect() -> Iterator[sqlite3.Connection]:
-    if sqlite3.connect is not _original_sqlite_connect:
-        conn = _open_connection()
-        try:
-            yield conn
-        finally:
-            conn.close()
-        return
-
-    conn = _get_thread_connection()
+    conn = _open_connection()
     try:
         yield conn
-    except BaseException:
-        # 任何异常（含普通 Exception）都应废弃此连接，避免连接处于未知事务状态
-        if hasattr(_local, "connection"):
-            try:
-                _local.connection.close()
-            except Exception:
-                pass
-            with _connections_lock:
-                if conn in _all_connections:
-                    _all_connections.remove(conn)
-            delattr(_local, "connection")
-        raise
+    finally:
+        conn.close()
 
 
 def close_database_connections():
-    """Close repository-owned SQLite handles."""
-    with _connections_lock:
-        for conn in _all_connections:
-            try:
-                conn.close()
-            except Exception:
-                pass
-        _all_connections.clear()
-    if hasattr(_local, "connection"):
-        delattr(_local, "connection")
+    """No-op kept for API compatibility; connections are now per-call."""
     _clear_verified_thumbnails()
 
 
@@ -618,21 +580,24 @@ def _ensure_database():
                     duration TEXT,
                     favorite INTEGER NOT NULL DEFAULT 0,
                     bytes INTEGER,
-                    sha256 TEXT
+                    sha256 TEXT,
+                    sort_seq INTEGER
                 );
 
+                CREATE INDEX IF NOT EXISTS idx_gallery_entries_sort_seq
+                    ON gallery_entries(sort_seq DESC);
                 CREATE INDEX IF NOT EXISTS idx_gallery_entries_created_at
-                    ON gallery_entries(created_at DESC);
+                    ON gallery_entries(created_at DESC, sort_seq DESC);
                 CREATE INDEX IF NOT EXISTS idx_gallery_entries_filename
                     ON gallery_entries(filename);
                 CREATE INDEX IF NOT EXISTS idx_gallery_entries_missing_bytes_filename
                     ON gallery_entries(filename) WHERE bytes IS NULL;
                 CREATE INDEX IF NOT EXISTS idx_gallery_entries_model_created_at
-                    ON gallery_entries(model, created_at DESC);
+                    ON gallery_entries(model, created_at DESC, sort_seq DESC);
                 CREATE INDEX IF NOT EXISTS idx_gallery_entries_preset_created_at
-                    ON gallery_entries(api_preset_name, created_at DESC);
+                    ON gallery_entries(api_preset_name, created_at DESC, sort_seq DESC);
                 CREATE INDEX IF NOT EXISTS idx_gallery_entries_size_created_at
-                    ON gallery_entries(size, created_at DESC);
+                    ON gallery_entries(size, created_at DESC, sort_seq DESC);
                 CREATE INDEX IF NOT EXISTS idx_gallery_entries_filename_bytes
                     ON gallery_entries(filename, bytes) WHERE bytes IS NOT NULL;
 
@@ -715,29 +680,55 @@ def _migrate_gallery_schema(conn: sqlite3.Connection):
         conn.execute("ALTER TABLE gallery_entries ADD COLUMN completed_at TEXT")
     if "sha256" not in columns:
         conn.execute("ALTER TABLE gallery_entries ADD COLUMN sha256 TEXT")
+    if "sort_seq" not in columns:
+        conn.execute("ALTER TABLE gallery_entries ADD COLUMN sort_seq INTEGER")
+        conn.execute(
+            """
+            UPDATE gallery_entries
+            SET sort_seq = rowid
+            WHERE sort_seq IS NULL
+            """
+        )
+        conn.execute("DROP INDEX IF EXISTS idx_gallery_entries_created_at")
+        conn.execute("DROP INDEX IF EXISTS idx_gallery_entries_model_created_at")
+        conn.execute("DROP INDEX IF EXISTS idx_gallery_entries_preset_created_at")
+        conn.execute("DROP INDEX IF EXISTS idx_gallery_entries_size_created_at")
+        conn.execute("DROP INDEX IF EXISTS idx_gallery_entries_favorite_created_at")
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_gallery_entries_sort_seq
+            ON gallery_entries(sort_seq DESC)
+        """
+    )
     if "favorite" in _table_columns(conn, "gallery_entries"):
         conn.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_gallery_entries_favorite_created_at
-                ON gallery_entries(favorite, created_at DESC)
+                ON gallery_entries(favorite, created_at DESC, sort_seq DESC)
             """
         )
     conn.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_gallery_entries_model_created_at
-            ON gallery_entries(model, created_at DESC)
+            ON gallery_entries(model, created_at DESC, sort_seq DESC)
         """
     )
     conn.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_gallery_entries_preset_created_at
-            ON gallery_entries(api_preset_name, created_at DESC)
+            ON gallery_entries(api_preset_name, created_at DESC, sort_seq DESC)
         """
     )
     conn.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_gallery_entries_size_created_at
-            ON gallery_entries(size, created_at DESC)
+            ON gallery_entries(size, created_at DESC, sort_seq DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_gallery_entries_created_at
+            ON gallery_entries(created_at DESC, sort_seq DESC)
         """
     )
     conn.execute(
@@ -1056,7 +1047,8 @@ def _gallery_entry_from_row(row: sqlite3.Row) -> dict[str, Any]:
     entry = {
         column: row[column]
         for column in GALLERY_COLUMNS
-        if column in REQUIRED_GALLERY_COLUMNS or row[column] is not None
+        if column not in _GALLERY_INTERNAL_COLUMNS
+        and (column in REQUIRED_GALLERY_COLUMNS or row[column] is not None)
     }
     entry["favorite"] = bool(entry.get("favorite"))
     if entry.get("thumbnail_filename") and not safe_thumbnail_path(
@@ -1286,6 +1278,15 @@ def _insert_gallery_entries_on_conn(
     ]
     if not normalized_entries:
         return
+
+    row = conn.execute(
+        "SELECT COALESCE(MAX(sort_seq), 0) FROM gallery_entries"
+    ).fetchone()
+    next_seq = int(row[0]) + 1 if row else 1
+    for entry in normalized_entries:
+        if entry.get("sort_seq") is None:
+            entry["sort_seq"] = next_seq
+            next_seq += 1
 
     columns_sql = ", ".join(GALLERY_COLUMNS)
     placeholders_sql = ", ".join("?" for _ in GALLERY_COLUMNS)
@@ -1555,25 +1556,43 @@ def _dedupe_import_entries_on_conn(
     entries: list[dict[str, Any]],
     prepared_files: list[_PreparedGalleryFile],
 ):
-    used_filenames = set(_get_all_filenames_on_conn(conn))
-    used_ids = {
-        row["id"]
-        for row in conn.execute("SELECT id FROM gallery_entries").fetchall()
-        if row["id"]
-    }
+    used_filenames: set[str] = set()
+    used_ids: set[str] = set()
+    conflicts_possible = conn.execute(
+        "SELECT COUNT(*) FROM gallery_entries LIMIT 1"
+    ).fetchone()[0] > 0
+
+    if conflicts_possible:
+        incoming_filenames = {str(e["filename"]) for e in entries}
+        incoming_ids = {str(e["id"]) for e in entries}
+        placeholders_fn = ", ".join("?" for _ in incoming_filenames)
+        rows = conn.execute(
+            f"SELECT DISTINCT filename FROM gallery_entries WHERE filename IN ({placeholders_fn})",
+            tuple(incoming_filenames),
+        ).fetchall()
+        used_filenames = {row["filename"] for row in rows if row["filename"]}
+        placeholders_id = ", ".join("?" for _ in incoming_ids)
+        rows = conn.execute(
+            f"SELECT id FROM gallery_entries WHERE id IN ({placeholders_id})",
+            tuple(incoming_ids),
+        ).fetchall()
+        used_ids = {row["id"] for row in rows if row["id"]}
+
+    seen_filenames: set[str] = set()
+    seen_ids: set[str] = set()
 
     for entry, prepared in zip(entries, prepared_files):
         image_id = str(entry["id"])
-        while image_id in used_ids:
+        while image_id in used_ids or image_id in seen_ids:
             image_id = generate_image_id()
         entry["id"] = image_id
-        used_ids.add(image_id)
+        seen_ids.add(image_id)
 
         filename = str(entry["filename"])
-        deduped_filename = _dedupe_gallery_filename(filename, used_filenames)
+        deduped_filename = _dedupe_gallery_filename(filename, used_filenames | seen_filenames)
         entry["filename"] = deduped_filename
         prepared.filename = deduped_filename
-        used_filenames.add(deduped_filename)
+        seen_filenames.add(deduped_filename)
 
         if deduped_filename != filename:
             entry.pop("thumbnail_filename", None)
@@ -1821,44 +1840,55 @@ def _backfill_gallery_bytes_from_known_rows_on_conn(conn: sqlite3.Connection) ->
 def _backfill_gallery_bytes_from_filenames_on_conn(
     conn: sqlite3.Connection,
 ) -> int:
-    rows = conn.execute(
-        """
-        SELECT filename
-        FROM gallery_entries
-        WHERE filename IS NOT NULL
-          AND TRIM(filename) != ''
-          AND bytes IS NULL
-        GROUP BY filename
-        ORDER BY filename ASC
-        """
-    ).fetchall()
-    if not rows:
-        return 0
-
-    backfills: list[tuple[int, str]] = []
-    for row in rows:
-        filename = str(row["filename"] or "").strip()
-        if not filename:
-            continue
-        size = _stat_image_bytes(filename)
-        if size is None:
-            continue
-        backfills.append((size, filename))
-
-    if not backfills:
-        return 0
-
-    before_changes = conn.total_changes
-    with _transaction(conn):
-        conn.executemany(
+    total_updated = 0
+    batch_size = 200
+    last_filename = ""
+    while True:
+        rows = conn.execute(
             """
-            UPDATE gallery_entries
-            SET bytes = ?
-            WHERE filename = ? AND bytes IS NULL
+            SELECT filename
+            FROM gallery_entries
+            WHERE filename IS NOT NULL
+              AND TRIM(filename) != ''
+              AND bytes IS NULL
+              AND filename > ?
+            GROUP BY filename
+            ORDER BY filename ASC
+            LIMIT ?
             """,
-            backfills,
-        )
-    return conn.total_changes - before_changes
+            (last_filename, batch_size),
+        ).fetchall()
+        if not rows:
+            break
+
+        backfills: list[tuple[int, str]] = []
+        for row in rows:
+            filename = str(row["filename"] or "").strip()
+            if not filename:
+                continue
+            last_filename = filename
+            size = _stat_image_bytes(filename)
+            if size is None:
+                continue
+            backfills.append((size, filename))
+
+        if backfills:
+            before_changes = conn.total_changes
+            with _transaction(conn):
+                conn.executemany(
+                    """
+                    UPDATE gallery_entries
+                    SET bytes = ?
+                    WHERE filename = ? AND bytes IS NULL
+                    """,
+                    backfills,
+                )
+            total_updated += conn.total_changes - before_changes
+
+        if len(rows) < batch_size:
+            break
+
+    return total_updated
 
 
 def backfill_missing_gallery_bytes() -> int:
@@ -1949,7 +1979,7 @@ def _get_gallery_rows_on_conn(
         SELECT {", ".join(GALLERY_COLUMNS)}
         FROM gallery_entries
         {where_sql}
-        ORDER BY created_at DESC, rowid DESC
+        ORDER BY created_at DESC, sort_seq DESC
     """
     query_params: list[Any] = list(params)
     if limit is not None:
@@ -1986,28 +2016,47 @@ def iter_gallery_export_rows(
 ) -> Iterator[dict[str, Any]]:
     """Yield gallery entries as plain dicts for export use cases.
 
-    Reads in pages so a huge gallery doesn't materialize all rows at once,
-    and skips Pydantic validation since the export payload doesn't need it.
+    Uses cursor-based (keyset) pagination to avoid O(n^2) OFFSET scanning.
     """
     _ensure_database()
     where_sql, params = _build_gallery_filter_where(filters)
-    offset = 0
+    last_created_at: str | None = None
+    last_sort_seq: int | None = None
     while True:
         with _connect() as conn:
-            rows = _get_gallery_rows_on_conn(
-                conn,
-                where_sql,
-                params,
-                limit=batch_size,
-                offset=offset,
-            )
+            if last_created_at is None:
+                sql = f"""
+                    SELECT {", ".join(GALLERY_COLUMNS)}
+                    FROM gallery_entries
+                    {where_sql}
+                    ORDER BY created_at DESC, sort_seq DESC
+                    LIMIT ?
+                """
+                query_params = list(params) + [batch_size]
+            else:
+                cursor_clause = "(created_at < ? OR (created_at = ? AND sort_seq < ?))"
+                if where_sql:
+                    combined_where = f"{where_sql} AND {cursor_clause}"
+                else:
+                    combined_where = f" WHERE {cursor_clause}"
+                sql = f"""
+                    SELECT {", ".join(GALLERY_COLUMNS)}
+                    FROM gallery_entries
+                    {combined_where}
+                    ORDER BY created_at DESC, sort_seq DESC
+                    LIMIT ?
+                """
+                query_params = list(params) + [last_created_at, last_created_at, last_sort_seq, batch_size]
+            rows = conn.execute(sql, query_params).fetchall()
         if not rows:
             return
         for row in rows:
             yield _gallery_entry_from_row(row)
         if len(rows) < batch_size:
             return
-        offset += batch_size
+        last_row = rows[-1]
+        last_created_at = last_row["created_at"]
+        last_sort_seq = last_row["sort_seq"]
 
 
 def update_gallery_entry_hash(filename: str, sha256: str, byte_size: int) -> None:
@@ -2089,21 +2138,25 @@ def get_gallery_page(
     query_started_at = time.perf_counter()
     with _connect() as conn:
         where_sql, params = _build_gallery_filter_where(filters)
-        total = _get_gallery_count_on_conn(conn, where_sql, params)
-
-        total_pages_check = max((total + page_size - 1) // page_size, 1)
-        page = min(requested_page, total_pages_check)
-        effective_offset = (page - 1) * page_size
 
         rows = _get_gallery_rows_on_conn(
             conn,
             where_sql,
             params,
-            limit=page_size,
-            offset=effective_offset,
+            limit=page_size + 1,
+            offset=offset,
         )
 
+        has_next = len(rows) > page_size
+        if has_next:
+            rows = rows[:page_size]
+
+        has_prev = requested_page > 1
+
+        total = _get_gallery_count_on_conn(conn, where_sql, params)
         total_pages = max((total + page_size - 1) // page_size, 1)
+        effective_page = min(requested_page, total_pages)
+
         total_bytes = (
             _get_gallery_total_bytes_on_conn(conn, where_sql, params)
             if include_total_bytes
@@ -2115,11 +2168,11 @@ def get_gallery_page(
     return GalleryPage(
         total=total,
         total_bytes=total_bytes,
-        page=page,
+        page=effective_page,
         page_size=page_size,
         total_pages=total_pages,
-        has_prev=page > 1,
-        has_next=page < total_pages,
+        has_prev=has_prev,
+        has_next=has_next,
         images=[GalleryEntry(**_gallery_entry_from_row(row)) for row in rows],
         filter_options=filter_options,
         query_elapsed_ms=round(query_elapsed_ms, 2),
@@ -2457,10 +2510,14 @@ def sync_gallery_with_image_files() -> int:
 def _delete_gallery_entries_by_ids(
     conn: sqlite3.Connection,
     image_ids: Sequence[str],
-) -> tuple[int, int]:
+) -> tuple[list[str], set[str]]:
+    """Delete gallery entries and return (removed_ids, filenames_to_delete).
+
+    File deletion is NOT performed here — caller handles it after commit.
+    """
     unique_ids = [image_id for image_id in dict.fromkeys(image_ids) if image_id]
     if not unique_ids:
-        return 0, 0
+        return [], set()
 
     placeholders = ", ".join("?" for _ in unique_ids)
     rows = conn.execute(
@@ -2468,7 +2525,7 @@ def _delete_gallery_entries_by_ids(
         tuple(unique_ids),
     ).fetchall()
     if not rows:
-        return 0, 0
+        return [], set()
 
     removed_ids = [row["id"] for row in rows]
     removed_filenames = {row["filename"] for row in rows if row["filename"]}
@@ -2495,16 +2552,8 @@ def _delete_gallery_entries_by_ids(
             row["filename"] for row in remaining_rows if row["filename"]
         }
 
-    deleted_count = 0
-    for filename in removed_filenames - remaining_filenames:
-        if _delete_image_unlocked(filename):
-            deleted_count += 1
-        _delete_thumbnail_unlocked(filename)
-        thumbnail_filename = _thumbnail_filename_for_image(filename)
-        if thumbnail_filename:
-            _remove_verified_thumbnail(thumbnail_filename)
-
-    return len(removed_ids), deleted_count
+    filenames_to_delete = removed_filenames - remaining_filenames
+    return removed_ids, filenames_to_delete
 
 
 def delete_gallery_image(image_id: str) -> tuple[bool, int]:
@@ -2520,7 +2569,24 @@ def delete_gallery_images(image_ids: Sequence[str]) -> tuple[int, int]:
     with _storage_lock:
         with _connect() as conn:
             with _transaction(conn):
-                return _delete_gallery_entries_by_ids(conn, image_ids)
+                removed_ids, filenames_to_delete = _delete_gallery_entries_by_ids(conn, image_ids)
+
+    deleted_count = 0
+    for filename in filenames_to_delete:
+        try:
+            if _delete_image_unlocked(filename):
+                deleted_count += 1
+        except OSError as e:
+            logger.warning("Failed to delete image file %s: %s", filename, e)
+        try:
+            _delete_thumbnail_unlocked(filename)
+        except OSError as e:
+            logger.warning("Failed to delete thumbnail for %s: %s", filename, e)
+        thumbnail_filename = _thumbnail_filename_for_image(filename)
+        if thumbnail_filename:
+            _remove_verified_thumbnail(thumbnail_filename)
+
+    return len(removed_ids), deleted_count
 
 
 def _is_gallery_filename_referenced_on_conn(
@@ -2576,30 +2642,25 @@ def delete_all_gallery_images() -> tuple[int, int]:
     """
     _ensure_database()
     with _storage_lock:
+        disk_filenames = _scan_image_files()
         with _connect() as conn:
             with _transaction(conn):
-                # Count entries first so we can report it after deletion
                 row = conn.execute(
                     "SELECT COUNT(*) FROM gallery_entries"
                 ).fetchone()
                 total = int(row[0]) if row else 0
 
-                # Collect filenames referenced by gallery entries
                 referenced_filenames = set(_get_all_filenames_on_conn(conn))
-                disk_filenames = _scan_image_files()
 
                 conn.execute("DELETE FROM gallery_entries")
                 _invalidate_filter_options_cache()
                 _invalidate_gallery_total_bytes_cache()
 
-    # Files to delete: referenced by gallery OR on disk (union). Each file gets
-    # a short lock/recheck so newly imported entries with the same filename win.
     filenames_to_delete = referenced_filenames | disk_filenames
     deleted_count = 0
     for filename in filenames_to_delete:
         if _delete_gallery_file_if_unreferenced(filename):
             deleted_count += 1
-    # 批量删除完成后一次性清空缩略图内存缓存（逐项删除已各自 discard，此处作兜底）
     _clear_verified_thumbnails()
     return total, deleted_count
 
