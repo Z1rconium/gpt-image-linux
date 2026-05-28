@@ -43,7 +43,7 @@ Key characteristics:
 - gallery with filters (FTS-backed prompt search, model, preset, size, date range, favorite), URL-synced page/filter/lightbox/job-history state, direct page-number jump, lightbox previous/next navigation and left/right keyboard shortcuts, “Edit this image”, download, custom delete confirmations with 5-second undo for single images, batch actions with partial-success feedback, delete/delete-all, prompt/image-url copy, and on-demand total-size metadata
 - prompt snippets drawer for reusable prompt templates, stored separately from gallery images in SQLite
 - ZIP export/import (`metadata.json`) with streaming upload, safety validation, low-memory export path, skipped-entry metadata for partial batch downloads, and visible import/export/download progress states
-- access-key gate, IP allowlist/proxy-header support, GitHub version badge, and CSP nonce injection
+- access-key gate, Host/public-origin allowlist, IP allowlist/proxy-header support, GitHub version badge, and CSP nonce injection
 - observability hooks for job stage timings, slow `/api/gallery` query logging, queue/failure metrics, and optional JSON/Prometheus metrics endpoints
 
 ## Architecture
@@ -99,7 +99,7 @@ Runtime persistent storage is minimal:
 1. frontend calls `/api/generate`
 2. backend validates config, creates a SQLite-backed job, then schedules async execution
 3. shared queue/concurrency limits are enforced; progress stages stream via SSE
-4. generation requests with `n > 1` stay as one public job, but fan out internally to `n` concurrent upstream calls; `/v1/images/generations` child payloads always use `n=1`
+4. generation requests with `n > 1` stay as one public job, but count as `n` queue units and fan out internally through a global upstream-request semaphore; `/v1/images/generations` child payloads always use `n=1`
 5. upstream image data is decoded/downloaded, validated, and saved; gallery metadata is updated
 6. job history is queryable/streamed (`/api/generate/jobs*`), clearable (`DELETE /api/generate/jobs/history`), cancellable (`DELETE /api/generate/{job_id}`), and can trigger optional signed webhook callbacks
 
@@ -342,12 +342,12 @@ The panel supports these upstream paths. The API base URL may either omit or inc
 
 ## Import and upload limits
 
-- each uploaded source image is limited by `MAX_FILE_SIZE_MB` and must be a supported raster format (`.png`, `.jpg`, `.jpeg`, `.webp`, `.gif`, `.avif`, `.bmp`, `.heic`, `.heif`, `.ico`, `.tif`, `.tiff`); SVG is rejected
+- each uploaded source image is limited by `MAX_FILE_SIZE_MB`, must pass full Pillow decode validation plus pixel-bomb limits, and must be a supported raster format (`.png`, `.jpg`, `.jpeg`, `.webp`, `.gif`, `.avif`, `.bmp`, `.heic`, `.heif`, `.ico`, `.tif`, `.tiff`); SVG is rejected
 - `/api/import` accepts ZIP archives created by `/api/download-all`
 - import archives must include `metadata.json`
 - selected-image ZIP downloads include `metadata.skipped` when requested gallery rows or image files are missing
 - import archives are validated for uploaded size, file count, total uncompressed size, metadata size, member-path safety, and compression ratio
-- imported image entries must pass file extension and magic-byte validation before they are stored
+- imported image entries must pass file extension, content-type/magic-byte, full decoder, and pixel-count validation before they are stored
 
 ## Environment variables
 
@@ -364,6 +364,7 @@ The panel supports these upstream paths. The API base URL may either omit or inc
 | `PROMPT_OPTIMIZER_MODEL` | `gpt-4o-mini` | Prompt optimizer model |
 | `PROMPT_OPTIMIZER_TIMEOUT_SECONDS` | `60` | Prompt optimizer request timeout in seconds |
 | `PROMPT_OPTIMIZER_MAX_OUTPUT_CHARS` | `4000` | Max optimized prompt length returned to the textarea |
+| `PROMPT_OPTIMIZER_MAX_RESPONSE_MB` | `8` | Max optimizer upstream response body size in MB before JSON parsing |
 | `PROMPT_OPTIMIZER_HOST_ALLOWLIST` | empty | Optional comma-separated hostname allowlist for the optimizer endpoint |
 | `APP_VERSION` | `VERSION` file | Override the app version shown in the UI and returned by `/api/version`; read on each request |
 | `GITHUB_REPO` | `Z1rconium/gpt-image-linux` | GitHub `owner/repo` used for latest-release update detection; set empty to disable latest-version checks |
@@ -376,9 +377,13 @@ The panel supports these upstream paths. The API base URL may either omit or inc
 | `ALLOW_UNAUTHENTICATED` | `false` | Set `true` to explicitly allow startup without `ACCESS_KEY` |
 | `IP_ALLOWLIST` | empty | Comma-separated allowed IPs/CIDRs |
 | `TRUST_PROXY_HEADERS` | `false` | Read `X-Forwarded-For`, `X-Real-IP`, `X-Forwarded-Proto`, or `X-Forwarded-Host` from a trusted reverse proxy |
+| `PUBLIC_ORIGIN` | empty | Optional canonical browser origin such as `https://panel.example.com`; also contributes to the Host allowlist and CSRF expected origin |
+| `ALLOWED_HOSTS` | empty | Optional comma-separated allowed Host / trusted `X-Forwarded-Host` values; accepts hostnames, `host:port`, or origins |
 | `CSRF_ORIGIN_CHECK_ENABLED` | `true` | Reject cross-origin `POST`, `PATCH`, and `DELETE` requests using `Origin` or `Referer` checks |
 | `MAX_FILE_SIZE_MB` | `50` | Max uploaded image size in MB for edit source images, imported image files, and downloaded upstream image URLs |
+| `MAX_JSON_BODY_MB` | `1` | Max JSON request body size in MB for non-upload API calls |
 | `MAX_UPSTREAM_JSON_MB` | `128` | Max upstream JSON/SSE response body size in MB before parsing; prefer `response_format=url` for large or multi-image results |
+| `MAX_IMAGE_PIXELS` | `100000000` | Max decoded image pixels accepted by Pillow before decompression-bomb rejection |
 | `IMPORT_ARCHIVE_MAX_MB` | `1000` | Max uploaded ZIP size in MB for `/api/import` |
 | `IMPORT_MAX_FILES` | `500` | Max number of files allowed inside one import archive |
 | `IMPORT_MAX_UNCOMPRESSED_MB` | `1024` | Max total uncompressed size in MB across all files in an import archive |
@@ -450,14 +455,15 @@ The panel supports these upstream paths. The API base URL may either omit or inc
 ## Runtime behavior notes
 
 - app version comes from `APP_VERSION` then `VERSION`; both the local app version and optional GitHub remote check are evaluated on each web-triggered version request. The remote check reads the latest release first, falls back to the configured branch `VERSION`, and can show a `New` badge without blocking usage.
+- when `PUBLIC_ORIGIN` or `ALLOWED_HOSTS` is configured, unknown `Host` or trusted `X-Forwarded-Host` values are rejected before CSRF checks; `Sec-Fetch-Site: same-origin` does not bypass the Host allowlist
 - presets, prompt snippets, and gallery/job data persist only in `DATABASE_FILE`
 - SQLite repository operations use short-lived connections with WAL enabled at startup; app shutdown and tests call the storage close hook so connection lifecycle stays explicit
-- generation and edit share one queue (`MAX_ACTIVE_GENERATE_JOBS` + `MAX_QUEUED_GENERATE_JOBS`), all edit source images are staged under `DATA_DIR/edit-sources` and additionally capped by `MAX_PENDING_EDIT_SOURCE_MB`, support cancellation, and persist terminal history including `completed_at`
-- batch generation (`n > 1`) consumes one public queue/running slot; the parent job aggregates successful child results into `images[]`, while Gallery metadata keeps the user-requested `n`
-- Prompt Optimizer uses its own server-side Chat Completions-compatible endpoint config and user-configurable request timeout, resolves API key env refs on the backend, stores its editable system prompt in `DATA_DIR/prompt_optimizer_system_prompt.md`, and does not consume generation/edit queue capacity.
+- generation and edit share one queue measured in image units (`MAX_ACTIVE_GENERATE_JOBS` + `MAX_QUEUED_GENERATE_JOBS`), all edit source images are staged under `DATA_DIR/edit-sources` and additionally capped by `MAX_PENDING_EDIT_SOURCE_MB`, support cancellation, and persist terminal history including `completed_at`
+- batch generation (`n > 1`) consumes `n` queue units; the parent job aggregates successful child results into `images[]`, Gallery metadata keeps the user-requested `n`, and actual upstream child calls are bounded by the global upstream-request semaphore
+- Prompt Optimizer uses its own server-side Chat Completions-compatible endpoint config and user-configurable request timeout/response-size cap, resolves API key env refs on the backend, stores its editable system prompt in `DATA_DIR/prompt_optimizer_system_prompt.md`, and does not consume generation/edit queue capacity.
 - SSE is the primary progress channel; `/api/generate/jobs` provides list/history (`include_finished=true`, optional `limit`/`offset`, optional `failed_only=true`), `/api/generate/jobs/history` clears terminal history, and `/api/generate/jobs/events` streams debounced live job-list changes from memory
 - terminal job history includes `stage_timings` for `upstream_wait`, `download_decode`, `validate`, `thumbnail`, and `db_insert`; slow gallery queries are logged with query filters and totals and counted in metrics; optional metrics include queue depth, running jobs, failure ratios, job-stage latencies, and slow SQLite query counters; terminal job statuses distinguish `cancelled`, `interrupted`, and `upstream_error` in addition to the generic `error`
-- upstream JSON/SSE bodies are read with a `MAX_UPSTREAM_JSON_MB` cap before parsing, and upstream image URL downloads are revalidated (SSRF-aware, no blind redirect follow) and bounded by `MAX_FILE_SIZE_MB`
+- upstream JSON/SSE bodies are read with a `MAX_UPSTREAM_JSON_MB` cap before parsing, JSON request bodies are capped by `MAX_JSON_BODY_MB`, and upstream image URL downloads are revalidated (SSRF-aware, no blind redirect follow), fully decoded with Pillow, pixel-limited by `MAX_IMAGE_PIXELS`, and bounded by `MAX_FILE_SIZE_MB`
 - `/api/import` enforces ZIP safety/size/count/compression checks; `/api/download-all` keeps the low-memory streaming path, while tracked export jobs write temp ZIP files so UI progress can cover both packing and transfer
 - gallery stores byte-size metadata and thumbnails (`THUMBNAILS_DIR`), with lazy thumbnail and opt-in byte-size backfill for older images
 - startup reconciliation removes gallery rows for missing files and marks previously running/queued jobs as interrupted
@@ -545,7 +551,7 @@ GPT Image Panel 是一个轻量级 FastAPI Web 界面，用于图像生成和图
 - Gallery：筛选（FTS 提示词搜索、模型、预设、尺寸、日期区间、收藏）、URL 同步的 page/filter/lightbox/job history 状态、页码输入跳转、Lightbox 上一张/下一张导航和左右方向键快捷键、”Edit this image”、下载/删除、批量操作部分成功反馈、单图 5 秒撤销删除、复制提示词/图片链接、按需总大小统计
 - 提示词收藏夹：可复用 prompt 模板，与 Gallery 图片分开存储和管理
 - ZIP 导出导入（含 `metadata.json`）+ 流式上传 + 安全校验 + 低内存导出路径 + 批量下载 skipped metadata + 可见导入/导出/下载进度状态
-- 访问密钥、IP 白名单/反向代理头、版本检测、CSP nonce
+- 访问密钥、Host/public origin 白名单、IP 白名单/反向代理头、版本检测、CSP nonce
 - 观测能力：任务分段耗时、慢 `/api/gallery` 查询日志、队列/失败率指标、可选 JSON/Prometheus metrics
 
 ## 架构
@@ -601,7 +607,7 @@ npm --prefix frontend run build
 1. 前端调用 `/api/generate`
 2. 后端校验配置并创建 SQLite 任务，再异步调度执行
 3. 执行前检查共享并发/队列限制，执行中通过 SSE 推送细分进度
-4. `n > 1` 的生成请求仍只暴露一个父任务，但内部会并发拆成 `n` 次上游调用；`/v1/images/generations` 子请求 payload 固定使用 `n=1`
+4. `n > 1` 的生成请求仍只暴露一个父任务，但会按 `n` 计入队列容量，并通过全局上游请求 semaphore 拆成多次内部调用；`/v1/images/generations` 子请求 payload 固定使用 `n=1`
 5. 上游返回数据解码/下载、校验并落盘，同时更新 Gallery 元数据
 6. 任务历史可通过 `/api/generate/jobs*` 查询/订阅，可清空（`DELETE /api/generate/jobs/history`）或取消运行中任务；可选触发签名 webhook 回调
 
@@ -843,12 +849,12 @@ curl http://localhost:9090/health
 
 ## 导入与上传限制
 
-- 每张上传的编辑源图大小受 `MAX_FILE_SIZE_MB` 限制，且必须是受支持的位图格式（`.png`、`.jpg`、`.jpeg`、`.webp`、`.gif`、`.avif`、`.bmp`、`.heic`、`.heif`、`.ico`、`.tif`、`.tiff`）；SVG 会被拒绝
+- 每张上传的编辑源图大小受 `MAX_FILE_SIZE_MB` 限制，必须通过 Pillow 完整解码校验和像素炸弹限制，且必须是受支持的位图格式（`.png`、`.jpg`、`.jpeg`、`.webp`、`.gif`、`.avif`、`.bmp`、`.heic`、`.heif`、`.ico`、`.tif`、`.tiff`）；SVG 会被拒绝
 - `/api/import` 只接受由 `/api/download-all` 导出的 ZIP 归档
 - 导入 ZIP 必须包含 `metadata.json`
 - 所选图片 ZIP 下载遇到缺失图库行或缺失图片文件时，会在 `metadata.skipped` 中记录跳过项
 - 导入 ZIP 会校验上传体积、文件数、解压总体积、metadata 大小、安全路径和压缩比
-- 导入图片条目在存储前必须通过扩展名和文件魔数校验
+- 导入图片条目在存储前必须通过扩展名、Content-Type/文件魔数、完整解码和像素数量校验
 
 ## 环境变量
 
@@ -865,6 +871,7 @@ curl http://localhost:9090/health
 | `PROMPT_OPTIMIZER_MODEL` | `gpt-4o-mini` | 提示词优化器模型 |
 | `PROMPT_OPTIMIZER_TIMEOUT_SECONDS` | `60` | 提示词优化请求超时时间（秒） |
 | `PROMPT_OPTIMIZER_MAX_OUTPUT_CHARS` | `4000` | 回填到文本框的优化后提示词最大长度 |
+| `PROMPT_OPTIMIZER_MAX_RESPONSE_MB` | `8` | JSON 解析前允许的最大优化器上游响应体积（MB） |
 | `PROMPT_OPTIMIZER_HOST_ALLOWLIST` | 空 | 可选的优化器 endpoint 主机名白名单，逗号分隔 |
 | `APP_VERSION` | `VERSION` 文件 | 覆盖界面显示和 `/api/version` 返回的当前应用版本；每次请求实时读取 |
 | `GITHUB_REPO` | `Z1rconium/gpt-image-linux` | 用于检测 latest release 新版本的 GitHub `owner/repo`；设为空可禁用最新版本检查 |
@@ -877,9 +884,13 @@ curl http://localhost:9090/health
 | `ALLOW_UNAUTHENTICATED` | `false` | 设置为 `true` 可显式允许在未设置 `ACCESS_KEY` 时启动 |
 | `IP_ALLOWLIST` | 空 | 允许访问的 IP/CIDR，逗号分隔 |
 | `TRUST_PROXY_HEADERS` | `false` | 是否读取受信任反向代理的 `X-Forwarded-For`、`X-Real-IP`、`X-Forwarded-Proto` 或 `X-Forwarded-Host` |
+| `PUBLIC_ORIGIN` | 空 | 可选的浏览器侧规范 origin，例如 `https://panel.example.com`；同时加入 Host 白名单并作为 CSRF expected origin |
+| `ALLOWED_HOSTS` | 空 | 可选的 Host / 受信任 `X-Forwarded-Host` 白名单，逗号分隔；支持 hostname、`host:port` 或 origin |
 | `CSRF_ORIGIN_CHECK_ENABLED` | `true` | 是否通过 `Origin` 或 `Referer` 拒绝跨站 `POST`、`PATCH`、`DELETE` 请求 |
 | `MAX_FILE_SIZE_MB` | `50` | 上传为编辑源图的图片、导入图片文件和上游图片 URL 下载的最大体积（MB） |
+| `MAX_JSON_BODY_MB` | `1` | 非上传 API 调用的最大 JSON 请求体积（MB） |
 | `MAX_UPSTREAM_JSON_MB` | `128` | 解析前允许的最大上游 JSON/SSE 响应体积（MB）；大图或多图建议使用 `response_format=url` |
+| `MAX_IMAGE_PIXELS` | `100000000` | Pillow 接受的最大解码图片像素数，超过后按 decompression bomb 拒绝 |
 | `IMPORT_ARCHIVE_MAX_MB` | `1000` | `/api/import` 可上传 ZIP 的最大体积（MB） |
 | `IMPORT_MAX_FILES` | `500` | 单个导入归档允许的最大文件数 |
 | `IMPORT_MAX_UNCOMPRESSED_MB` | `1024` | 导入归档内所有文件解压后的最大总体积（MB） |
@@ -949,14 +960,15 @@ curl http://localhost:9090/health
 ## 运行时注意事项
 
 - 版本读取顺序是 `APP_VERSION` -> `VERSION`；本地版本和可选 GitHub 远端检查都会在每次 Web 端触发版本请求时实时计算。远端检查会先读 latest release，再回退到配置分支的 `VERSION`，仅用于显示 `New`，不会阻塞使用。
+- 配置 `PUBLIC_ORIGIN` 或 `ALLOWED_HOSTS` 后，未知 `Host` 或受信任 `X-Forwarded-Host` 会在 CSRF 检查前被拒绝；`Sec-Fetch-Site: same-origin` 不能绕过 Host 白名单
 - 预设、提示词收藏夹和 Gallery/Job 数据只保存在 `DATABASE_FILE`
 - SQLite 仓储操作使用短连接，并在启动时启用 WAL；应用 shutdown 和测试 reset 会调用 storage close hook，连接生命周期保持显式
-- 生成与编辑共用队列（`MAX_ACTIVE_GENERATE_JOBS` + `MAX_QUEUED_GENERATE_JOBS`）；所有编辑源图先落到 `DATA_DIR/edit-sources` 并额外受 `MAX_PENDING_EDIT_SOURCE_MB` 总量限制；支持取消，并持久化终态历史（含 `completed_at`）
-- 批量生成（`n > 1`）只占一个公开队列/运行槽；父任务会把成功子结果聚合到 `images[]`，Gallery 元数据保留用户请求的 `n`
-- 提示词优化器使用独立的服务端 Chat Completions 兼容 endpoint 配置和用户可配置请求超时时间，在后端解析 API Key 环境变量引用，不占用生成/编辑任务队列容量。
+- 生成与编辑共用按 image units 计量的队列（`MAX_ACTIVE_GENERATE_JOBS` + `MAX_QUEUED_GENERATE_JOBS`）；所有编辑源图先落到 `DATA_DIR/edit-sources` 并额外受 `MAX_PENDING_EDIT_SOURCE_MB` 总量限制；支持取消，并持久化终态历史（含 `completed_at`）
+- 批量生成（`n > 1`）会占用 `n` 个队列单位；父任务会把成功子结果聚合到 `images[]`，Gallery 元数据保留用户请求的 `n`，真实上游子调用受全局 upstream-request semaphore 限制
+- 提示词优化器使用独立的服务端 Chat Completions 兼容 endpoint 配置和用户可配置请求超时/响应体积上限，在后端解析 API Key 环境变量引用，不占用生成/编辑任务队列容量。
 - SSE 是主进度通道；`/api/generate/jobs` 提供列表/历史（`include_finished=true`，可选 `limit`/`offset`，可选 `failed_only=true`），`/api/generate/jobs/history` 清空终态历史，`/api/generate/jobs/events` 从内存推送 debounce 后的实时任务列表变化
 - 任务终态历史包含 `stage_timings`：`upstream_wait`、`download_decode`、`validate`、`thumbnail`、`db_insert`；慢 Gallery 查询日志会带筛选条件与 total，并计入 metrics；可选 metrics 包含队列深度、运行中任务数、失败率、任务分段耗时和慢 SQLite 查询数；终态状态区分 `cancelled`、`interrupted` 和 `upstream_error`，同时保留通用 `error`
-- 上游 JSON/SSE 响应会在解析前受 `MAX_UPSTREAM_JSON_MB` 限制；上游图片 URL 下载会做 SSRF/重定向目标复核，并受 `MAX_FILE_SIZE_MB` 限制
+- 上游 JSON/SSE 响应会在解析前受 `MAX_UPSTREAM_JSON_MB` 限制，JSON 请求体受 `MAX_JSON_BODY_MB` 限制；上游图片 URL 下载会做 SSRF/重定向目标复核，并会经过 Pillow 完整解码、`MAX_IMAGE_PIXELS` 像素限制和 `MAX_FILE_SIZE_MB` 体积限制
 - `/api/import` 做 ZIP 安全与体积校验；`/api/download-all` 保留低内存流式导出，带进度的导出任务会写入临时 ZIP，让 UI 同时展示打包和传输进度
 - Gallery 持久化图片字节数和缩略图（`THUMBNAILS_DIR`），旧图按需懒补缩略图
 - 启动时会清理缺失文件对应的 Gallery 记录，并把上次进程遗留的 running/queued 任务标记为 interrupted

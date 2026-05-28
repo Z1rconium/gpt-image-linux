@@ -99,6 +99,8 @@ def _validate_url_base(
     private_ip_error: str,
     allowlist: str = "",
     allowlist_error_prefix: str = "Hostname",
+    reject_userinfo: bool = False,
+    reject_query_fragment: bool = False,
 ) -> None:
     parsed = urlparse(url)
 
@@ -107,6 +109,12 @@ def _validate_url_base(
 
     if not parsed.hostname:
         raise ValueError(missing_hostname_error)
+
+    if reject_userinfo and (parsed.username is not None or parsed.password is not None):
+        raise ValueError("URL must not include username or password")
+
+    if reject_query_fragment and (parsed.query or parsed.fragment):
+        raise ValueError("URL must not include query strings or fragments")
 
     hostname = parsed.hostname.lower()
 
@@ -136,7 +144,61 @@ def validate_upstream_url(url: str, allowlist: str) -> None:
         blocked_hostname_error="Hostname '{hostname}' is not allowed",
         private_ip_error="Hostname '{hostname}' resolves to private/internal IP(s): {resolved_info}",
         allowlist=allowlist,
+        reject_userinfo=True,
+        reject_query_fragment=True,
     )
+
+
+def normalize_upstream_base_url(url: str | None) -> str:
+    value = str(url or "").strip()
+    if not value:
+        raise ValueError("API URL must not be empty")
+
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError as e:
+        raise ValueError("API URL must include a valid port") from e
+
+    if parsed.scheme.lower() != "https":
+        raise ValueError("API URL must use https://")
+    if not parsed.hostname:
+        raise ValueError("API URL must include a hostname")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("API URL must not include username or password")
+    if parsed.query or parsed.fragment:
+        raise ValueError("API URL must not include query strings or fragments")
+
+    hostname = parsed.hostname.lower()
+    host = f"[{hostname}]" if ":" in hostname and not hostname.startswith("[") else hostname
+    if port is not None:
+        host = f"{host}:{port}"
+    path = parsed.path.rstrip("/")
+    return urlunsplit(("https", host, path, "", ""))
+
+
+def redact_url(url: str | None) -> str:
+    value = str(url or "").strip()
+    if not value:
+        return ""
+
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError:
+        return "***"
+
+    if not parsed.scheme or not parsed.hostname:
+        return "***"
+
+    hostname = parsed.hostname
+    host = f"[{hostname}]" if ":" in hostname and not hostname.startswith("[") else hostname
+    port_part = f":{port}" if port is not None else ""
+    userinfo = "***@" if parsed.username is not None or parsed.password is not None else ""
+    path = "/***" if parsed.path and parsed.path != "/" else parsed.path
+    query = "***" if parsed.query else ""
+    fragment = "***" if parsed.fragment else ""
+    return urlunsplit((parsed.scheme, f"{userinfo}{host}{port_part}", path, query, fragment))
 
 
 def validate_image_url(url: str) -> None:

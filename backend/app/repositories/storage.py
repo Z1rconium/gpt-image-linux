@@ -36,6 +36,8 @@ from .image_files import (
     safe_thumbnail_path,
     save_image_to_temp as _save_image_temp_unlocked,
     scan_image_files as _scan_image_files,
+    validate_image_file,
+    validate_image_header_bytes,
     validate_image_bytes,
 )
 from .thumbnails import (
@@ -102,6 +104,8 @@ __all__ = [
     "update_gallery_entry_hash",
     "update_prompt_snippet",
     "upsert_generate_job",
+    "validate_image_file",
+    "validate_image_header_bytes",
     "validate_image_bytes",
     "verify_storage_writable",
 ]

@@ -1,7 +1,6 @@
 import asyncio
 import os
 import uuid
-from urllib.parse import urlsplit
 
 from fastapi import APIRouter, HTTPException
 
@@ -196,25 +195,15 @@ def validate_health_api_url(api_url: str, api_path: str, checks: list[dict]) -> 
         add_health_check(checks, "api_url", "error", "API URL is not configured")
         return False
 
-    parsed = urlsplit(api_url)
-    if parsed.scheme != "https":
-        add_health_check(checks, "api_url", "error", "API URL must use https://")
-        return False
-    if not parsed.hostname:
-        add_health_check(checks, "api_url", "error", "API URL must include a hostname")
-        return False
-    if parsed.query or parsed.fragment:
-        add_health_check(
-            checks,
-            "api_url",
-            "error",
-            "API URL must not include query strings or fragments",
-        )
+    try:
+        normalized_api_url = ssrf.normalize_upstream_base_url(api_url)
+    except ValueError as e:
+        add_health_check(checks, "api_url", "error", str(e))
         return False
 
     try:
         ssrf.validate_upstream_url(
-            build_upstream_url(api_url, api_path),
+            build_upstream_url(normalized_api_url, api_path),
             config.UPSTREAM_HOST_ALLOWLIST,
         )
     except ValueError as e:

@@ -27,9 +27,11 @@ from backend.app.schemas.models import EditRequest
 
 
 PNG_BYTES = base64.b64decode(
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4//8/AwAI/AL+X1N6AAAAAElFTkSuQmCC"
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg=="
 )
-JPEG_BYTES = b"\xff\xd8\xff\xd9"
+JPEG_BYTES = base64.b64decode(
+    "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAABAAEDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDi6KKK+ZP3E//Z"
+)
 
 
 def _configure_runtime(tmp_path: Path, *, access_key: str = "", allow_unauthenticated: bool = True):
@@ -56,6 +58,8 @@ def _configure_runtime(tmp_path: Path, *, access_key: str = "", allow_unauthenti
     config.IP_ALLOWLIST = ""
     config.TRUST_PROXY_HEADERS = False
     config.TRUSTED_PROXY_IPS = ""
+    config.PUBLIC_ORIGIN = ""
+    config.ALLOWED_HOSTS = ""
     config.CSRF_ORIGIN_CHECK_ENABLED = True
     config.UPSTREAM_HOST_ALLOWLIST = ""
     config.WEBHOOK_HOST_ALLOWLIST = ""
@@ -63,7 +67,9 @@ def _configure_runtime(tmp_path: Path, *, access_key: str = "", allow_unauthenti
     config.WEBHOOK_TIMEOUT_SECONDS = 1
     config.WEBHOOK_MAX_ATTEMPTS = 1
     config.MAX_FILE_SIZE_MB = 50
+    config.MAX_JSON_BODY_MB = 1
     config.MAX_UPSTREAM_JSON_MB = 128
+    config.MAX_IMAGE_PIXELS = 100000000
     config.MAX_PENDING_EDIT_SOURCE_MB = config.MAX_FILE_SIZE_MB * 4
     config.IMPORT_ARCHIVE_MAX_MB = config.MAX_FILE_SIZE_MB * 20
     config.IMPORT_MAX_FILES = 500
@@ -82,6 +88,7 @@ def _configure_runtime(tmp_path: Path, *, access_key: str = "", allow_unauthenti
     config.PROMPT_OPTIMIZER_MODEL = "gpt-4o-mini"
     config.PROMPT_OPTIMIZER_TIMEOUT_SECONDS = 60
     config.PROMPT_OPTIMIZER_MAX_OUTPUT_CHARS = 4000
+    config.PROMPT_OPTIMIZER_MAX_RESPONSE_MB = 8
     config.PROMPT_OPTIMIZER_HOST_ALLOWLIST = ""
     config.MAX_SSE_SUBSCRIBERS_GLOBAL = 200
     config.MAX_SSE_SUBSCRIBERS_PER_IP = 10
@@ -744,6 +751,52 @@ def test_csrf_origin_check_allows_same_origin_fetch_metadata_through_dev_proxy(t
     assert resp.json()["authenticated"] is True
 
 
+def test_host_allowlist_blocks_unknown_host_even_with_same_origin_fetch_metadata(tmp_path):
+    _configure_runtime(tmp_path, access_key="secret", allow_unauthenticated=False)
+    config.ALLOWED_HOSTS = "panel.example.com"
+
+    with TestClient(backend_main.app) as client:
+        resp = client.post(
+            "/api/access",
+            headers={
+                "Host": "evil.example",
+                "Origin": "https://evil.example",
+                "Sec-Fetch-Site": "same-origin",
+            },
+            json={"access_key": "secret"},
+        )
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "Host is not allowed"
+
+
+def test_host_allowlist_blocks_untrusted_forwarded_host(client):
+    config.PUBLIC_ORIGIN = "https://panel.example.com"
+    config.TRUST_PROXY_HEADERS = True
+    config.TRUSTED_PROXY_IPS = "127.0.0.0/8"
+    import backend.app.core.security as _sec
+    _sec._trusted_proxy_networks = None
+    original_is_trusted = _sec.is_trusted_proxy
+    _sec.is_trusted_proxy = lambda _host: True
+
+    try:
+        resp = client.post(
+            "/api/settings/presets",
+            headers={
+                "Host": "panel.example.com",
+                "Origin": "https://panel.example.com",
+                "X-Forwarded-Proto": "https",
+                "X-Forwarded-Host": "evil.example",
+            },
+            json={"name": "Proxy Preset"},
+        )
+    finally:
+        _sec.is_trusted_proxy = original_is_trusted
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "Forwarded host is not allowed"
+
+
 def test_csrf_origin_check_does_not_block_get(client):
     resp = client.get("/api/settings", headers={"Origin": "https://evil.example"})
 
@@ -785,6 +838,54 @@ def test_csrf_origin_check_respects_trusted_forwarded_proto(client):
         assert resp.status_code == 200
     finally:
         _sec.is_trusted_proxy = original_is_trusted
+
+
+def test_json_body_limit_rejects_oversized_json(client):
+    config.MAX_JSON_BODY_MB = 1
+    resp = client.post(
+        "/api/generate",
+        content=json.dumps({"prompt": "x" * (1024 * 1024 + 1)}),
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert resp.status_code == 413
+    assert resp.json()["detail"] == "Request body too large"
+
+
+def test_request_models_forbid_extra_fields_and_require_prompt(client):
+    extra = client.post(
+        "/api/generate",
+        json={"prompt": "valid", "unexpected": True},
+    )
+    empty_prompt = client.post(
+        "/api/generate",
+        json={"prompt": ""},
+    )
+
+    assert extra.status_code == 422
+    assert empty_prompt.status_code == 422
+
+
+def test_settings_rejects_upstream_url_userinfo_query_and_fragment(client):
+    settings = client.get("/api/settings").json()
+    active_preset_id = settings["active_preset_id"]
+
+    for api_url in (
+        "https://user:secret@api.example.com",
+        "https://api.example.com?token=secret",
+        "https://api.example.com#secret",
+    ):
+        resp = client.post(
+            "/api/settings",
+            json={
+                "active_preset_id": active_preset_id,
+                "preset_name": "Bad URL",
+                "api_url": api_url,
+                "api_key": "key",
+                "api_path": "/v1/images/generations",
+            },
+        )
+        assert resp.status_code == 422
 
 
 def test_settings_and_presets(client):
@@ -1619,7 +1720,7 @@ def test_generate_request_api_path_overrides_active_preset(client):
 def test_multi_image_job_returns_all_results(client, monkeypatch):
     calls = []
     calls_lock = threading.Lock()
-    all_started = threading.Event()
+    upstream_window_started = threading.Event()
     release_event = threading.Event()
 
     async def blocking_generation_api(
@@ -1633,8 +1734,8 @@ def test_multi_image_job_returns_all_results(client, monkeypatch):
     ):
         with calls_lock:
             calls.append(payload)
-            if len(calls) == 3:
-                all_started.set()
+            if len(calls) == config.MAX_ACTIVE_GENERATE_JOBS:
+                upstream_window_started.set()
         await asyncio.to_thread(release_event.wait)
         return [
             await _add_generated_gallery_entry(
@@ -1665,7 +1766,7 @@ def test_multi_image_job_returns_all_results(client, monkeypatch):
     job_id = resp.json()["job_id"]
 
     try:
-        assert all_started.wait(2)
+        assert upstream_window_started.wait(2)
         active_jobs = client.get("/api/generate/jobs")
         assert active_jobs.status_code == 200
         assert len(active_jobs.json()) == 1
@@ -2882,8 +2983,8 @@ def test_import_archive_rejects_uploaded_archive_size_limit(client):
 
     resp = _post_import_archive(client, _import_archive_bytes())
 
-    assert resp.status_code == 400
-    assert resp.json()["detail"] == "Uploaded archive is too large"
+    assert resp.status_code == 413
+    assert resp.json()["detail"] == "Request body too large"
 
 
 def test_import_archive_rejects_high_compression_ratio(client):
@@ -2953,6 +3054,11 @@ def test_safe_image_paths_reject_traversal(client):
     assert image.status_code == 404
     assert thumb.status_code == 404
     assert download.status_code == 404
+
+
+def test_image_validation_rejects_magic_only_truncated_image(client):
+    with pytest.raises(ValueError, match="fully decodable"):
+        storage.validate_image_bytes(b"\xff\xd8\xff\xd9", filename="truncated.jpg")
 
 
 def test_download_all_skips_polluted_gallery_filename(client):
@@ -3065,14 +3171,16 @@ def test_generate_queue_capacity_and_concurrency_limit(tmp_path, monkeypatch):
     assert max_active_calls == 1
 
 
-def test_batch_generate_counts_as_one_public_queue_slot(tmp_path, monkeypatch):
+def test_batch_generate_counts_image_units_and_bounds_upstream_calls(tmp_path, monkeypatch):
     _configure_runtime(tmp_path)
     config.MAX_ACTIVE_GENERATE_JOBS = 1
-    config.MAX_QUEUED_GENERATE_JOBS = 1
+    config.MAX_QUEUED_GENERATE_JOBS = 3
     calls = []
     calls_lock = threading.Lock()
     batch_started = threading.Event()
     release_event = threading.Event()
+    active_calls = 0
+    max_active_calls = 0
 
     async def blocking_generation_api(
         api_url,
@@ -3083,20 +3191,26 @@ def test_batch_generate_counts_as_one_public_queue_slot(tmp_path, monkeypatch):
         progress=None,
         socks5_proxy=None,
     ):
+        nonlocal active_calls, max_active_calls
+        active_calls += 1
+        max_active_calls = max(max_active_calls, active_calls)
         with calls_lock:
             calls.append(payload)
             batch_calls = [call for call in calls if call.prompt == "batch"]
-            if len(batch_calls) == 3:
+            if len(batch_calls) == 1:
                 batch_started.set()
-        if payload.prompt == "batch":
-            await asyncio.to_thread(release_event.wait)
-        return [
-            await _add_generated_gallery_entry(
-                payload,
-                api_path,
-                api_preset_name,
-            )
-        ]
+        try:
+            if payload.prompt == "batch":
+                await asyncio.to_thread(release_event.wait)
+            return [
+                await _add_generated_gallery_entry(
+                    payload,
+                    api_path,
+                    api_preset_name,
+                )
+            ]
+        finally:
+            active_calls -= 1
 
     monkeypatch.setattr(backend_main.proxy, "call_image_generation_api", blocking_generation_api)
 
@@ -3138,6 +3252,7 @@ def test_batch_generate_counts_as_one_public_queue_slot(tmp_path, monkeypatch):
         batch_calls = [call for call in calls if call.prompt == "batch"]
     assert len(batch_calls) == 3
     assert all(payload.n == 1 for payload in batch_calls)
+    assert max_active_calls == 1
 
 
 def test_edit_jobs_share_queue_capacity(tmp_path, monkeypatch):

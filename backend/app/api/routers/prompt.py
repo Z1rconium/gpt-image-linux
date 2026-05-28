@@ -82,7 +82,9 @@ async def optimize_prompt_endpoint(req: PromptOptimizeRequest):
         raise HTTPException(status_code=400, detail="Prompt optimizer API key is not configured")
 
     try:
-        validate_optimizer_endpoint(api_url)
+        validated_api_url = validate_optimizer_endpoint(api_url)
+        if validated_api_url:
+            api_url = validated_api_url
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 

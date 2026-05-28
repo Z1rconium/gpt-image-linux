@@ -80,6 +80,17 @@ def validate_edit_source_header(
     validate_upload_image_bytes(image_header, filename, content_type)
 
 
+def validate_edit_source_file(path: Path, filename: str, content_type: str):
+    try:
+        storage.validate_image_file(
+            path,
+            filename=filename,
+            content_type=content_type,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
 def copy_edit_source_file_to_temp(
     path: Path,
     filename: str,
@@ -124,6 +135,7 @@ def copy_edit_source_file_to_temp(
             empty_detail=empty_detail,
             too_large_detail=too_large_detail,
         )
+        validate_edit_source_file(temp_path, filename, content_type)
     except BaseException:
         temp_path.unlink(missing_ok=True)
         raise
@@ -182,6 +194,7 @@ async def read_upload_edit_source(image: UploadFile) -> EditImageSource:
             empty_detail="Uploaded image is empty.",
             too_large_detail=f"Uploaded image is too large. Max size is {config.MAX_FILE_SIZE_MB} MB.",
         )
+        validate_edit_source_file(temp_path, filename, image_content_type)
     except BaseException:
         temp_path.unlink(missing_ok=True)
         raise

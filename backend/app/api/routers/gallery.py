@@ -98,7 +98,11 @@ async def _gallery_zip_response(
     filename_prefix: str,
     skipped: list[dict] | None = None,
     extra_headers: dict[str, str] | None = None,
+    reserve_export_slot: bool = False,
 ) -> StreamingResponse:
+    if reserve_export_slot:
+        await _reserve_gallery_export_direct_slot()
+
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     filename = f"{filename_prefix}-{timestamp}.zip"
     headers = {
@@ -108,8 +112,16 @@ async def _gallery_zip_response(
     }
     if extra_headers:
         headers.update(extra_headers)
+
+    def zip_chunks():
+        try:
+            yield from iter_gallery_zip_chunks(entries, skipped=skipped)
+        finally:
+            if reserve_export_slot:
+                _release_gallery_export_direct_slot()
+
     return StreamingResponse(
-        iter_gallery_zip_chunks(entries, skipped=skipped),
+        zip_chunks(),
         media_type="application/zip",
         headers=headers,
     )
@@ -136,6 +148,59 @@ def _gallery_export_subscribers() -> dict[str, set[asyncio.Queue]]:
     if not hasattr(app.state, "gallery_export_subscribers"):
         app.state.gallery_export_subscribers = {}
     return app.state.gallery_export_subscribers
+
+
+def _gallery_export_lock() -> asyncio.Lock:
+    if not hasattr(app.state, "gallery_export_lock"):
+        app.state.gallery_export_lock = asyncio.Lock()
+    return app.state.gallery_export_lock
+
+
+def _gallery_export_direct_downloads() -> int:
+    return max(0, int(getattr(app.state, "gallery_export_direct_downloads", 0) or 0))
+
+
+def _active_gallery_export_count() -> int:
+    active_jobs = sum(
+        1
+        for job in _gallery_export_jobs().values()
+        if job.get("status") not in GALLERY_EXPORT_TERMINAL_STATUSES
+    )
+    return active_jobs + _gallery_export_direct_downloads()
+
+
+def _release_gallery_export_direct_slot() -> None:
+    app.state.gallery_export_direct_downloads = max(
+        0,
+        _gallery_export_direct_downloads() - 1,
+    )
+
+
+async def _reserve_gallery_export_direct_slot() -> None:
+    async with _gallery_export_lock():
+        active_count = _active_gallery_export_count()
+        if active_count >= MAX_ACTIVE_EXPORT_JOBS:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Too many active export jobs ({active_count}). "
+                "Please wait for existing exports to complete.",
+            )
+        app.state.gallery_export_direct_downloads = _gallery_export_direct_downloads() + 1
+
+
+async def _create_reserved_gallery_export_job(
+    filename_prefix: str,
+    requested_count: int,
+) -> dict:
+    async with _gallery_export_lock():
+        active_count = _active_gallery_export_count()
+        if active_count >= MAX_ACTIVE_EXPORT_JOBS:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Too many active export jobs ({active_count}). "
+                "Please wait for existing exports to complete.",
+            )
+        return _create_gallery_export_job(filename_prefix, requested_count)
 
 
 def _gallery_export_payload(job: dict) -> dict:
@@ -462,22 +527,12 @@ async def download_gallery_batch(req: GalleryBatchRequest):
             "X-Gallery-Exported-Count": str(len(exportable_entries)),
             "X-Gallery-Missing-Count": str(len(skipped_entries)),
         },
+        reserve_export_slot=True,
     )
 
 
 @router.post("/api/gallery/export-jobs", response_model=GalleryExportJobStatus, status_code=202)
 async def create_gallery_export_job(req: GalleryExportRequest | None = Body(default=None)):
-    active_count = sum(
-        1
-        for job in _gallery_export_jobs().values()
-        if job.get("status") not in GALLERY_EXPORT_TERMINAL_STATUSES
-    )
-    if active_count >= MAX_ACTIVE_EXPORT_JOBS:
-        raise HTTPException(
-            status_code=429,
-            detail=f"Too many active export jobs ({active_count}). "
-            "Please wait for existing exports to complete.",
-        )
     ids = req.ids if req else None
     if ids:
         entries = await asyncio.to_thread(storage.get_gallery_entries_by_ids, ids)
@@ -502,7 +557,7 @@ async def create_gallery_export_job(req: GalleryExportRequest | None = Body(defa
         requested_count = gallery_count
         filename_prefix = "gpt-images"
 
-    job = _create_gallery_export_job(filename_prefix, requested_count)
+    job = await _create_reserved_gallery_export_job(filename_prefix, requested_count)
     task = asyncio.create_task(
         _run_gallery_export_job(
             job["job_id"],
@@ -688,6 +743,7 @@ async def download_all_images():
     return await _gallery_zip_response(
         storage.iter_gallery_export_rows(),
         "gpt-images",
+        reserve_export_slot=True,
     )
 
 

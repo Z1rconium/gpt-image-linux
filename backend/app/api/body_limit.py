@@ -3,26 +3,35 @@ ASGI middleware that enforces request body size limits before Starlette/FastAPI
 parses multipart forms, preventing disk/memory exhaustion from oversized uploads.
 """
 
-from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from ..core import settings as config
 
 
-_DEFAULT_MAX_BODY_BYTES = config.MAX_FILE_SIZE_MB * 1024 * 1024
-
-_PATH_LIMITS: list[tuple[str, int]] = [
-    ("/api/import", config.IMPORT_ARCHIVE_MAX_MB * 1024 * 1024),
-    ("/api/edits", config.MAX_FILE_SIZE_MB * config.MAX_ACTIVE_GENERATE_JOBS * 16 * 1024 * 1024),
-]
+def _is_json_content_type(content_type: str) -> bool:
+    media_type = content_type.split(";", 1)[0].strip().lower()
+    return media_type == "application/json" or media_type.endswith("+json")
 
 
-def _max_body_for_path(path: str) -> int:
-    for prefix, limit in _PATH_LIMITS:
+def _max_body_for_path(path: str, content_type: str = "") -> int:
+    path_limits: list[tuple[str, int]] = [
+        ("/api/import", config.IMPORT_ARCHIVE_MAX_MB * 1024 * 1024),
+        (
+            "/api/edits",
+            config.MAX_FILE_SIZE_MB
+            * config.MAX_ACTIVE_GENERATE_JOBS
+            * 16
+            * 1024
+            * 1024,
+        ),
+    ]
+    for prefix, limit in path_limits:
         if path.startswith(prefix):
             return limit
-    return _DEFAULT_MAX_BODY_BYTES
+    if _is_json_content_type(content_type):
+        return config.MAX_JSON_BODY_MB * 1024 * 1024
+    return config.MAX_FILE_SIZE_MB * 1024 * 1024
 
 
 class BodyLimitMiddleware:
@@ -37,10 +46,11 @@ class BodyLimitMiddleware:
             return
 
         path = scope.get("path", "")
-        max_bytes = _max_body_for_path(path)
 
         # Fast path: check Content-Length header if present
         headers = dict(scope.get("headers", []))
+        content_type = headers.get(b"content-type", b"").decode("latin1")
+        max_bytes = _max_body_for_path(path, content_type)
         content_length_raw = headers.get(b"content-length")
         if content_length_raw is not None:
             try:
@@ -57,16 +67,14 @@ class BodyLimitMiddleware:
 
         # Wrap receive to count bytes as they stream in
         total_received = 0
-        body_exceeded = False
 
         async def limited_receive() -> Message:
-            nonlocal total_received, body_exceeded
+            nonlocal total_received
             message = await receive()
             if message["type"] == "http.request":
                 body = message.get("body", b"")
                 total_received += len(body)
                 if total_received > max_bytes:
-                    body_exceeded = True
                     raise _BodyTooLargeError()
             return message
 

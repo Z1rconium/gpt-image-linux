@@ -1,16 +1,17 @@
 import asyncio
+import json
 import logging
 import os
 import re
 import tempfile
 import time
 from pathlib import Path
-from urllib.parse import urlsplit
 
 import aiohttp
 
 from ..core import settings as config
 from ..core import validators as ssrf
+from .upstream_client import UpstreamApiError, read_limited_text_response
 from .session_pool import TIMEOUT_PROMPT_OPTIMIZER, get_pool
 
 logger = logging.getLogger(__name__)
@@ -127,13 +128,12 @@ def save_prompt_optimizer_system_prompt(system_prompt: str) -> str:
     return normalized
 
 
-def validate_optimizer_endpoint(api_url: str) -> None:
+def validate_optimizer_endpoint(api_url: str) -> str:
     if not api_url:
         raise ValueError("Prompt optimizer endpoint URL is not configured")
-    parsed = urlsplit(api_url)
-    if parsed.query or parsed.fragment:
-        raise ValueError("Prompt optimizer endpoint URL must not include query strings or fragments")
-    ssrf.validate_upstream_url(api_url, config.PROMPT_OPTIMIZER_HOST_ALLOWLIST)
+    normalized_api_url = ssrf.normalize_upstream_base_url(api_url)
+    ssrf.validate_upstream_url(normalized_api_url, config.PROMPT_OPTIMIZER_HOST_ALLOWLIST)
+    return normalized_api_url
 
 
 def _target_language_instruction(target_language: str | None) -> str:
@@ -184,7 +184,7 @@ async def optimize_prompt(
     if max_output_chars is None:
         max_output_chars = config.PROMPT_OPTIMIZER_MAX_OUTPUT_CHARS
 
-    validate_optimizer_endpoint(api_url)
+    api_url = validate_optimizer_endpoint(api_url)
 
     headers = {"Content-Type": "application/json"}
     if api_key:
@@ -245,7 +245,14 @@ async def optimize_prompt(
                     status=resp.status,
                 )
             try:
-                data = await resp.json(content_type=None)
+                response_text = await read_limited_text_response(
+                    resp,
+                    config.PROMPT_OPTIMIZER_MAX_RESPONSE_MB * 1024 * 1024,
+                    label="Prompt optimizer response",
+                )
+                data = json.loads(response_text)
+            except UpstreamApiError as e:
+                raise UpstreamOptimizerError(str(e)) from e
             except Exception as e:
                 raise UpstreamOptimizerError("Optimizer returned non-JSON response") from e
     except (aiohttp.ServerTimeoutError, TimeoutError, asyncio.TimeoutError) as e:

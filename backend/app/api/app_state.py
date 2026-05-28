@@ -95,6 +95,7 @@ async def lifespan(app: FastAPI):
     app.state.generate_jobs = {}
     app.state.generate_job_tasks = {}
     app.state.generate_job_semaphore = asyncio.Semaphore(config.MAX_ACTIVE_GENERATE_JOBS)
+    app.state.upstream_request_semaphore = asyncio.Semaphore(config.MAX_ACTIVE_GENERATE_JOBS)
     app.state.generate_job_subscribers = {}
     app.state.generate_jobs_subscribers = set()
     app.state.generate_jobs_broadcast_task = None
@@ -104,6 +105,8 @@ async def lifespan(app: FastAPI):
     app.state.gallery_export_jobs = {}
     app.state.gallery_export_tasks = {}
     app.state.gallery_export_subscribers = {}
+    app.state.gallery_export_lock = asyncio.Lock()
+    app.state.gallery_export_direct_downloads = 0
     from .routers.gallery import gc_gallery_export_jobs
     app.state.gallery_export_gc_task = asyncio.create_task(gc_gallery_export_jobs())
     app.state.pending_edit_source_bytes = 0

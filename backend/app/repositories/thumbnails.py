@@ -2,6 +2,7 @@ import hashlib
 import io
 import logging
 import tempfile
+import warnings
 from pathlib import Path
 from urllib.parse import quote
 
@@ -9,6 +10,7 @@ from ..core import settings as config
 from .image_files import (
     IMAGE_FILE_EXTENSIONS,
     THUMBNAIL_EXTENSION,
+    configure_pillow_image_limits,
     safe_image_path,
     safe_thumbnail_path,
 )
@@ -19,6 +21,10 @@ except ImportError:  # pragma: no cover - exercised only in incomplete installs
     Image = None
     ImageOps = None
     UnidentifiedImageError = OSError
+
+DecompressionBombWarning = (
+    getattr(Image, "DecompressionBombWarning", Warning) if Image is not None else Warning
+)
 
 logger = logging.getLogger(__name__)
 
@@ -68,21 +74,30 @@ def _write_thumbnail_file(
         return False
 
     try:
-        with Image.open(io.BytesIO(image_bytes)) as image:
-            if getattr(image, "is_animated", False):
-                image.seek(0)
-            thumbnail = ImageOps.exif_transpose(image)
-            if thumbnail.mode not in {"RGB", "RGBA"}:
-                thumbnail = thumbnail.convert(
-                    "RGBA" if "A" in thumbnail.getbands() else "RGB"
+        configure_pillow_image_limits()
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DecompressionBombWarning)
+            with Image.open(io.BytesIO(image_bytes)) as image:
+                if getattr(image, "is_animated", False):
+                    image.seek(0)
+                thumbnail = ImageOps.exif_transpose(image)
+                if thumbnail.mode not in {"RGB", "RGBA"}:
+                    thumbnail = thumbnail.convert(
+                        "RGBA" if "A" in thumbnail.getbands() else "RGB"
+                    )
+                thumbnail.thumbnail(
+                    (config.THUMBNAIL_MAX_SIDE, config.THUMBNAIL_MAX_SIDE),
+                    _get_thumbnail_resampling_filter(),
                 )
-            thumbnail.thumbnail(
-                (config.THUMBNAIL_MAX_SIDE, config.THUMBNAIL_MAX_SIDE),
-                _get_thumbnail_resampling_filter(),
-            )
-            thumbnail_path.parent.mkdir(parents=True, exist_ok=True)
-            thumbnail.save(thumbnail_path, "WEBP", quality=82, method=4)
-    except (OSError, UnidentifiedImageError, ValueError) as e:
+                thumbnail_path.parent.mkdir(parents=True, exist_ok=True)
+                thumbnail.save(thumbnail_path, "WEBP", quality=82, method=4)
+    except (
+        OSError,
+        UnidentifiedImageError,
+        SyntaxError,
+        ValueError,
+        DecompressionBombWarning,
+    ) as e:
         thumbnail_path.unlink(missing_ok=True)
         logger.warning("Failed to generate thumbnail for %s: %s", filename, e)
         return False
@@ -101,21 +116,30 @@ def _write_thumbnail_from_path(
         return False
 
     try:
-        with Image.open(image_path) as image:
-            if getattr(image, "is_animated", False):
-                image.seek(0)
-            thumbnail = ImageOps.exif_transpose(image)
-            if thumbnail.mode not in {"RGB", "RGBA"}:
-                thumbnail = thumbnail.convert(
-                    "RGBA" if "A" in thumbnail.getbands() else "RGB"
+        configure_pillow_image_limits()
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DecompressionBombWarning)
+            with Image.open(image_path) as image:
+                if getattr(image, "is_animated", False):
+                    image.seek(0)
+                thumbnail = ImageOps.exif_transpose(image)
+                if thumbnail.mode not in {"RGB", "RGBA"}:
+                    thumbnail = thumbnail.convert(
+                        "RGBA" if "A" in thumbnail.getbands() else "RGB"
+                    )
+                thumbnail.thumbnail(
+                    (config.THUMBNAIL_MAX_SIDE, config.THUMBNAIL_MAX_SIDE),
+                    _get_thumbnail_resampling_filter(),
                 )
-            thumbnail.thumbnail(
-                (config.THUMBNAIL_MAX_SIDE, config.THUMBNAIL_MAX_SIDE),
-                _get_thumbnail_resampling_filter(),
-            )
-            thumbnail_path.parent.mkdir(parents=True, exist_ok=True)
-            thumbnail.save(thumbnail_path, "WEBP", quality=82, method=4)
-    except (OSError, UnidentifiedImageError, ValueError) as e:
+                thumbnail_path.parent.mkdir(parents=True, exist_ok=True)
+                thumbnail.save(thumbnail_path, "WEBP", quality=82, method=4)
+    except (
+        OSError,
+        UnidentifiedImageError,
+        SyntaxError,
+        ValueError,
+        DecompressionBombWarning,
+    ) as e:
         thumbnail_path.unlink(missing_ok=True)
         logger.warning("Failed to generate thumbnail for %s: %s", filename, e)
         return False
@@ -198,4 +222,3 @@ def delete_thumbnail(filename: str):
     thumbnail_path = safe_thumbnail_path(thumbnail_filename)
     if thumbnail_path and thumbnail_path.is_file():
         thumbnail_path.unlink()
-
