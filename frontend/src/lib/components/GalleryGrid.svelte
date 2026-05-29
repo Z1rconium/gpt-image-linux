@@ -8,6 +8,7 @@
   export let filters: GalleryFilters;
   export let loading = false;
   export let operationStatus: GalleryOperationStatus | null = null;
+  export let canSyncR2 = false;
   export let onFilter: (key: keyof GalleryFilters, value: string | boolean) => void = () => {};
   export let onResetFilters: () => void = () => {};
   export let onPage: (page: number) => void = () => {};
@@ -135,7 +136,13 @@
       <button type="button" class="control-focus rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40" disabled={busy} on:click={onExport}>
         {operationStatus?.kind === 'export' ? $t.gallery.exporting : $t.gallery.exportZip}
       </button>
-      <button type="button" class="control-focus rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40" disabled={busy} on:click={onSync}>
+      <button
+        type="button"
+        class="control-focus rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40"
+        disabled={busy || !canSyncR2}
+        title={canSyncR2 ? $t.gallery.syncR2 : $t.messages.r2BackupUnavailable}
+        on:click={onSync}
+      >
         {operationStatus?.kind === 'sync' ? $t.gallery.syncing : $t.gallery.syncR2}
       </button>
       <button type="button" class="control-focus rounded-lg border border-red-500/40 px-3 py-2 text-xs text-red-300 hover:bg-red-500/10" on:click={onDeleteAll}>

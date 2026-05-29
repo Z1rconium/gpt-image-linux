@@ -391,7 +391,7 @@ def _normalize_r2_key_prefix(value: Any, default: str = "gallery/") -> str:
 
 def _default_r2_backup_settings() -> dict:
     return {
-        "enabled": False,
+        "enabled": config.R2_BACKUP_ENABLED,
         "endpoint_url": normalize_r2_endpoint_url(config.R2_ENDPOINT_URL),
         "bucket_name": config.R2_BUCKET_NAME,
         "region": config.R2_REGION or "auto",
@@ -436,24 +436,25 @@ def _normalize_r2_backup_settings(settings: dict | None) -> dict:
     default = _default_r2_backup_settings()
     if not isinstance(settings, dict):
         return default
+    endpoint_url = normalize_r2_endpoint_url(settings.get("endpoint_url") or "")
+    bucket_name = str(settings.get("bucket_name") or "").strip()
+    access_key_id = _normalize_stored_r2_access_key_id(settings.get("access_key_id"))
+    secret_access_key = _normalize_stored_r2_secret_access_key(
+        settings.get("secret_access_key")
+    )
     return {
-        "enabled": _coerce_bool(settings.get("enabled"), default["enabled"]),
-        "endpoint_url": normalize_r2_endpoint_url(
-            settings.get("endpoint_url") or ""
-        ),
-        "bucket_name": str(settings.get("bucket_name") or "").strip(),
+        "enabled": default["enabled"]
+        or _coerce_bool(settings.get("enabled"), default["enabled"]),
+        "endpoint_url": endpoint_url or default["endpoint_url"],
+        "bucket_name": bucket_name or default["bucket_name"],
         "region": str(settings.get("region") or default["region"]).strip()
         or default["region"],
         "key_prefix": _normalize_r2_key_prefix(
             settings.get("key_prefix"),
             default["key_prefix"],
         ),
-        "access_key_id": _normalize_stored_r2_access_key_id(
-            settings.get("access_key_id")
-        ),
-        "secret_access_key": _normalize_stored_r2_secret_access_key(
-            settings.get("secret_access_key")
-        ),
+        "access_key_id": access_key_id or default["access_key_id"],
+        "secret_access_key": secret_access_key or default["secret_access_key"],
     }
 
 

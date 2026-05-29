@@ -334,7 +334,7 @@ The panel supports these upstream paths. The API base URL may either omit or inc
 ## R2 gallery backup sync
 
 - R2 Backup is an incremental backup path, not remote gallery storage.
-- Configure it in `.env` with `R2_*` variables or in Web Settings. Web Settings accepts `${ENV_VAR_NAME}` refs for credentials; literal stored credentials require `ALLOW_PLAINTEXT_SECRETS=true`.
+- Configure it in `.env` with `R2_BACKUP_ENABLED=true` plus the other `R2_*` variables, or in Web Settings. Web Settings accepts `${ENV_VAR_NAME}` refs for credentials; literal stored credentials require `ALLOW_PLAINTEXT_SECRETS=true`.
 - Test R2 in Settings runs `HeadBucket`, a prefix-scoped `ListObjectsV2`, and a small probe object write; probe cleanup failure is reported as a warning.
 - The Gallery Sync button uploads only local gallery filenames missing from `R2_KEY_PREFIX`; existing bucket objects are skipped, and bucket-only objects are never deleted or overwritten.
 
@@ -379,6 +379,7 @@ The panel supports these upstream paths. The API base URL may either omit or inc
 | `PROMPT_OPTIMIZER_MAX_OUTPUT_CHARS` | `4000` | Max optimized prompt length returned to the textarea |
 | `PROMPT_OPTIMIZER_MAX_RESPONSE_MB` | `8` | Max optimizer upstream response body size in MB before JSON parsing |
 | `PROMPT_OPTIMIZER_HOST_ALLOWLIST` | empty | Optional comma-separated hostname allowlist for the optimizer endpoint |
+| `R2_BACKUP_ENABLED` | `false` | Enable Gallery Sync backup when using environment-based R2 configuration |
 | `R2_ENDPOINT_URL` | empty | Cloudflare R2 S3-compatible endpoint URL, for example `https://ACCOUNT_ID.r2.cloudflarestorage.com` |
 | `R2_BUCKET_NAME` | empty | Bucket used by Gallery Sync backup |
 | `R2_REGION` | `auto` | S3 client region name for R2 |
@@ -865,7 +866,7 @@ curl http://localhost:9090/health
 ## R2 Gallery 备份同步
 
 - R2 Backup 是增量备份路径，不是远端 Gallery 存储。
-- 可以用 `.env` 的 `R2_*` 变量配置，也可以在 Web Settings 中保存配置。Web Settings 的凭据字段支持 `${ENV_VAR_NAME}` 引用；直接保存明文凭据需要 `ALLOW_PLAINTEXT_SECRETS=true`。
+- 可以用 `.env` 的 `R2_BACKUP_ENABLED=true` 加其他 `R2_*` 变量配置，也可以在 Web Settings 中保存配置。Web Settings 的凭据字段支持 `${ENV_VAR_NAME}` 引用；直接保存明文凭据需要 `ALLOW_PLAINTEXT_SECRETS=true`。
 - Settings 里的测试 R2 会执行 `HeadBucket`、带 prefix 的 `ListObjectsV2`，并写入一个很小的 probe object；probe 清理失败会作为 warning 返回。
 - Gallery 的同步按钮只上传 `R2_KEY_PREFIX` 下缺失的本地 Gallery filename；已存在对象会跳过，bucket 中额外对象不会删除或覆盖。
 
@@ -909,6 +910,7 @@ curl http://localhost:9090/health
 | `PROMPT_OPTIMIZER_MAX_OUTPUT_CHARS` | `4000` | 回填到文本框的优化后提示词最大长度 |
 | `PROMPT_OPTIMIZER_MAX_RESPONSE_MB` | `8` | JSON 解析前允许的最大优化器上游响应体积（MB） |
 | `PROMPT_OPTIMIZER_HOST_ALLOWLIST` | 空 | 可选的优化器 endpoint 主机名白名单，逗号分隔 |
+| `R2_BACKUP_ENABLED` | `false` | 使用环境变量配置 R2 时，启用 Gallery 同步备份 |
 | `R2_ENDPOINT_URL` | 空 | Cloudflare R2 S3 兼容 endpoint URL，例如 `https://ACCOUNT_ID.r2.cloudflarestorage.com` |
 | `R2_BUCKET_NAME` | 空 | Gallery 同步备份使用的储存桶 |
 | `R2_REGION` | `auto` | R2 使用的 S3 client region name |

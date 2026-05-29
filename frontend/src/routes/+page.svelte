@@ -88,6 +88,14 @@
       optimizerSettings.model.trim() &&
       optimizerSettings.has_api_key
   );
+  $: r2BackupSettings = $settingsStore.settings?.r2_backup || null;
+  $: r2BackupAvailable = Boolean(
+    r2BackupSettings?.enabled &&
+      r2BackupSettings.endpoint_url.trim() &&
+      r2BackupSettings.bucket_name.trim() &&
+      r2BackupSettings.has_access_key_id &&
+      r2BackupSettings.has_secret_access_key
+  );
   $: syncFormDefaultsToActivePreset($settingsStore.settings);
 
   async function loadInitialData() {
@@ -623,7 +631,16 @@
   }
 
   async function syncGallery() {
-    await galleryStore.syncGallery(showToast);
+    if (!r2BackupAvailable) {
+      showToast($t.messages.r2BackupUnavailable, 'error');
+      return;
+    }
+    try {
+      await galleryStore.syncGallery(showToast);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : $t.messages.requestFailed;
+      showToast(message || $t.messages.requestFailed, 'error');
+    }
   }
 
   async function copyPrompt(image: GalleryEntry) {
@@ -880,6 +897,7 @@
     filters={$galleryStore.filters}
     loading={$galleryStore.loading}
     operationStatus={$galleryStore.operationStatus}
+    canSyncR2={r2BackupAvailable}
     onFilter={galleryStore.updateFilter}
     onResetFilters={galleryStore.resetFilters}
     onPage={galleryStore.loadGallery}

@@ -110,6 +110,7 @@ PROMPT_OPTIMIZER_MAX_RESPONSE_MB = max(
 PROMPT_OPTIMIZER_HOST_ALLOWLIST = os.getenv("PROMPT_OPTIMIZER_HOST_ALLOWLIST", "").strip()
 
 # ── Cloudflare R2 gallery backup ─────────────────────────────────
+R2_BACKUP_ENABLED = env_flag("R2_BACKUP_ENABLED")
 R2_ENDPOINT_URL = os.getenv("R2_ENDPOINT_URL", "").strip()
 R2_BUCKET_NAME = os.getenv("R2_BUCKET_NAME", "").strip()
 R2_REGION = os.getenv("R2_REGION", "auto").strip() or "auto"

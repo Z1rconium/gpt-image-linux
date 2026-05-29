@@ -103,6 +103,7 @@ def _configure_runtime(tmp_path: Path, *, access_key: str = "", allow_unauthenti
     config.PROMPT_OPTIMIZER_MAX_OUTPUT_CHARS = 4000
     config.PROMPT_OPTIMIZER_MAX_RESPONSE_MB = 8
     config.PROMPT_OPTIMIZER_HOST_ALLOWLIST = ""
+    config.R2_BACKUP_ENABLED = False
     config.R2_ENDPOINT_URL = ""
     config.R2_BUCKET_NAME = ""
     config.R2_REGION = "auto"
@@ -1380,6 +1381,36 @@ def test_r2_backup_settings_mask_preserve_and_clear(client):
     assert cleared.json()["r2_backup"]["has_secret_access_key"] is False
     assert storage.load_r2_backup_settings()["access_key_id"] == ""
     assert storage.load_r2_backup_settings()["secret_access_key"] == ""
+
+
+def test_r2_env_defaults_fill_empty_persisted_settings(tmp_path, monkeypatch):
+    _configure_runtime(tmp_path)
+    storage.save_r2_backup_settings(
+        {
+            "enabled": False,
+            "endpoint_url": "",
+            "bucket_name": "",
+            "region": "auto",
+            "key_prefix": "gallery/",
+            "access_key_id": "",
+            "secret_access_key": "",
+        }
+    )
+
+    monkeypatch.setenv("R2_ACCESS_KEY_ID", "env-r2-access")
+    monkeypatch.setenv("R2_SECRET_ACCESS_KEY", "env-r2-secret")
+    config.R2_BACKUP_ENABLED = True
+    config.R2_ENDPOINT_URL = "https://account.r2.cloudflarestorage.com"
+    config.R2_BUCKET_NAME = "env-image-backups"
+    config.R2_ACCESS_KEY_ID = "env-r2-access"
+    config.R2_SECRET_ACCESS_KEY = "env-r2-secret"
+
+    settings = storage.load_r2_backup_settings()
+    assert settings["enabled"] is True
+    assert settings["endpoint_url"] == "https://account.r2.cloudflarestorage.com"
+    assert settings["bucket_name"] == "env-image-backups"
+    assert settings["access_key_id"] == "${R2_ACCESS_KEY_ID}"
+    assert settings["secret_access_key"] == "${R2_SECRET_ACCESS_KEY}"
 
 
 def test_r2_health_uses_draft_settings_and_preserves_masked_credentials(client, monkeypatch):
@@ -2925,6 +2956,38 @@ def test_gallery_sync_job_reports_progress_and_terminal_sse(client, monkeypatch)
     assert events.headers["content-type"].startswith("text/event-stream")
     assert "event: sync" in events.text
     assert job["job_id"] in events.text
+
+
+def test_gallery_sync_job_accepts_enabled_r2_env_defaults(tmp_path, monkeypatch):
+    _configure_runtime(tmp_path)
+    monkeypatch.setenv("R2_ACCESS_KEY_ID", "env-r2-access")
+    monkeypatch.setenv("R2_SECRET_ACCESS_KEY", "env-r2-secret")
+    config.R2_BACKUP_ENABLED = True
+    config.R2_ENDPOINT_URL = "https://account.r2.cloudflarestorage.com"
+    config.R2_BUCKET_NAME = "env-image-backups"
+    config.R2_REGION = "auto"
+    config.R2_KEY_PREFIX = "gallery-env/"
+    config.R2_ACCESS_KEY_ID = "env-r2-access"
+    config.R2_SECRET_ACCESS_KEY = "env-r2-secret"
+
+    _fake_gallery_entry("sync-env-config", "one", "1024x1024", "sync-env-config.png")
+
+    def fake_sync(settings, entries, *, total_count, progress_cb=None, client_factory=None):
+        assert settings["enabled"] is True
+        assert settings["bucket_name"] == "env-image-backups"
+        assert settings["access_key_id"] == "${R2_ACCESS_KEY_ID}"
+        assert settings["secret_access_key"] == "${R2_SECRET_ACCESS_KEY}"
+        assert len(list(entries)) == 1
+        return r2_sync.R2SyncResult(total_count=total_count, compared_count=1)
+
+    monkeypatch.setattr(r2_sync, "sync_gallery_to_r2", fake_sync)
+
+    with TestClient(backend_main.app) as client:
+        created = client.post("/api/gallery/sync-jobs")
+        assert created.status_code == 202, created.json()
+        finished = _wait_for_gallery_sync_job(client, created.json()["job_id"])
+        assert finished["status"] == "success"
+        assert finished["total_count"] == 1
 
 
 def test_gallery_sync_job_rejects_empty_gallery_and_missing_r2_config(client):

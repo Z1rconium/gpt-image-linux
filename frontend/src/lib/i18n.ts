@@ -369,6 +369,7 @@ const en = {
     editSourceLimit: (max: number) => `At most ${max} edit source images are supported`,
     editSourceSomeSkipped: (max: number) => `Some selected files were skipped because the edit source limit is ${max}`,
     sessionExpired: 'Session expired. Please enter the access key.',
+    r2BackupUnavailable: 'R2 backup is not ready. Enable it in Settings and fill endpoint, bucket, access key ID, and secret access key.',
     failedToFetch: 'Failed to fetch',
     networkError: (message: string) => `Network error: ${message}`,
     requestFailed: 'Request failed'
@@ -793,6 +794,7 @@ const zh: TranslationSchema<typeof en> = {
     editSourceLimit: (max) => `最多支持 ${max} 张编辑源图片`,
     editSourceSomeSkipped: (max) => `部分已选文件被跳过，因为编辑源上限是 ${max} 张`,
     sessionExpired: '会话已过期，请输入访问密钥。',
+    r2BackupUnavailable: 'R2 备份尚未就绪。请在设置中启用，并填写 endpoint、储存桶、access key ID 和 secret access key。',
     failedToFetch: '请求失败',
     networkError: (message) => `网络错误：${message}`,
     requestFailed: '请求失败'
