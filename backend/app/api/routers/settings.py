@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException
 from ..app_state import app
 from ..presets import (
     apply_api_preset,
+    apply_r2_backup_settings,
     apply_upstream_socks5_proxy,
     apply_webhook_url,
     build_settings_response,
@@ -32,9 +33,12 @@ from ...core.api_paths import (
     normalize_default_response_format,
 )
 from ...integrations import upstream_client as proxy
+from ...integrations import r2_sync
 from ...schemas.models import (
     PresetCreateRequest,
     PresetHealthResponse,
+    R2BackupSettingsRequest,
+    R2HealthResponse,
     SettingsRequest,
     SettingsResponse,
 )
@@ -92,12 +96,28 @@ async def update_settings(req: SettingsRequest):
         updated_optimizer = apply_prompt_optimizer_settings(current_optimizer, req.prompt_optimizer)
         from ...repositories import storage as storage_repo
         await asyncio.to_thread(storage_repo.save_prompt_optimizer_settings, updated_optimizer)
+    if req.r2_backup is not None:
+        from ..presets import get_r2_backup_settings
+        from ...repositories import storage as storage_repo
+        current_r2 = get_r2_backup_settings()
+        updated_r2 = apply_r2_backup_settings(current_r2, req.r2_backup)
+        await asyncio.to_thread(storage_repo.save_r2_backup_settings, updated_r2)
     return await asyncio.to_thread(build_settings_response)
 
 
 @router.get("/api/settings", response_model=SettingsResponse)
 async def get_settings():
     return await asyncio.to_thread(build_settings_response)
+
+
+@router.post("/api/settings/r2/health", response_model=R2HealthResponse)
+async def check_r2_settings_health(req: R2BackupSettingsRequest):
+    from ..presets import get_r2_backup_settings
+
+    current = await asyncio.to_thread(get_r2_backup_settings)
+    draft = apply_r2_backup_settings(current, req)
+    result = await asyncio.to_thread(r2_sync.probe_r2_settings, draft)
+    return R2HealthResponse(**result)
 
 
 @router.post("/api/settings/presets", response_model=SettingsResponse)

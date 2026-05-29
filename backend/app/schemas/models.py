@@ -5,6 +5,7 @@ from datetime import datetime
 from ..core.api_paths import DEFAULT_IMAGE_MODEL
 from ..core.validators import (
     normalize_secret_env_ref_or_plaintext,
+    normalize_r2_endpoint_url,
     normalize_socks5_proxy_url,
     normalize_upstream_base_url,
     normalize_webhook_url,
@@ -14,6 +15,7 @@ ApiPath = Literal["/v1/images/generations", "/v1/responses", "/v1/chat/completio
 ApiKeySource = Literal["empty", "stored", "env"]
 ResponseFormatDefault = Literal["", "url", "b64_json"]
 PresetHealthStatus = Literal["ok", "warning", "error"]
+MASKED_SECRET_VALUE = "********"
 GenerateJobStatusValue = Literal[
     "queued",
     "running",
@@ -24,6 +26,7 @@ GenerateJobStatusValue = Literal[
     "upstream_error",
 ]
 GalleryExportJobStatusValue = Literal["queued", "running", "success", "error"]
+GallerySyncJobStatusValue = Literal["queued", "running", "success", "error"]
 ShortId = Annotated[str, Field(min_length=1, max_length=128)]
 
 
@@ -121,6 +124,7 @@ class SettingsRequest(StrictRequestModel):
         ),
     )
     prompt_optimizer: Optional["PromptOptimizerSettingsRequest"] = None
+    r2_backup: Optional["R2BackupSettingsRequest"] = None
 
     @field_validator("api_url")
     @classmethod
@@ -176,6 +180,7 @@ class SettingsResponse(BaseModel):
     webhook_url_masked: str = ""
     presets: list[ApiPresetResponse]
     prompt_optimizer: "PromptOptimizerSettingsResponse" = Field(default_factory=lambda: PromptOptimizerSettingsResponse())
+    r2_backup: "R2BackupSettingsResponse" = Field(default_factory=lambda: R2BackupSettingsResponse())
 
 
 class PresetHealthCheck(BaseModel):
@@ -187,6 +192,10 @@ class PresetHealthCheck(BaseModel):
 class PresetHealthResponse(BaseModel):
     status: PresetHealthStatus
     checks: list[PresetHealthCheck]
+
+
+class R2HealthResponse(PresetHealthResponse):
+    pass
 
 
 class AccessRequest(StrictRequestModel):
@@ -276,6 +285,63 @@ class PromptOptimizerSettingsRequest(StrictRequestModel):
         return normalize_secret_env_ref_or_plaintext(
             value,
             field_name="Prompt optimizer API key",
+        )
+
+
+class R2BackupSettingsResponse(BaseModel):
+    enabled: bool = False
+    endpoint_url: str = ""
+    bucket_name: str = ""
+    region: str = "auto"
+    key_prefix: str = "gallery/"
+    access_key_id_masked: str = "***"
+    has_access_key_id: bool = False
+    access_key_id_source: ApiKeySource = "empty"
+    access_key_id_env_var: Optional[str] = None
+    secret_access_key_masked: str = "***"
+    has_secret_access_key: bool = False
+    secret_access_key_source: ApiKeySource = "empty"
+    secret_access_key_env_var: Optional[str] = None
+
+
+class R2BackupSettingsRequest(StrictRequestModel):
+    enabled: Optional[bool] = None
+    endpoint_url: Optional[str] = Field(default=None, max_length=2048)
+    bucket_name: Optional[str] = Field(default=None, max_length=255)
+    region: Optional[str] = Field(default=None, max_length=100)
+    key_prefix: Optional[str] = Field(default=None, max_length=1024)
+    access_key_id: Optional[str] = Field(default=None, max_length=8192)
+    secret_access_key: Optional[str] = Field(default=None, max_length=8192)
+
+    @field_validator("endpoint_url")
+    @classmethod
+    def validate_endpoint_url(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        return normalize_r2_endpoint_url(value)
+
+    @field_validator("access_key_id")
+    @classmethod
+    def validate_access_key_id(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        if value.strip() == MASKED_SECRET_VALUE:
+            return MASKED_SECRET_VALUE
+        return normalize_secret_env_ref_or_plaintext(
+            value,
+            field_name="R2 access key ID",
+        )
+
+    @field_validator("secret_access_key")
+    @classmethod
+    def validate_secret_access_key(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        if value.strip() == MASKED_SECRET_VALUE:
+            return MASKED_SECRET_VALUE
+        return normalize_secret_env_ref_or_plaintext(
+            value,
+            field_name="R2 secret access key",
         )
 
 
@@ -469,6 +535,25 @@ class GalleryExportJobStatus(BaseModel):
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
     error: Optional[str] = None
+
+
+class GallerySyncJobStatus(BaseModel):
+    job_id: str
+    status: GallerySyncJobStatusValue
+    stage: Optional[str] = None
+    message: Optional[str] = None
+    progress: int = 0
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    error: Optional[str] = None
+    total_count: int = 0
+    compared_count: int = 0
+    uploaded_count: int = 0
+    skipped_existing_count: int = 0
+    missing_local_count: int = 0
+    failed_count: int = 0
+    bytes_total: int = 0
+    bytes_uploaded: int = 0
 
 
 class GalleryBatchResponse(BaseModel):

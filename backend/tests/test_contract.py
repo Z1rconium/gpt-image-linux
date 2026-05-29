@@ -18,9 +18,11 @@ from fastapi.testclient import TestClient
 from backend.app import main as backend_main
 from backend.app.api import jobs
 from backend.app.api.routers import access as access_router
+from backend.app.api.routers import settings as settings_router
 from backend.app.api.routers import static as static_router
 from backend.app.api.jobs import EditImageSource
 from backend.app.core import settings as config
+from backend.app.integrations import r2_sync
 from backend.app.core.observability import metrics, record_job_stage_timing
 from backend.app.integrations import session_pool
 from backend.app.integrations.upstream_client import call_image_edit_api as ORIGINAL_CALL_IMAGE_EDIT_API
@@ -50,6 +52,8 @@ def _configure_runtime(tmp_path: Path, *, access_key: str = "", allow_unauthenti
     os.environ["TEST_PROMPT_OPTIMIZER_API_KEY"] = "optimizer-key"
     os.environ["TEST_UPSTREAM_PROXY_URL"] = "socks5://user:secret@127.0.0.1:1080"
     os.environ["TEST_WEBHOOK_URL"] = "https://hooks.example.com/services/top-secret?token=hidden"
+    os.environ["TEST_R2_ACCESS_KEY_ID"] = "r2-access-key"
+    os.environ["TEST_R2_SECRET_ACCESS_KEY"] = "r2-secret-key"
 
     config.DEFAULT_API_URL = "https://api.example.com"
     config.DEFAULT_API_KEY = "${TEST_DEFAULT_API_KEY}"
@@ -99,6 +103,12 @@ def _configure_runtime(tmp_path: Path, *, access_key: str = "", allow_unauthenti
     config.PROMPT_OPTIMIZER_MAX_OUTPUT_CHARS = 4000
     config.PROMPT_OPTIMIZER_MAX_RESPONSE_MB = 8
     config.PROMPT_OPTIMIZER_HOST_ALLOWLIST = ""
+    config.R2_ENDPOINT_URL = ""
+    config.R2_BUCKET_NAME = ""
+    config.R2_REGION = "auto"
+    config.R2_KEY_PREFIX = "gallery/"
+    config.R2_ACCESS_KEY_ID = ""
+    config.R2_SECRET_ACCESS_KEY = ""
     config.MAX_SSE_SUBSCRIBERS_GLOBAL = 200
     config.MAX_SSE_SUBSCRIBERS_PER_IP = 10
     config.SSE_CONNECTION_TTL_SECONDS = 3600
@@ -150,6 +160,19 @@ def _wait_for_gallery_export_job(client: TestClient, job_id: str, timeout: float
             return last
         time.sleep(0.05)
     raise AssertionError(f"gallery export job {job_id} did not finish: {last}")
+
+
+def _wait_for_gallery_sync_job(client: TestClient, job_id: str, timeout: float = 5.0):
+    deadline = time.time() + timeout
+    last = None
+    while time.time() < deadline:
+        resp = client.get(f"/api/gallery/sync-jobs/{job_id}")
+        assert resp.status_code == 200
+        last = resp.json()
+        if last["status"] in {"success", "error"}:
+            return last
+        time.sleep(0.05)
+    raise AssertionError(f"gallery sync job {job_id} did not finish: {last}")
 
 
 def _fake_gallery_entry(image_id: str, prompt: str, size: str, filename: str):
@@ -1002,7 +1025,7 @@ def test_settings_global_socks5_proxy_save_mask_preserve_and_clear(client):
     updated_body = updated.json()
     assert updated_body["has_upstream_socks5_proxy"] is True
     assert updated_body["upstream_socks5_proxy_masked"] == "${TEST_UPSTREAM_PROXY_URL}"
-    assert "secret" not in json.dumps(updated_body)
+    assert "user:secret" not in json.dumps(updated_body)
     assert storage.load_settings()["upstream_socks5_proxy"] == "${TEST_UPSTREAM_PROXY_URL}"
 
     preserved = client.post(
@@ -1278,6 +1301,136 @@ def test_prompt_optimizer_rejects_plaintext_api_key_by_default(client):
 
     assert resp.status_code == 422
     assert "Prompt optimizer API key must use ${ENV_VAR_NAME} unless ALLOW_PLAINTEXT_SECRETS=true." in resp.text
+
+
+def test_r2_backup_settings_mask_preserve_and_clear(client):
+    settings = client.get("/api/settings").json()
+    assert settings["r2_backup"]["enabled"] is False
+    assert settings["r2_backup"]["key_prefix"] == "gallery/"
+
+    updated = client.post(
+        "/api/settings",
+        json=_settings_payload(
+            settings,
+            r2_backup={
+                "enabled": True,
+                "endpoint_url": "https://account.r2.cloudflarestorage.com",
+                "bucket_name": "image-backups",
+                "region": "auto",
+                "key_prefix": "gallery-test",
+                "access_key_id": "${TEST_R2_ACCESS_KEY_ID}",
+                "secret_access_key": "${TEST_R2_SECRET_ACCESS_KEY}",
+            },
+        ),
+    )
+
+    assert updated.status_code == 200
+    body = updated.json()
+    r2 = body["r2_backup"]
+    assert r2["enabled"] is True
+    assert r2["endpoint_url"] == "https://account.r2.cloudflarestorage.com"
+    assert r2["bucket_name"] == "image-backups"
+    assert r2["key_prefix"] == "gallery-test/"
+    assert r2["has_access_key_id"] is True
+    assert r2["access_key_id_source"] == "env"
+    assert r2["access_key_id_env_var"] == "TEST_R2_ACCESS_KEY_ID"
+    assert r2["has_secret_access_key"] is True
+    assert r2["secret_access_key_source"] == "env"
+    assert r2["secret_access_key_env_var"] == "TEST_R2_SECRET_ACCESS_KEY"
+    assert "r2-secret-key" not in json.dumps(body)
+    assert storage.load_r2_backup_settings()["access_key_id"] == "${TEST_R2_ACCESS_KEY_ID}"
+    assert storage.load_r2_backup_settings()["secret_access_key"] == "${TEST_R2_SECRET_ACCESS_KEY}"
+
+    preserved = client.post(
+        "/api/settings",
+        json=_settings_payload(
+            body,
+            r2_backup={
+                "enabled": True,
+                "endpoint_url": "https://account.r2.cloudflarestorage.com",
+                "bucket_name": "image-backups",
+                "region": "auto",
+                "key_prefix": "gallery-test/",
+                "access_key_id": "********",
+                "secret_access_key": "********",
+            },
+        ),
+    )
+    assert preserved.status_code == 200
+    assert storage.load_r2_backup_settings()["access_key_id"] == "${TEST_R2_ACCESS_KEY_ID}"
+    assert storage.load_r2_backup_settings()["secret_access_key"] == "${TEST_R2_SECRET_ACCESS_KEY}"
+
+    cleared = client.post(
+        "/api/settings",
+        json=_settings_payload(
+            preserved.json(),
+            r2_backup={
+                "enabled": False,
+                "endpoint_url": "",
+                "bucket_name": "",
+                "region": "auto",
+                "key_prefix": "gallery/",
+                "access_key_id": "",
+                "secret_access_key": "",
+            },
+        ),
+    )
+    assert cleared.status_code == 200
+    assert cleared.json()["r2_backup"]["has_access_key_id"] is False
+    assert cleared.json()["r2_backup"]["has_secret_access_key"] is False
+    assert storage.load_r2_backup_settings()["access_key_id"] == ""
+    assert storage.load_r2_backup_settings()["secret_access_key"] == ""
+
+
+def test_r2_health_uses_draft_settings_and_preserves_masked_credentials(client, monkeypatch):
+    settings = client.get("/api/settings").json()
+    saved = client.post(
+        "/api/settings",
+        json=_settings_payload(
+            settings,
+            r2_backup={
+                "enabled": True,
+                "endpoint_url": "https://account.r2.cloudflarestorage.com",
+                "bucket_name": "image-backups",
+                "region": "auto",
+                "key_prefix": "gallery/",
+                "access_key_id": "${TEST_R2_ACCESS_KEY_ID}",
+                "secret_access_key": "${TEST_R2_SECRET_ACCESS_KEY}",
+            },
+        ),
+    )
+    assert saved.status_code == 200
+
+    seen: dict[str, dict] = {}
+
+    def fake_probe(draft):
+        seen["draft"] = draft
+        return {
+            "status": "ok",
+            "checks": [{"name": "configuration", "status": "ok", "message": "ok"}],
+        }
+
+    monkeypatch.setattr(settings_router.r2_sync, "probe_r2_settings", fake_probe)
+    health = client.post(
+        "/api/settings/r2/health",
+        json={
+            "enabled": True,
+            "endpoint_url": "https://draft.r2.cloudflarestorage.com",
+            "bucket_name": "draft-backups",
+            "region": "auto",
+            "key_prefix": "draft/",
+            "access_key_id": "********",
+            "secret_access_key": "********",
+        },
+    )
+
+    assert health.status_code == 200
+    assert health.json()["status"] == "ok"
+    assert health.json()["checks"][0]["name"] == "configuration"
+    assert seen["draft"]["endpoint_url"] == "https://draft.r2.cloudflarestorage.com"
+    assert seen["draft"]["bucket_name"] == "draft-backups"
+    assert seen["draft"]["access_key_id"] == "${TEST_R2_ACCESS_KEY_ID}"
+    assert seen["draft"]["secret_access_key"] == "${TEST_R2_SECRET_ACCESS_KEY}"
 
 
 def test_storage_secures_data_directory_and_database_permissions(client):
@@ -2712,6 +2865,77 @@ def test_gallery_export_job_reports_progress_and_downloads_zip(client):
         assert "metadata.json" in zf.namelist()
         assert "images/export-job-1.png" in zf.namelist()
         assert "images/export-job-2.png" in zf.namelist()
+
+
+def test_gallery_sync_job_reports_progress_and_terminal_sse(client, monkeypatch):
+    _fake_gallery_entry("sync-job-1", "one", "1024x1024", "sync-job-1.png")
+    _fake_gallery_entry("sync-job-2", "two", "1024x1024", "sync-job-2.png")
+    storage.save_r2_backup_settings(
+        {
+            "enabled": True,
+            "endpoint_url": "https://account.r2.cloudflarestorage.com",
+            "bucket_name": "image-backups",
+            "region": "auto",
+            "key_prefix": "gallery-test/",
+            "access_key_id": "${TEST_R2_ACCESS_KEY_ID}",
+            "secret_access_key": "${TEST_R2_SECRET_ACCESS_KEY}",
+        }
+    )
+
+    def fake_sync(settings, entries, *, total_count, progress_cb=None, client_factory=None):
+        assert settings["bucket_name"] == "image-backups"
+        assert len(list(entries)) == 2
+        result = r2_sync.R2SyncResult(
+            total_count=total_count,
+            compared_count=2,
+            uploaded_count=1,
+            skipped_existing_count=1,
+            missing_local_count=0,
+            failed_count=0,
+            bytes_total=len(PNG_BYTES) * 2,
+            bytes_uploaded=len(PNG_BYTES),
+        )
+        if progress_cb:
+            progress_cb(
+                {
+                    "stage": "uploading",
+                    "message": "Compared 2 gallery image(s)",
+                    "progress": 100,
+                    **result.to_updates(),
+                }
+            )
+        return result
+
+    monkeypatch.setattr(r2_sync, "sync_gallery_to_r2", fake_sync)
+    created = client.post("/api/gallery/sync-jobs")
+    assert created.status_code == 202
+    job = created.json()
+    assert job["status"] == "queued"
+    assert job["total_count"] == 2
+
+    finished = _wait_for_gallery_sync_job(client, job["job_id"])
+    assert finished["status"] == "success"
+    assert finished["progress"] == 100
+    assert finished["uploaded_count"] == 1
+    assert finished["skipped_existing_count"] == 1
+    assert finished["bytes_uploaded"] == len(PNG_BYTES)
+
+    events = client.get(f"/api/gallery/sync-jobs/{job['job_id']}/events")
+    assert events.status_code == 200
+    assert events.headers["content-type"].startswith("text/event-stream")
+    assert "event: sync" in events.text
+    assert job["job_id"] in events.text
+
+
+def test_gallery_sync_job_rejects_empty_gallery_and_missing_r2_config(client):
+    empty = client.post("/api/gallery/sync-jobs")
+    assert empty.status_code == 404
+    assert empty.json()["detail"] == "No images in gallery"
+
+    _fake_gallery_entry("sync-missing-config", "one", "1024x1024", "sync-missing-config.png")
+    missing_config = client.post("/api/gallery/sync-jobs")
+    assert missing_config.status_code == 400
+    assert "R2 backup is disabled" in missing_config.json()["detail"]
 
 
 def test_gallery_total_bytes_uses_sql_aggregate_without_disk_backfill(client, monkeypatch):

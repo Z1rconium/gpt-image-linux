@@ -118,6 +118,21 @@ const settingsResponse = {
     api_key_source: 'stored',
     api_key_env_var: null
   },
+  r2_backup: {
+    enabled: false,
+    endpoint_url: '',
+    bucket_name: '',
+    region: 'auto',
+    key_prefix: 'gallery/',
+    access_key_id_masked: '********',
+    has_access_key_id: false,
+    access_key_id_source: 'empty',
+    access_key_id_env_var: null,
+    secret_access_key_masked: '********',
+    has_secret_access_key: false,
+    secret_access_key_source: 'empty',
+    secret_access_key_env_var: null
+  },
   presets: [
     {
       id: 'default',
@@ -435,6 +450,10 @@ async function mockApi(page: Page, options: MockOptions = {}) {
           customized: true
         })
       );
+      return;
+    }
+    if (url.pathname === '/api/settings/r2/health') {
+      await route.fulfill(json({ status: 'ok', checks: [{ name: 'configuration', status: 'ok', message: 'ok' }] }));
       return;
     }
     if (url.pathname.endsWith('/health') && url.pathname.startsWith('/api/settings/presets/')) {

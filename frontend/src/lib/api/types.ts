@@ -4,6 +4,7 @@ export type ResponseFormatDefault = '' | 'url' | 'b64_json';
 export type PresetHealthStatus = 'ok' | 'warning' | 'error';
 export type GenerateJobStatusValue = 'queued' | 'running' | 'success' | 'error' | 'cancelled' | 'interrupted' | 'upstream_error';
 export type GalleryExportJobStatusValue = 'queued' | 'running' | 'success' | 'error';
+export type GallerySyncJobStatusValue = 'queued' | 'running' | 'success' | 'error';
 
 export type ApiPreset = {
   id: string;
@@ -34,6 +35,7 @@ export type SettingsResponse = {
   webhook_url_masked: string;
   presets: ApiPreset[];
   prompt_optimizer: PromptOptimizerSettings;
+  r2_backup: R2BackupSettings;
 };
 
 export type PromptOptimizerSettings = {
@@ -55,6 +57,32 @@ export type PromptOptimizerSettingsInput = {
   api_key?: string | null;
 };
 
+export type R2BackupSettings = {
+  enabled: boolean;
+  endpoint_url: string;
+  bucket_name: string;
+  region: string;
+  key_prefix: string;
+  access_key_id_masked: string;
+  has_access_key_id: boolean;
+  access_key_id_source: ApiKeySource;
+  access_key_id_env_var?: string | null;
+  secret_access_key_masked: string;
+  has_secret_access_key: boolean;
+  secret_access_key_source: ApiKeySource;
+  secret_access_key_env_var?: string | null;
+};
+
+export type R2BackupSettingsInput = {
+  enabled?: boolean | null;
+  endpoint_url?: string | null;
+  bucket_name?: string | null;
+  region?: string | null;
+  key_prefix?: string | null;
+  access_key_id?: string | null;
+  secret_access_key?: string | null;
+};
+
 export type PromptOptimizerSystemPromptResponse = {
   system_prompt: string;
   default_system_prompt: string;
@@ -72,6 +100,7 @@ export type SettingsInput = {
   upstream_socks5_proxy?: string | null;
   webhook_url?: string | null;
   prompt_optimizer?: PromptOptimizerSettingsInput | null;
+  r2_backup?: R2BackupSettingsInput | null;
 };
 
 export type PresetHealthCheck = {
@@ -84,6 +113,8 @@ export type PresetHealthResponse = {
   status: PresetHealthStatus;
   checks: PresetHealthCheck[];
 };
+
+export type R2HealthResponse = PresetHealthResponse;
 
 export type AccessStatus = {
   authenticated: boolean;
@@ -256,4 +287,23 @@ export type GalleryExportJobStatus = {
   created_at?: string | null;
   updated_at?: string | null;
   error?: string | null;
+};
+
+export type GallerySyncJobStatus = {
+  job_id: string;
+  status: GallerySyncJobStatusValue;
+  stage?: string | null;
+  message?: string | null;
+  progress: number;
+  created_at?: string | null;
+  updated_at?: string | null;
+  error?: string | null;
+  total_count: number;
+  compared_count: number;
+  uploaded_count: number;
+  skipped_existing_count: number;
+  missing_local_count: number;
+  failed_count: number;
+  bytes_total: number;
+  bytes_uploaded: number;
 };

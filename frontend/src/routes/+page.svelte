@@ -346,6 +346,10 @@
     void settingsStore.checkPresetHealth(presetId);
   }
 
+  function checkR2Health(body: NonNullable<SettingsInput['r2_backup']>) {
+    void settingsStore.checkR2Health(body);
+  }
+
   function loadPromptOptimizerSystemPrompt() {
     return settingsStore.loadPromptOptimizerSystemPrompt();
   }
@@ -618,6 +622,10 @@
     await galleryStore.exportArchive(showToast);
   }
 
+  async function syncGallery() {
+    await galleryStore.syncGallery(showToast);
+  }
+
   async function copyPrompt(image: GalleryEntry) {
     await copyText(image.prompt);
     showToast($t.messages.promptCopied);
@@ -765,12 +773,15 @@
   saving={$settingsStore.saving}
   health={$settingsStore.health}
   healthChecking={$settingsStore.healthChecking}
+  r2Health={$settingsStore.r2Health}
+  r2HealthChecking={$settingsStore.r2HealthChecking}
   onClose={() => setUi('settingsOpen', false)}
   onSave={saveSettings}
   onCreate={createPreset}
   onActivate={activatePreset}
   onDelete={deletePreset}
   onHealthCheck={checkPresetHealth}
+  onR2HealthCheck={checkR2Health}
   onLoadPromptOptimizerSystemPrompt={loadPromptOptimizerSystemPrompt}
   onSavePromptOptimizerSystemPrompt={savePromptOptimizerSystemPrompt}
 />
@@ -878,6 +889,7 @@
     onDeleteAll={deleteAllImages}
     onImport={importArchive}
     onExport={exportArchive}
+    onSync={syncGallery}
     onOpen={openLightbox}
     onEdit={prepareGalleryImageForEdit}
     onUsePrompt={useGalleryPrompt}

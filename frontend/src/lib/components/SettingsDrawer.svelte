@@ -6,6 +6,8 @@
     PresetHealthResponse,
     PresetHealthStatus,
     PromptOptimizerSystemPromptResponse,
+    R2BackupSettingsInput,
+    R2HealthResponse,
     ResponseFormatDefault,
     SettingsInput,
     SettingsResponse
@@ -20,12 +22,15 @@
   export let saving = false;
   export let health: PresetHealthResponse | null = null;
   export let healthChecking = false;
+  export let r2Health: R2HealthResponse | null = null;
+  export let r2HealthChecking = false;
   export let onClose: () => void = () => {};
   export let onSave: (body: SettingsInput) => Promise<void> | void = () => {};
   export let onCreate: () => Promise<void> | void = () => {};
   export let onActivate: (presetId: string) => Promise<void> | void = () => {};
   export let onDelete: (presetId: string) => Promise<void> | void = () => {};
   export let onHealthCheck: (presetId: string) => Promise<void> | void = () => {};
+  export let onR2HealthCheck: (body: R2BackupSettingsInput) => Promise<void> | void = () => {};
   export let onLoadPromptOptimizerSystemPrompt: () => Promise<PromptOptimizerSystemPromptResponse> = async () => ({
     system_prompt: '',
     default_system_prompt: '',
@@ -56,6 +61,15 @@
   let promptOptimizerTimeoutSeconds: number | string = 60;
   let promptOptimizerApiKey = '';
   let promptOptimizerApiKeyInputType = 'password';
+  let r2BackupEnabled = false;
+  let r2EndpointUrl = '';
+  let r2BucketName = '';
+  let r2Region = 'auto';
+  let r2KeyPrefix = 'gallery/';
+  let r2AccessKeyId = '';
+  let r2SecretAccessKey = '';
+  let r2AccessKeyIdInputType = 'password';
+  let r2SecretAccessKeyInputType = 'password';
   let systemPromptOpen = false;
   let systemPromptLoading = false;
   let systemPromptSaving = false;
@@ -88,9 +102,28 @@
         : settings.prompt_optimizer?.has_api_key
           ? MASKED_API_KEY_VALUE
           : '';
+    r2BackupEnabled = Boolean(settings.r2_backup?.enabled);
+    r2EndpointUrl = settings.r2_backup?.endpoint_url || '';
+    r2BucketName = settings.r2_backup?.bucket_name || '';
+    r2Region = settings.r2_backup?.region || 'auto';
+    r2KeyPrefix = settings.r2_backup?.key_prefix || 'gallery/';
+    r2AccessKeyId =
+      settings.r2_backup?.access_key_id_source === 'env' && settings.r2_backup.access_key_id_env_var
+        ? `\${${settings.r2_backup.access_key_id_env_var}}`
+        : settings.r2_backup?.has_access_key_id
+          ? MASKED_API_KEY_VALUE
+          : '';
+    r2SecretAccessKey =
+      settings.r2_backup?.secret_access_key_source === 'env' && settings.r2_backup.secret_access_key_env_var
+        ? `\${${settings.r2_backup.secret_access_key_env_var}}`
+        : settings.r2_backup?.has_secret_access_key
+          ? MASKED_API_KEY_VALUE
+          : '';
   }
   $: apiKeyInputType = apiKey.trim().startsWith('${') && apiKey.trim().endsWith('}') ? 'text' : 'password';
   $: promptOptimizerApiKeyInputType = promptOptimizerApiKey.trim().startsWith('${') && promptOptimizerApiKey.trim().endsWith('}') ? 'text' : 'password';
+  $: r2AccessKeyIdInputType = r2AccessKeyId.trim().startsWith('${') && r2AccessKeyId.trim().endsWith('}') ? 'text' : 'password';
+  $: r2SecretAccessKeyInputType = r2SecretAccessKey.trim().startsWith('${') && r2SecretAccessKey.trim().endsWith('}') ? 'text' : 'password';
   $: if (!open && systemPromptOpen) {
     systemPromptOpen = false;
     systemPromptError = '';
@@ -104,6 +137,18 @@
   function promptOptimizerTimeoutValue() {
     const parsed = Number.parseInt(String(promptOptimizerTimeoutSeconds), 10);
     return Number.isFinite(parsed) && parsed > 0 ? parsed : 60;
+  }
+
+  function r2BackupPayload(): R2BackupSettingsInput {
+    return {
+      enabled: r2BackupEnabled,
+      endpoint_url: r2EndpointUrl.trim(),
+      bucket_name: r2BucketName.trim(),
+      region: r2Region.trim() || 'auto',
+      key_prefix: r2KeyPrefix.trim(),
+      access_key_id: r2AccessKeyId.trim() === MASKED_API_KEY_VALUE ? null : r2AccessKeyId.trim(),
+      secret_access_key: r2SecretAccessKey.trim() === MASKED_API_KEY_VALUE ? null : r2SecretAccessKey.trim()
+    };
   }
 
   async function save() {
@@ -127,7 +172,8 @@
         model: promptOptimizerModel.trim(),
         timeout_seconds: promptOptimizerTimeoutValue(),
         api_key: promptOptimizerApiKey.trim() === MASKED_API_KEY_VALUE ? null : promptOptimizerApiKey.trim()
-      }
+      },
+      r2_backup: r2BackupPayload()
     });
   }
 
@@ -151,6 +197,10 @@
   async function checkHealth() {
     if (!activePresetId) return;
     await onHealthCheck(activePresetId);
+  }
+
+  async function checkR2Health() {
+    await onR2HealthCheck(r2BackupPayload());
   }
 
   function healthStatusLabel(status: PresetHealthStatus) {
@@ -317,6 +367,80 @@
             <input bind:value={webhookUrl} class="control-focus w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2.5 font-mono text-sm text-zinc-100 focus:border-emerald-500" placeholder="https://..." />
             <span class="mt-1.5 block text-xs text-zinc-500">{$t.settings.webhookUrlHint}</span>
           </label>
+
+          <section class="border-t border-zinc-800 pt-4">
+            <div class="mb-3 flex items-center justify-between gap-3">
+              <div>
+                <h3 class="text-sm font-semibold text-zinc-200">{$t.settings.r2Backup}</h3>
+                <p class="mt-1 text-xs text-zinc-500">{$t.settings.r2BackupHint}</p>
+              </div>
+              <label class="flex items-center gap-2 text-xs font-medium text-zinc-300">
+                <input bind:checked={r2BackupEnabled} type="checkbox" class="control-focus accent-emerald-500" />
+                {$t.settings.r2BackupEnabled}
+              </label>
+            </div>
+            <div class="space-y-4">
+              <label class="block">
+                <span class="mb-1.5 block text-xs font-medium text-zinc-400">{$t.settings.r2EndpointUrl}</span>
+                <input bind:value={r2EndpointUrl} class="control-focus w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2.5 font-mono text-sm text-zinc-100 focus:border-emerald-500" placeholder="https://ACCOUNT_ID.r2.cloudflarestorage.com" />
+              </label>
+              <label class="block">
+                <span class="mb-1.5 block text-xs font-medium text-zinc-400">{$t.settings.r2BucketName}</span>
+                <input bind:value={r2BucketName} class="control-focus w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2.5 font-mono text-sm text-zinc-100 focus:border-emerald-500" />
+              </label>
+              <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                <label class="block">
+                  <span class="mb-1.5 block text-xs font-medium text-zinc-400">{$t.settings.r2Region}</span>
+                  <input bind:value={r2Region} class="control-focus w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2.5 font-mono text-sm text-zinc-100 focus:border-emerald-500" placeholder="auto" />
+                </label>
+                <label class="block">
+                  <span class="mb-1.5 block text-xs font-medium text-zinc-400">{$t.settings.r2KeyPrefix}</span>
+                  <input bind:value={r2KeyPrefix} class="control-focus w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2.5 font-mono text-sm text-zinc-100 focus:border-emerald-500" placeholder="gallery/" />
+                </label>
+              </div>
+              <label class="block">
+                <span class="mb-1.5 block text-xs font-medium text-zinc-400">{$t.settings.r2AccessKeyId}</span>
+                <input bind:value={r2AccessKeyId} type={r2AccessKeyIdInputType} class="control-focus w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2.5 font-mono text-sm text-zinc-100 focus:border-emerald-500" />
+                <span class="mt-1.5 block text-xs text-zinc-500">{$t.settings.r2SecretHint}</span>
+              </label>
+              <label class="block">
+                <span class="mb-1.5 block text-xs font-medium text-zinc-400">{$t.settings.r2SecretAccessKey}</span>
+                <input bind:value={r2SecretAccessKey} type={r2SecretAccessKeyInputType} class="control-focus w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2.5 font-mono text-sm text-zinc-100 focus:border-emerald-500" />
+                <span class="mt-1.5 block text-xs text-zinc-500">{$t.settings.r2SecretHint}</span>
+              </label>
+              <button
+                type="button"
+                disabled={r2HealthChecking}
+                class="control-focus w-full rounded-lg border border-zinc-700 px-3 py-2.5 text-sm font-semibold text-zinc-200 transition-colors hover:border-zinc-600 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50"
+                on:click={checkR2Health}
+              >
+                {r2HealthChecking ? $t.settings.r2HealthChecking : $t.settings.r2HealthCheck}
+              </button>
+              {#if r2Health}
+                <div class={`rounded-lg border p-3 text-xs ${healthPanelClass(r2Health.status)}`}>
+                  <div class="flex items-center justify-between gap-3">
+                    <span class="font-semibold">{$t.settings.r2HealthStatus}</span>
+                    <span class={`rounded-full border px-2 py-0.5 text-[11px] font-semibold ${healthBadgeClass(r2Health.status)}`}>
+                      {healthStatusLabel(r2Health.status)}
+                    </span>
+                  </div>
+                  <div class="mt-2 space-y-1.5">
+                    {#each r2Health.checks as check}
+                      <div class="rounded-md border border-zinc-800 bg-zinc-950/50 p-2 text-zinc-300">
+                        <div class="flex items-center justify-between gap-2">
+                          <span class="font-mono text-[11px] text-zinc-500">{check.name}</span>
+                          <span class={`rounded border px-1.5 py-0.5 text-[10px] font-semibold ${healthBadgeClass(check.status)}`}>
+                            {healthStatusLabel(check.status)}
+                          </span>
+                        </div>
+                        <div class="mt-1 leading-relaxed text-zinc-400">{check.message}</div>
+                      </div>
+                    {/each}
+                  </div>
+                </div>
+              {/if}
+            </div>
+          </section>
 
           <section class="border-t border-zinc-800 pt-4">
             <div class="mb-3 flex items-center justify-between gap-3">

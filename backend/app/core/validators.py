@@ -229,6 +229,34 @@ def normalize_upstream_base_url(url: str | None) -> str:
     return urlunsplit(("https", host, path, "", ""))
 
 
+def normalize_r2_endpoint_url(url: str | None) -> str:
+    value = str(url or "").strip()
+    if not value:
+        return ""
+
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError as e:
+        raise ValueError("R2 endpoint URL must include a valid port") from e
+
+    if parsed.scheme.lower() != "https":
+        raise ValueError("R2 endpoint URL must use https://")
+    if not parsed.hostname:
+        raise ValueError("R2 endpoint URL must include a hostname")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("R2 endpoint URL must not include username or password")
+    if parsed.query or parsed.fragment:
+        raise ValueError("R2 endpoint URL must not include query strings or fragments")
+
+    hostname = parsed.hostname.lower()
+    host = f"[{hostname}]" if ":" in hostname and not hostname.startswith("[") else hostname
+    if port is not None:
+        host = f"{host}:{port}"
+    path = parsed.path.rstrip("/")
+    return urlunsplit(("https", host, path, "", ""))
+
+
 def redact_url(url: str | None) -> str:
     value = str(url or "").strip()
     if not value:

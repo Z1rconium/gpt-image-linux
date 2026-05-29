@@ -43,6 +43,7 @@ Key characteristics:
 - gallery with filters (FTS-backed prompt search, model, preset, size, date range, favorite), URL-synced page/non-prompt-filter/lightbox/job-history state, direct page-number jump, lightbox previous/next navigation and left/right keyboard shortcuts, “Edit this image”, download, custom delete confirmations with 5-second undo for single images, batch actions with partial-success feedback, delete/delete-all, prompt/image-url copy, and on-demand total-size metadata
 - prompt snippets drawer for reusable prompt templates, stored separately from gallery images in SQLite
 - ZIP export/import (`metadata.json`) with streaming upload, safety validation, low-memory export path, skipped-entry metadata for partial batch downloads, and visible import/export/download progress states
+- Cloudflare R2 gallery backup sync: configurable in `.env` or Web Settings, health-probed from Settings, and manually synced from Gallery without changing local gallery storage as the source of truth
 - access-key gate, Host/public-origin allowlist, IP allowlist/proxy-header support, GitHub version badge, and CSP nonce injection
 - observability hooks for job stage timings, slow `/api/gallery` query logging, queue/failure metrics, and optional JSON/Prometheus metrics endpoints
 
@@ -91,6 +92,7 @@ Runtime persistent storage is minimal:
 - generated images are saved in the `images/` directory
 - gallery metadata, image byte sizes, FTS prompt-search index, and API presets are stored in SQLite at `data/app.sqlite3`, including `completed_at`, Beijing completion time, and generation duration
 - prompt snippets are stored in SQLite at `data/app.sqlite3` independently from gallery metadata
+- optional R2 backups are incremental object uploads only; local `images/` files and SQLite gallery rows remain the only gallery source used for serving, thumbnails, ZIP export, and import
 - generation/edit job status, errors, timing, `completed_at`, and result metadata are stored in SQLite at `data/app.sqlite3`; successful multi-image jobs persist the full `images` result list while keeping the first result in `image_id`/`image_url` for compatibility
 - active `asyncio.Task` handles live only in process memory; queued/running jobs from a previous process are marked interrupted on startup
 
@@ -257,20 +259,21 @@ curl http://localhost:9090/health
 9. enter the API key, or an env ref such as `${OPENAI_API_KEY}`; literal keys require `ALLOW_PLAINTEXT_SECRETS=true`
 10. optionally enter a global SOCKS5 proxy or env ref such as `${UPSTREAM_PROXY_URL}`
 11. optionally enter a global Webhook URL or env ref such as `${WEBHOOK_URL}` for completed generation/edit jobs
-12. optionally configure Prompt Optimizer with an endpoint URL, model, timeout seconds, and API key/env ref; literal keys require `ALLOW_PLAINTEXT_SECRETS=true`
-13. optionally click Edit System Prompt in the Prompt Optimizer settings to edit the optimizer system prompt stored at `DATA_DIR/prompt_optimizer_system_prompt.md`
-14. optionally run Health check for the saved preset
-15. click Save Preset
-16. enter a prompt
-17. click Prompt Helper tags to append common modifiers
-18. click Optimize to rewrite the prompt through the server-side optimizer
-19. open Prompts in the header to save or reuse prompt snippets; using a snippet replaces the current prompt
-20. choose generation options, including API path for per-request upstream routing
-21. click Generate
-22. optionally upload one or more edit reference images, pick "Edit this image" in Gallery/Lightbox, or combine both; uploads append to the current edit sources and Clear removes all edit sources
-23. click Edits to run image-to-image
-24. use Gallery/Lightbox "Use prompt" or "Use all" to reuse historical prompt text or full parameters
-25. view preview and gallery
+12. optionally configure R2 Backup with endpoint URL, bucket, prefix, and access key env refs such as `${R2_ACCESS_KEY_ID}` / `${R2_SECRET_ACCESS_KEY}`, then click Test R2
+13. optionally configure Prompt Optimizer with an endpoint URL, model, timeout seconds, and API key/env ref; literal keys require `ALLOW_PLAINTEXT_SECRETS=true`
+14. optionally click Edit System Prompt in the Prompt Optimizer settings to edit the optimizer system prompt stored at `DATA_DIR/prompt_optimizer_system_prompt.md`
+15. optionally run Health check for the saved preset
+16. click Save Preset
+17. enter a prompt
+18. click Prompt Helper tags to append common modifiers
+19. click Optimize to rewrite the prompt through the server-side optimizer
+20. open Prompts in the header to save or reuse prompt snippets; using a snippet replaces the current prompt
+21. choose generation options, including API path for per-request upstream routing
+22. click Generate
+23. optionally upload one or more edit reference images, pick "Edit this image" in Gallery/Lightbox, or combine both; uploads append to the current edit sources and Clear removes all edit sources
+24. click Edits to run image-to-image
+25. use Gallery/Lightbox "Use prompt" or "Use all" to reuse historical prompt text or full parameters
+26. view preview and gallery; click Gallery Sync to upload local gallery images missing from the configured R2 bucket prefix
 
 ## API paths
 
@@ -328,6 +331,13 @@ The panel supports these upstream paths. The API base URL may either omit or inc
 - When configured, completed generation/edit jobs send signed webhook callbacks to that HTTPS URL.
 - `WEBHOOK_SIGNING_SECRET` is required when a Webhook URL is configured. Stored webhook URLs are masked in API responses and the UI.
 
+## R2 gallery backup sync
+
+- R2 Backup is an incremental backup path, not remote gallery storage.
+- Configure it in `.env` with `R2_*` variables or in Web Settings. Web Settings accepts `${ENV_VAR_NAME}` refs for credentials; literal stored credentials require `ALLOW_PLAINTEXT_SECRETS=true`.
+- Test R2 in Settings runs `HeadBucket`, a prefix-scoped `ListObjectsV2`, and a small probe object write; probe cleanup failure is reported as a warning.
+- The Gallery Sync button uploads only local gallery filenames missing from `R2_KEY_PREFIX`; existing bucket objects are skipped, and bucket-only objects are never deleted or overwritten.
+
 ## Image size modes
 
 - `auto` — default; let the model choose the output size
@@ -369,6 +379,12 @@ The panel supports these upstream paths. The API base URL may either omit or inc
 | `PROMPT_OPTIMIZER_MAX_OUTPUT_CHARS` | `4000` | Max optimized prompt length returned to the textarea |
 | `PROMPT_OPTIMIZER_MAX_RESPONSE_MB` | `8` | Max optimizer upstream response body size in MB before JSON parsing |
 | `PROMPT_OPTIMIZER_HOST_ALLOWLIST` | empty | Optional comma-separated hostname allowlist for the optimizer endpoint |
+| `R2_ENDPOINT_URL` | empty | Cloudflare R2 S3-compatible endpoint URL, for example `https://ACCOUNT_ID.r2.cloudflarestorage.com` |
+| `R2_BUCKET_NAME` | empty | Bucket used by Gallery Sync backup |
+| `R2_REGION` | `auto` | S3 client region name for R2 |
+| `R2_KEY_PREFIX` | `gallery/` | Object key prefix for gallery backups; use a dedicated prefix such as `gallery-test/` for validation |
+| `R2_ACCESS_KEY_ID` | empty | R2 access key ID used by env-ref credentials |
+| `R2_SECRET_ACCESS_KEY` | empty | R2 secret access key used by env-ref credentials |
 | `APP_VERSION` | `VERSION` file | Override the app version shown in the UI and returned by `/api/version`; read on each request |
 | `GITHUB_REPO` | `Z1rconium/gpt-image-linux` | GitHub `owner/repo` used for latest-release update detection; set empty to disable latest-version checks |
 | `ENABLE_VERSION_CHECK` | `true` | Enable per-request GitHub latest-version checks for the header `New` badge |
@@ -418,6 +434,7 @@ The panel supports these upstream paths. The API base URL may either omit or inc
 | `POST` | `/api/access` | Unlock access for 3 hours |
 | `POST` | `/api/settings` | Save the active API preset |
 | `GET` | `/api/settings` | Get current settings and presets |
+| `POST` | `/api/settings/r2/health` | Validate a draft R2 Backup config and run bucket/list/write checks |
 | `POST` | `/api/prompt/optimize` | Rewrite a prompt through the server-side optimizer |
 | `GET` | `/api/prompt/optimizer-system-prompt` | Read the Prompt Optimizer system prompt, falling back to the built-in default |
 | `POST` | `/api/prompt/optimizer-system-prompt` | Save the Prompt Optimizer system prompt to `DATA_DIR/prompt_optimizer_system_prompt.md` |
@@ -450,6 +467,9 @@ The panel supports these upstream paths. The API base URL may either omit or inc
 | `GET` | `/api/gallery/export-jobs/{job_id}` | Get tracked ZIP export job status |
 | `GET` | `/api/gallery/export-jobs/{job_id}/events` | Stream ZIP export pack progress over SSE |
 | `GET` | `/api/gallery/export-jobs/{job_id}/download` | Download a completed tracked ZIP export with `Content-Length` transfer progress |
+| `POST` | `/api/gallery/sync-jobs` | Start a single active R2 gallery backup sync job |
+| `GET` | `/api/gallery/sync-jobs/{job_id}` | Get R2 sync job status |
+| `GET` | `/api/gallery/sync-jobs/{job_id}/events` | Stream R2 sync progress over SSE |
 | `POST` | `/api/import` | Import a ZIP created by `/api/download-all` |
 | `DELETE` | `/api/gallery` | Delete all gallery entries and server image files |
 | `GET` | `/api/metrics` | Optional metrics snapshot; returns JSON by default or Prometheus exposition format with `Accept: text/plain`; only available when `ENABLE_METRICS=true` |
@@ -464,6 +484,7 @@ The panel supports these upstream paths. The API base URL may either omit or inc
 - generation and edit share one queue measured in image units (`MAX_ACTIVE_GENERATE_JOBS` + `MAX_QUEUED_GENERATE_JOBS`), all edit source images are staged under `DATA_DIR/edit-sources` and additionally capped by `MAX_PENDING_EDIT_SOURCE_MB`, support cancellation, and persist terminal history including `completed_at`
 - batch generation (`n > 1`) consumes `n` queue units; the parent job aggregates successful child results into `images[]`, Gallery metadata keeps the user-requested `n`, and actual upstream child calls are bounded by the global upstream-request semaphore
 - Prompt Optimizer uses its own server-side Chat Completions-compatible endpoint config and user-configurable request timeout/response-size cap, resolves API key env refs on the backend, stores its editable system prompt in `DATA_DIR/prompt_optimizer_system_prompt.md`, and does not consume generation/edit queue capacity.
+- R2 Backup uses boto3 against a Cloudflare R2 S3-compatible endpoint under `asyncio.to_thread`; sync jobs list only the configured prefix, upload missing local gallery filenames, and never serve, overwrite, or delete gallery images from R2.
 - SSE is the primary progress channel; `/api/generate/jobs` provides list/history (`include_finished=true`, optional `limit`/`offset`, optional `failed_only=true`), `/api/generate/jobs/history` clears terminal history, and `/api/generate/jobs/events` streams debounced live job-list changes from memory
 - terminal job history includes `stage_timings` for `upstream_wait`, `download_decode`, `validate`, `thumbnail`, and `db_insert`; slow gallery queries are logged with prompt presence/length/hash plus other filters and totals and counted in metrics; optional metrics include queue depth, running jobs, failure ratios, job-stage latencies, and slow SQLite query counters; terminal job statuses distinguish `cancelled`, `interrupted`, and `upstream_error` in addition to the generic `error`
 - upstream JSON/SSE bodies are read with a `MAX_UPSTREAM_JSON_MB` cap before parsing, JSON request bodies are capped by `MAX_JSON_BODY_MB`, and upstream image URL downloads are revalidated (SSRF-aware, no blind redirect follow), fully decoded with Pillow, pixel-limited by `MAX_IMAGE_PIXELS`, and bounded by `MAX_FILE_SIZE_MB`
@@ -554,6 +575,7 @@ GPT Image Panel 是一个轻量级 FastAPI Web 界面，用于图像生成和图
 - Gallery：筛选（FTS 提示词搜索、模型、预设、尺寸、日期区间、收藏）、URL 同步的 page/非提示词筛选/lightbox/job history 状态、页码输入跳转、Lightbox 上一张/下一张导航和左右方向键快捷键、”Edit this image”、下载/删除、批量操作部分成功反馈、单图 5 秒撤销删除、复制提示词/图片链接、按需总大小统计
 - 提示词收藏夹：可复用 prompt 模板，与 Gallery 图片分开存储和管理
 - ZIP 导出导入（含 `metadata.json`）+ 流式上传 + 安全校验 + 低内存导出路径 + 批量下载 skipped metadata + 可见导入/导出/下载进度状态
+- Cloudflare R2 Gallery 备份同步：可通过 `.env` 或 Web Settings 配置，可在 Settings 测试连通性，并可从 Gallery 手动增量同步；本地 Gallery 存储仍是唯一源数据
 - 访问密钥、Host/public origin 白名单、IP 白名单/反向代理头、版本检测、CSP nonce
 - 观测能力：任务分段耗时、慢 `/api/gallery` 查询日志、队列/失败率指标、可选 JSON/Prometheus metrics
 
@@ -602,6 +624,7 @@ npm --prefix frontend run build
 - 生成的图片保存在 `images/` 目录
 - Gallery 元数据、图片字节数、FTS 提示词索引和 API 预设保存在 SQLite：`data/app.sqlite3`，包含真实图片宽高、`completed_at` 完成时间、北京时间生成完成时间和生成耗时
 - 提示词收藏夹保存在 SQLite：`data/app.sqlite3`，独立于 Gallery 元数据
+- 可选 R2 备份只做增量对象上传；本地 `images/` 文件和 SQLite Gallery 行仍是图片服务、缩略图、ZIP 导出和导入流程使用的唯一 Gallery 源
 - 生成/编辑任务的状态、错误、耗时、`completed_at`、请求参数和结果元数据保存在 SQLite：`data/app.sqlite3`；多图任务会保留完整 `images` 结果列表，同时继续用第一张结果填充 `image_id`/`image_url` 以兼容旧客户端
 - 运行中的 `asyncio.Task` 句柄仅保存在进程内存中；重启后，上个进程遗留的排队/运行任务会被标记为 interrupted
 
@@ -768,19 +791,20 @@ curl http://localhost:9090/health
 9. 填写 API Key，或填写 `${OPENAI_API_KEY}` 这类环境变量引用；直接填写的 key 需要显式设置 `ALLOW_PLAINTEXT_SECRETS=true`
 10. 可选：填写全局 SOCKS5 代理，或填写 `${UPSTREAM_PROXY_URL}` 这类环境变量引用
 11. 可选：填写全局 Webhook URL，或填写 `${WEBHOOK_URL}` 这类环境变量引用，用于生成/编辑任务完成回调
-12. 可选：配置提示词优化器的 endpoint URL、模型、超时时间和 API Key/环境变量引用；直接填写的 key 需要显式设置 `ALLOW_PLAINTEXT_SECRETS=true`
-13. 可选：对已保存预设执行 Health check
-14. 点击 Save Preset
-15. 输入提示词
-16. 点击提示词助手标签追加常用修饰词
-17. 点击 Optimize 通过服务端优化器改写提示词
-18. 点击右上角提示词按钮保存或复用提示词片段；使用片段会替换当前提示词
-19. 选择生成参数；需要逐次复用不同上游路径时可直接选择 API Path
-20. 点击 Generate
-21. 也可以上传一张或多张编辑参考图、在 Gallery/Lightbox 中选择 “Edit this image”，或两者组合；上传会追加到当前编辑源，Clear 会清空全部编辑源
-22. 点击 Edits 执行图生图
-23. 在 Gallery/Lightbox 使用 “Use prompt” 或 “Use all” 复用历史提示词或完整参数
-24. 查看预览和 Gallery
+12. 可选：配置 R2 备份的 endpoint URL、储存桶、prefix，以及 `${R2_ACCESS_KEY_ID}` / `${R2_SECRET_ACCESS_KEY}` 这类环境变量引用，然后点击测试 R2
+13. 可选：配置提示词优化器的 endpoint URL、模型、超时时间和 API Key/环境变量引用；直接填写的 key 需要显式设置 `ALLOW_PLAINTEXT_SECRETS=true`
+14. 可选：对已保存预设执行 Health check
+15. 点击 Save Preset
+16. 输入提示词
+17. 点击提示词助手标签追加常用修饰词
+18. 点击 Optimize 通过服务端优化器改写提示词
+19. 点击右上角提示词按钮保存或复用提示词片段；使用片段会替换当前提示词
+20. 选择生成参数；需要逐次复用不同上游路径时可直接选择 API Path
+21. 点击 Generate
+22. 也可以上传一张或多张编辑参考图、在 Gallery/Lightbox 中选择 “Edit this image”，或两者组合；上传会追加到当前编辑源，Clear 会清空全部编辑源
+23. 点击 Edits 执行图生图
+24. 在 Gallery/Lightbox 使用 “Use prompt” 或 “Use all” 复用历史提示词或完整参数
+25. 查看预览和 Gallery；点击 Gallery 的同步按钮可把本地 Gallery 中 R2 prefix 下缺失的图片上传到配置的储存桶
 
 ## 支持的 API Path
 
@@ -838,6 +862,13 @@ curl http://localhost:9090/health
 - 配置后，生成/编辑任务完成时会向该 HTTPS URL 发送签名 webhook 回调。
 - 配置 Webhook URL 时需要设置 `WEBHOOK_SIGNING_SECRET`；保存后的 webhook URL 会在 API 响应和 UI 中打码。
 
+## R2 Gallery 备份同步
+
+- R2 Backup 是增量备份路径，不是远端 Gallery 存储。
+- 可以用 `.env` 的 `R2_*` 变量配置，也可以在 Web Settings 中保存配置。Web Settings 的凭据字段支持 `${ENV_VAR_NAME}` 引用；直接保存明文凭据需要 `ALLOW_PLAINTEXT_SECRETS=true`。
+- Settings 里的测试 R2 会执行 `HeadBucket`、带 prefix 的 `ListObjectsV2`，并写入一个很小的 probe object；probe 清理失败会作为 warning 返回。
+- Gallery 的同步按钮只上传 `R2_KEY_PREFIX` 下缺失的本地 Gallery filename；已存在对象会跳过，bucket 中额外对象不会删除或覆盖。
+
 ## 图像尺寸模式
 
 - `auto` — 默认值；让模型自动选择输出尺寸
@@ -878,6 +909,12 @@ curl http://localhost:9090/health
 | `PROMPT_OPTIMIZER_MAX_OUTPUT_CHARS` | `4000` | 回填到文本框的优化后提示词最大长度 |
 | `PROMPT_OPTIMIZER_MAX_RESPONSE_MB` | `8` | JSON 解析前允许的最大优化器上游响应体积（MB） |
 | `PROMPT_OPTIMIZER_HOST_ALLOWLIST` | 空 | 可选的优化器 endpoint 主机名白名单，逗号分隔 |
+| `R2_ENDPOINT_URL` | 空 | Cloudflare R2 S3 兼容 endpoint URL，例如 `https://ACCOUNT_ID.r2.cloudflarestorage.com` |
+| `R2_BUCKET_NAME` | 空 | Gallery 同步备份使用的储存桶 |
+| `R2_REGION` | `auto` | R2 使用的 S3 client region name |
+| `R2_KEY_PREFIX` | `gallery/` | Gallery 备份对象 key prefix；手动验证建议使用 `gallery-test/` 这类独立 prefix |
+| `R2_ACCESS_KEY_ID` | 空 | env-ref 凭据解析使用的 R2 access key ID |
+| `R2_SECRET_ACCESS_KEY` | 空 | env-ref 凭据解析使用的 R2 secret access key |
 | `APP_VERSION` | `VERSION` 文件 | 覆盖界面显示和 `/api/version` 返回的当前应用版本；每次请求实时读取 |
 | `GITHUB_REPO` | `Z1rconium/gpt-image-linux` | 用于检测 latest release 新版本的 GitHub `owner/repo`；设为空可禁用最新版本检查 |
 | `ENABLE_VERSION_CHECK` | `true` | 启用每次请求的 GitHub 最新版本检测，用于 Header 的 `New` 标记 |
@@ -928,6 +965,7 @@ curl http://localhost:9090/health
 | `POST` | `/api/access` | 解锁访问 3 小时 |
 | `POST` | `/api/settings` | 保存当前 API 预设 |
 | `GET` | `/api/settings` | 获取当前设置和预设列表 |
+| `POST` | `/api/settings/r2/health` | 校验草稿 R2 Backup 配置并执行 bucket/list/write 检查 |
 | `POST` | `/api/prompt/optimize` | 通过服务端提示词优化器改写提示词 |
 | `GET` | `/api/prompt-snippets` | 查询提示词片段，可选 `query` 筛选 |
 | `POST` | `/api/prompt-snippets` | 创建提示词片段 |
@@ -958,6 +996,9 @@ curl http://localhost:9090/health
 | `GET` | `/api/gallery/export-jobs/{job_id}` | 查询 ZIP 导出任务状态 |
 | `GET` | `/api/gallery/export-jobs/{job_id}/events` | 通过 SSE 推送 ZIP 打包进度 |
 | `GET` | `/api/gallery/export-jobs/{job_id}/download` | 下载已完成的 ZIP 导出，并通过 `Content-Length` 支持传输进度 |
+| `POST` | `/api/gallery/sync-jobs` | 创建单活 R2 Gallery 备份同步任务 |
+| `GET` | `/api/gallery/sync-jobs/{job_id}` | 查询 R2 同步任务状态 |
+| `GET` | `/api/gallery/sync-jobs/{job_id}/events` | 通过 SSE 推送 R2 同步进度 |
 | `POST` | `/api/import` | 导入 `/api/download-all` 创建的 ZIP |
 | `DELETE` | `/api/gallery` | 删除所有 Gallery 条目和服务器图片文件 |
 | `GET` | `/api/metrics` | 可选指标快照；默认 JSON，带 `Accept: text/plain` 时返回 Prometheus exposition format；仅在 `ENABLE_METRICS=true` 时可用 |
@@ -972,6 +1013,7 @@ curl http://localhost:9090/health
 - 生成与编辑共用按 image units 计量的队列（`MAX_ACTIVE_GENERATE_JOBS` + `MAX_QUEUED_GENERATE_JOBS`）；所有编辑源图先落到 `DATA_DIR/edit-sources` 并额外受 `MAX_PENDING_EDIT_SOURCE_MB` 总量限制；支持取消，并持久化终态历史（含 `completed_at`）
 - 批量生成（`n > 1`）会占用 `n` 个队列单位；父任务会把成功子结果聚合到 `images[]`，Gallery 元数据保留用户请求的 `n`，真实上游子调用受全局 upstream-request semaphore 限制
 - 提示词优化器使用独立的服务端 Chat Completions 兼容 endpoint 配置和用户可配置请求超时/响应体积上限，在后端解析 API Key 环境变量引用，不占用生成/编辑任务队列容量。
+- R2 Backup 通过 boto3 访问 Cloudflare R2 S3 兼容 endpoint，并用 `asyncio.to_thread` 隔离阻塞调用；同步任务只列出配置的 prefix，只上传缺失的本地 Gallery filename，不会从 R2 服务、覆盖或删除 Gallery 图片。
 - SSE 是主进度通道；`/api/generate/jobs` 提供列表/历史（`include_finished=true`，可选 `limit`/`offset`，可选 `failed_only=true`），`/api/generate/jobs/history` 清空终态历史，`/api/generate/jobs/events` 从内存推送 debounce 后的实时任务列表变化
 - 任务终态历史包含 `stage_timings`：`upstream_wait`、`download_decode`、`validate`、`thumbnail`、`db_insert`；慢 Gallery 查询日志只记录提示词是否存在/长度/hash，以及其他筛选条件与 total，并计入 metrics；可选 metrics 包含队列深度、运行中任务数、失败率、任务分段耗时和慢 SQLite 查询数；终态状态区分 `cancelled`、`interrupted` 和 `upstream_error`，同时保留通用 `error`
 - 上游 JSON/SSE 响应会在解析前受 `MAX_UPSTREAM_JSON_MB` 限制，JSON 请求体受 `MAX_JSON_BODY_MB` 限制；上游图片 URL 下载会做 SSRF/重定向目标复核，并会经过 Pillow 完整解码、`MAX_IMAGE_PIXELS` 像素限制和 `MAX_FILE_SIZE_MB` 体积限制

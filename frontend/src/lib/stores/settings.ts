@@ -2,7 +2,14 @@ import { derived, get, writable } from 'svelte/store';
 import { apiFetch } from '$lib/api/client';
 import { t } from '$lib/i18n';
 import { confirmStore } from '$lib/stores/confirm';
-import type { PresetHealthResponse, PromptOptimizerSystemPromptResponse, SettingsInput, SettingsResponse } from '$lib/api/types';
+import type {
+  PresetHealthResponse,
+  PromptOptimizerSystemPromptResponse,
+  R2BackupSettingsInput,
+  R2HealthResponse,
+  SettingsInput,
+  SettingsResponse
+} from '$lib/api/types';
 import type { ToastVariant } from '$lib/stores/ui';
 
 type ShowToast = (message: string, variant?: ToastVariant) => void;
@@ -12,13 +19,17 @@ type SettingsState = {
   saving: boolean;
   healthChecking: boolean;
   health: PresetHealthResponse | null;
+  r2HealthChecking: boolean;
+  r2Health: R2HealthResponse | null;
 };
 
 const initialSettingsState: SettingsState = {
   settings: null,
   saving: false,
   healthChecking: false,
-  health: null
+  health: null,
+  r2HealthChecking: false,
+  r2Health: null
 };
 
 function createSettingsStore() {
@@ -50,7 +61,7 @@ function createSettingsStore() {
         },
         'saving settings'
       );
-      update((state) => ({ ...state, settings, health: null }));
+      update((state) => ({ ...state, settings, health: null, r2Health: null }));
       showToast(get(t).messages.presetSaved);
     } finally {
       update((state) => ({ ...state, saving: false }));
@@ -68,7 +79,7 @@ function createSettingsStore() {
       },
       'creating preset'
     );
-    update((state) => ({ ...state, settings, health: null }));
+    update((state) => ({ ...state, settings, health: null, r2Health: null }));
     showToast(get(t).messages.presetCreated);
   }
 
@@ -80,7 +91,7 @@ function createSettingsStore() {
       { method: 'POST' },
       'switching preset'
     );
-    update((state) => ({ ...state, settings, health: null }));
+    update((state) => ({ ...state, settings, health: null, r2Health: null }));
     showToast(get(t).messages.presetSwitched);
   }
 
@@ -103,7 +114,7 @@ function createSettingsStore() {
       { method: 'DELETE' },
       'deleting preset'
     );
-    update((state) => ({ ...state, settings, health: null }));
+    update((state) => ({ ...state, settings, health: null, r2Health: null }));
     showToast(get(t).messages.presetDeleted);
   }
 
@@ -119,6 +130,24 @@ function createSettingsStore() {
       update((state) => ({ ...state, health }));
     } finally {
       update((state) => ({ ...state, healthChecking: false }));
+    }
+  }
+
+  async function checkR2Health(body: R2BackupSettingsInput) {
+    update((state) => ({ ...state, r2HealthChecking: true }));
+    try {
+      const r2Health = await apiFetch<R2HealthResponse>(
+        '/api/settings/r2/health',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        },
+        'checking R2 health'
+      );
+      update((state) => ({ ...state, r2Health }));
+    } finally {
+      update((state) => ({ ...state, r2HealthChecking: false }));
     }
   }
 
@@ -152,6 +181,7 @@ function createSettingsStore() {
     activatePreset,
     deletePreset,
     checkPresetHealth,
+    checkR2Health,
     loadPromptOptimizerSystemPrompt,
     savePromptOptimizerSystemPrompt
   };

@@ -17,6 +17,7 @@
   export let onDeleteAll: () => void = () => {};
   export let onImport: (file: File) => void = () => {};
   export let onExport: () => void = () => {};
+  export let onSync: () => void = () => {};
   export let onOpen: (image: GalleryEntry) => void = () => {};
   export let onEdit: (image: GalleryEntry) => void = () => {};
   export let onUsePrompt: (image: GalleryEntry) => void = () => {};
@@ -133,6 +134,9 @@
       </button>
       <button type="button" class="control-focus rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40" disabled={busy} on:click={onExport}>
         {operationStatus?.kind === 'export' ? $t.gallery.exporting : $t.gallery.exportZip}
+      </button>
+      <button type="button" class="control-focus rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40" disabled={busy} on:click={onSync}>
+        {operationStatus?.kind === 'sync' ? $t.gallery.syncing : $t.gallery.syncR2}
       </button>
       <button type="button" class="control-focus rounded-lg border border-red-500/40 px-3 py-2 text-xs text-red-300 hover:bg-red-500/10" on:click={onDeleteAll}>
         {$t.gallery.deleteAll}

@@ -21,7 +21,12 @@ from ..core.validators import (
     resolve_env_var_ref,
 )
 from ..repositories import storage
-from ..schemas.models import ApiPresetResponse, PromptOptimizerSettingsResponse, SettingsResponse
+from ..schemas.models import (
+    ApiPresetResponse,
+    PromptOptimizerSettingsResponse,
+    R2BackupSettingsResponse,
+    SettingsResponse,
+)
 
 MASKED_API_KEY_VALUE = "********"
 
@@ -70,6 +75,16 @@ def api_key_response_fields(api_key: str) -> dict:
         "has_api_key": False,
         "api_key_source": "empty",
         "api_key_env_var": None,
+    }
+
+
+def secret_response_fields(value: str, prefix: str) -> dict:
+    fields = api_key_response_fields(value)
+    return {
+        f"{prefix}_masked": fields["api_key_masked"],
+        f"has_{prefix}": fields["has_api_key"],
+        f"{prefix}_source": fields["api_key_source"],
+        f"{prefix}_env_var": fields["api_key_env_var"],
     }
 
 
@@ -143,6 +158,7 @@ def persist_api_settings():
             "webhook_url": get_webhook_url(raw=True),
             "presets": get_api_presets(),
             "prompt_optimizer": get_prompt_optimizer_settings(),
+            "r2_backup": get_r2_backup_settings(),
         }
     )
 
@@ -311,6 +327,7 @@ def build_settings_response() -> SettingsResponse:
         **webhook_url_response_fields(),
         presets=[serialize_api_preset(preset) for preset in get_api_presets()],
         prompt_optimizer=build_prompt_optimizer_settings_response(optimizer_raw),
+        r2_backup=build_r2_backup_settings_response(get_r2_backup_settings()),
     )
 
 
@@ -327,6 +344,27 @@ def build_prompt_optimizer_settings_response(raw: dict | None) -> PromptOptimize
             config.PROMPT_OPTIMIZER_TIMEOUT_SECONDS,
         ),
         **key_fields,
+    )
+
+
+def build_r2_backup_settings_response(raw: dict | None) -> R2BackupSettingsResponse:
+    settings = storage.load_r2_backup_settings() if raw is None else raw
+    access_key_fields = secret_response_fields(
+        str(settings.get("access_key_id") or ""),
+        "access_key_id",
+    )
+    secret_key_fields = secret_response_fields(
+        str(settings.get("secret_access_key") or ""),
+        "secret_access_key",
+    )
+    return R2BackupSettingsResponse(
+        enabled=bool(settings.get("enabled", False)),
+        endpoint_url=str(settings.get("endpoint_url") or "").strip(),
+        bucket_name=str(settings.get("bucket_name") or "").strip(),
+        region=str(settings.get("region") or "auto").strip() or "auto",
+        key_prefix=str(settings.get("key_prefix") or "").strip(),
+        **access_key_fields,
+        **secret_key_fields,
     )
 
 
@@ -359,6 +397,10 @@ def get_prompt_optimizer_settings() -> dict:
     return storage.load_prompt_optimizer_settings()
 
 
+def get_r2_backup_settings() -> dict:
+    return storage.load_r2_backup_settings()
+
+
 def apply_prompt_optimizer_settings(
     current: dict | None, req_optimizer: object
 ) -> dict:
@@ -382,4 +424,32 @@ def apply_prompt_optimizer_settings(
             current["api_key"] = key
         elif key == "":
             current["api_key"] = ""
+    return current
+
+
+def apply_r2_backup_settings(current: dict | None, req_r2: object) -> dict:
+    current = storage.load_r2_backup_settings() if current is None else dict(current)
+    if req_r2 is None:
+        return current
+    if hasattr(req_r2, "enabled") and req_r2.enabled is not None:
+        current["enabled"] = bool(req_r2.enabled)
+    if hasattr(req_r2, "endpoint_url") and req_r2.endpoint_url is not None:
+        current["endpoint_url"] = req_r2.endpoint_url.strip()
+    if hasattr(req_r2, "bucket_name") and req_r2.bucket_name is not None:
+        current["bucket_name"] = req_r2.bucket_name.strip()
+    if hasattr(req_r2, "region") and req_r2.region is not None:
+        current["region"] = req_r2.region.strip() or "auto"
+    if hasattr(req_r2, "key_prefix") and req_r2.key_prefix is not None:
+        current["key_prefix"] = req_r2.key_prefix.strip()
+    for field in ("access_key_id", "secret_access_key"):
+        if not hasattr(req_r2, field):
+            continue
+        value = getattr(req_r2, field)
+        if value is None:
+            continue
+        key = value.strip()
+        if key and key != MASKED_API_KEY_VALUE:
+            current[field] = key
+        elif key == "":
+            current[field] = ""
     return current

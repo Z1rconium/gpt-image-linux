@@ -18,7 +18,9 @@ from ..core.constants import ACTIVE_GENERATE_JOB_STATUSES
 from ..core.observability import observe_job_stage
 from ..core.utils import utc_now
 from ..core.validators import (
+    get_env_var_ref_name,
     normalize_secret_env_ref_or_plaintext,
+    normalize_r2_endpoint_url,
     normalize_socks5_proxy_url,
     normalize_webhook_url,
 )
@@ -92,6 +94,7 @@ __all__ = [
     "iter_gallery_export_rows",
     "list_generate_jobs",
     "load_prompt_optimizer_settings",
+    "load_r2_backup_settings",
     "load_settings",
     "list_prompt_snippets",
     "mark_active_generate_jobs_interrupted",
@@ -100,6 +103,7 @@ __all__ = [
     "safe_image_path",
     "safe_thumbnail_path",
     "save_prompt_optimizer_settings",
+    "save_r2_backup_settings",
     "save_settings",
     "invalidate_thumbnail_cache",
     "sync_gallery_with_image_files",
@@ -197,6 +201,7 @@ SETTINGS_ACTIVE_PRESET_KEY = "active_preset_id"
 UPSTREAM_SOCKS5_PROXY_KEY = "upstream_socks5_proxy"
 WEBHOOK_URL_KEY = "webhook_url"
 PROMPT_OPTIMIZER_SETTINGS_KEY = "prompt_optimizer_settings"
+R2_BACKUP_SETTINGS_KEY = "r2_backup_settings"
 SQLITE_TIMEOUT_SECONDS = 30.0
 DATA_DIR_MODE = 0o700
 DATA_FILE_MODE = 0o600
@@ -256,6 +261,20 @@ def _normalize_stored_webhook_url(value: str | None) -> str:
         value,
         field_name="Webhook URL",
         normalizer=normalize_webhook_url,
+    )
+
+
+def _normalize_stored_r2_access_key_id(value: str | None) -> str:
+    return normalize_secret_env_ref_or_plaintext(
+        value,
+        field_name="R2 access key ID",
+    )
+
+
+def _normalize_stored_r2_secret_access_key(value: str | None) -> str:
+    return normalize_secret_env_ref_or_plaintext(
+        value,
+        field_name="R2 secret access key",
     )
 
 
@@ -330,6 +349,7 @@ def _default_settings() -> dict:
             }
         ],
         "prompt_optimizer": _default_prompt_optimizer_settings(),
+        "r2_backup": _default_r2_backup_settings(),
     }
 
 
@@ -348,6 +368,42 @@ def _default_prompt_optimizer_settings() -> dict:
         "api_key": _normalize_stored_api_key(config.PROMPT_OPTIMIZER_API_KEY),
         "model": config.PROMPT_OPTIMIZER_MODEL,
         "timeout_seconds": config.PROMPT_OPTIMIZER_TIMEOUT_SECONDS,
+    }
+
+
+def _default_r2_secret_ref(env_var: str, value: str) -> str:
+    normalized = str(value or "").strip()
+    if not normalized:
+        return ""
+    env_ref = get_env_var_ref_name(normalized)
+    if env_ref:
+        return f"${{{env_ref}}}"
+    return f"${{{env_var}}}"
+
+
+def _normalize_r2_key_prefix(value: Any, default: str = "gallery/") -> str:
+    raw = str(value if value is not None else default).strip()
+    if not raw:
+        return ""
+    parts = [part for part in raw.strip("/").split("/") if part]
+    return f"{'/'.join(parts)}/" if parts else ""
+
+
+def _default_r2_backup_settings() -> dict:
+    return {
+        "enabled": False,
+        "endpoint_url": normalize_r2_endpoint_url(config.R2_ENDPOINT_URL),
+        "bucket_name": config.R2_BUCKET_NAME,
+        "region": config.R2_REGION or "auto",
+        "key_prefix": _normalize_r2_key_prefix(config.R2_KEY_PREFIX),
+        "access_key_id": _default_r2_secret_ref(
+            "R2_ACCESS_KEY_ID",
+            config.R2_ACCESS_KEY_ID,
+        ),
+        "secret_access_key": _default_r2_secret_ref(
+            "R2_SECRET_ACCESS_KEY",
+            config.R2_SECRET_ACCESS_KEY,
+        ),
     }
 
 
@@ -372,6 +428,31 @@ def _normalize_prompt_optimizer_settings(settings: dict | None) -> dict:
         "timeout_seconds": _coerce_positive_int(
             settings.get("timeout_seconds"),
             default["timeout_seconds"],
+        ),
+    }
+
+
+def _normalize_r2_backup_settings(settings: dict | None) -> dict:
+    default = _default_r2_backup_settings()
+    if not isinstance(settings, dict):
+        return default
+    return {
+        "enabled": _coerce_bool(settings.get("enabled"), default["enabled"]),
+        "endpoint_url": normalize_r2_endpoint_url(
+            settings.get("endpoint_url") or ""
+        ),
+        "bucket_name": str(settings.get("bucket_name") or "").strip(),
+        "region": str(settings.get("region") or default["region"]).strip()
+        or default["region"],
+        "key_prefix": _normalize_r2_key_prefix(
+            settings.get("key_prefix"),
+            default["key_prefix"],
+        ),
+        "access_key_id": _normalize_stored_r2_access_key_id(
+            settings.get("access_key_id")
+        ),
+        "secret_access_key": _normalize_stored_r2_secret_access_key(
+            settings.get("secret_access_key")
         ),
     }
 
@@ -820,12 +901,18 @@ def _normalize_settings(settings: dict | None) -> dict:
         if settings.get("webhook_url") is not None
         else ""
     )
+    r2_backup = (
+        _normalize_r2_backup_settings(settings.get("r2_backup"))
+        if "r2_backup" in settings
+        else _default_r2_backup_settings()
+    )
 
     raw_presets = settings.get("presets")
     if not isinstance(raw_presets, list):
         default_settings = _default_settings()
         default_settings["upstream_socks5_proxy"] = upstream_socks5_proxy
         default_settings["webhook_url"] = webhook_url
+        default_settings["r2_backup"] = r2_backup
         return default_settings
 
     presets: list[dict] = []
@@ -848,6 +935,7 @@ def _normalize_settings(settings: dict | None) -> dict:
         default_settings = _default_settings()
         default_settings["upstream_socks5_proxy"] = upstream_socks5_proxy
         default_settings["webhook_url"] = webhook_url
+        default_settings["r2_backup"] = r2_backup
         return default_settings
 
     active_preset_id = str(settings.get("active_preset_id") or presets[0]["id"])
@@ -864,6 +952,7 @@ def _normalize_settings(settings: dict | None) -> dict:
             if "prompt_optimizer" in settings
             else None
         ),
+        "r2_backup": r2_backup,
     }
 
 
@@ -921,6 +1010,9 @@ def _replace_settings_on_conn(conn: sqlite3.Connection, settings: dict):
     optimizer = normalized.get("prompt_optimizer")
     if optimizer is not None:
         _set_setting_value(conn, PROMPT_OPTIMIZER_SETTINGS_KEY, json.dumps(optimizer))
+    r2_backup = normalized.get("r2_backup")
+    if r2_backup is not None:
+        _set_setting_value(conn, R2_BACKUP_SETTINGS_KEY, json.dumps(r2_backup))
 
 
 def _load_settings_from_conn(conn: sqlite3.Connection) -> dict | None:
@@ -964,6 +1056,15 @@ def _load_settings_from_conn(conn: sqlite3.Connection) -> dict | None:
     else:
         optimizer = _default_prompt_optimizer_settings()
 
+    r2_backup_json = _get_setting_value(conn, R2_BACKUP_SETTINGS_KEY)
+    if r2_backup_json:
+        try:
+            r2_backup = _normalize_r2_backup_settings(json.loads(r2_backup_json))
+        except (json.JSONDecodeError, TypeError):
+            r2_backup = _default_r2_backup_settings()
+    else:
+        r2_backup = _default_r2_backup_settings()
+
     return _normalize_settings(
         {
             "active_preset_id": active_preset_id,
@@ -971,6 +1072,7 @@ def _load_settings_from_conn(conn: sqlite3.Connection) -> dict | None:
             "webhook_url": webhook_url,
             "presets": presets,
             "prompt_optimizer": optimizer,
+            "r2_backup": r2_backup,
         }
     )
 
@@ -1330,6 +1432,27 @@ def save_prompt_optimizer_settings(settings: dict):
     normalized = _normalize_prompt_optimizer_settings(settings)
     with _connect() as conn:
         _set_setting_value(conn, PROMPT_OPTIMIZER_SETTINGS_KEY, json.dumps(normalized))
+        conn.commit()
+    _secure_data_storage_permissions()
+
+
+def load_r2_backup_settings() -> dict:
+    _ensure_database()
+    with _connect() as conn:
+        raw = _get_setting_value(conn, R2_BACKUP_SETTINGS_KEY)
+        if raw:
+            try:
+                return _normalize_r2_backup_settings(json.loads(raw))
+            except (json.JSONDecodeError, TypeError):
+                return _default_r2_backup_settings()
+        return _default_r2_backup_settings()
+
+
+def save_r2_backup_settings(settings: dict):
+    _ensure_database()
+    normalized = _normalize_r2_backup_settings(settings)
+    with _connect() as conn:
+        _set_setting_value(conn, R2_BACKUP_SETTINGS_KEY, json.dumps(normalized))
         conn.commit()
     _secure_data_storage_permissions()
 

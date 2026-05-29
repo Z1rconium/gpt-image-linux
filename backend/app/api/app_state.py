@@ -112,6 +112,10 @@ async def lifespan(app: FastAPI):
     app.state.gallery_export_subscribers = {}
     app.state.gallery_export_lock = asyncio.Lock()
     app.state.gallery_export_direct_downloads = 0
+    app.state.gallery_sync_jobs = {}
+    app.state.gallery_sync_tasks = {}
+    app.state.gallery_sync_subscribers = {}
+    app.state.gallery_sync_lock = asyncio.Lock()
     from .routers.gallery import gc_gallery_export_jobs
     app.state.gallery_export_gc_task = asyncio.create_task(gc_gallery_export_jobs())
     app.state.pending_edit_source_bytes = 0
@@ -131,11 +135,25 @@ async def lifespan(app: FastAPI):
             gc_task.cancel()
         tasks = list(jobs.get_generate_job_tasks().values())
         gallery_export_tasks = list(getattr(app.state, "gallery_export_tasks", {}).values())
+        gallery_sync_tasks = list(getattr(app.state, "gallery_sync_tasks", {}).values())
         for task in gallery_export_tasks:
+            task.cancel()
+        for task in gallery_sync_tasks:
             task.cancel()
         for task in tasks:
             task.cancel()
-        awaitables = [task for task in (backfill_task, broadcast_task, gc_task, *tasks, *gallery_export_tasks) if task]
+        awaitables = [
+            task
+            for task in (
+                backfill_task,
+                broadcast_task,
+                gc_task,
+                *tasks,
+                *gallery_export_tasks,
+                *gallery_sync_tasks,
+            )
+            if task
+        ]
         if awaitables:
             await asyncio.gather(*awaitables, return_exceptions=True)
         for job in getattr(app.state, "gallery_export_jobs", {}).values():
