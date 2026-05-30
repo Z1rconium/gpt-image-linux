@@ -458,6 +458,50 @@ def _normalize_r2_backup_settings(settings: dict | None) -> dict:
     }
 
 
+def _has_r2_backup_storage_values(settings: dict | None) -> bool:
+    if not isinstance(settings, dict):
+        return False
+    if _coerce_bool(settings.get("enabled"), False):
+        return True
+    return any(
+        str(settings.get(key) or "").strip()
+        for key in (
+            "endpoint_url",
+            "bucket_name",
+            "access_key_id",
+            "secret_access_key",
+        )
+    )
+
+
+def _store_r2_backup_settings_on_conn(conn: sqlite3.Connection, settings: dict):
+    _set_setting_value(conn, R2_BACKUP_SETTINGS_KEY, json.dumps(settings))
+    conn.commit()
+    _secure_data_storage_permissions()
+
+
+def _load_r2_backup_settings_from_conn(conn: sqlite3.Connection) -> dict:
+    raw = _get_setting_value(conn, R2_BACKUP_SETTINGS_KEY)
+    if raw:
+        try:
+            parsed = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return _default_r2_backup_settings()
+
+        settings = _normalize_r2_backup_settings(parsed)
+        if (
+            not _has_r2_backup_storage_values(parsed)
+            and _has_r2_backup_storage_values(settings)
+        ):
+            _store_r2_backup_settings_on_conn(conn, settings)
+        return settings
+
+    settings = _default_r2_backup_settings()
+    if _has_r2_backup_storage_values(settings):
+        _store_r2_backup_settings_on_conn(conn, settings)
+    return settings
+
+
 def _ensure_directories():
     global _dirs_initialized
     if _dirs_initialized:
@@ -1057,14 +1101,7 @@ def _load_settings_from_conn(conn: sqlite3.Connection) -> dict | None:
     else:
         optimizer = _default_prompt_optimizer_settings()
 
-    r2_backup_json = _get_setting_value(conn, R2_BACKUP_SETTINGS_KEY)
-    if r2_backup_json:
-        try:
-            r2_backup = _normalize_r2_backup_settings(json.loads(r2_backup_json))
-        except (json.JSONDecodeError, TypeError):
-            r2_backup = _default_r2_backup_settings()
-    else:
-        r2_backup = _default_r2_backup_settings()
+    r2_backup = _load_r2_backup_settings_from_conn(conn)
 
     return _normalize_settings(
         {
@@ -1440,13 +1477,7 @@ def save_prompt_optimizer_settings(settings: dict):
 def load_r2_backup_settings() -> dict:
     _ensure_database()
     with _connect() as conn:
-        raw = _get_setting_value(conn, R2_BACKUP_SETTINGS_KEY)
-        if raw:
-            try:
-                return _normalize_r2_backup_settings(json.loads(raw))
-            except (json.JSONDecodeError, TypeError):
-                return _default_r2_backup_settings()
-        return _default_r2_backup_settings()
+        return _load_r2_backup_settings_from_conn(conn)
 
 
 def save_r2_backup_settings(settings: dict):

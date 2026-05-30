@@ -1412,6 +1412,77 @@ def test_r2_env_defaults_fill_empty_persisted_settings(tmp_path, monkeypatch):
     assert settings["access_key_id"] == "${R2_ACCESS_KEY_ID}"
     assert settings["secret_access_key"] == "${R2_SECRET_ACCESS_KEY}"
 
+    with storage._connect() as conn:
+        raw = storage._get_setting_value(conn, storage.R2_BACKUP_SETTINGS_KEY)
+    assert raw
+    persisted = json.loads(raw)
+    assert persisted["enabled"] is True
+    assert persisted["endpoint_url"] == "https://account.r2.cloudflarestorage.com"
+    assert persisted["bucket_name"] == "env-image-backups"
+    assert persisted["access_key_id"] == "${R2_ACCESS_KEY_ID}"
+    assert persisted["secret_access_key"] == "${R2_SECRET_ACCESS_KEY}"
+
+
+def test_missing_r2_settings_key_persists_env_defaults_to_sqlite(tmp_path, monkeypatch):
+    _configure_runtime(tmp_path)
+    storage.save_settings(
+        {
+            "active_preset_id": "default",
+            "upstream_socks5_proxy": "",
+            "webhook_url": "",
+            "presets": [
+                {
+                    "id": "default",
+                    "name": "Default",
+                    "api_url": "https://api.example.com",
+                    "api_key": "${TEST_DEFAULT_API_KEY}",
+                    "api_path": "/v1/images/generations",
+                    "default_model": "gpt-image-2",
+                    "default_response_format": "url",
+                }
+            ],
+            "prompt_optimizer": {
+                "enabled": False,
+                "api_url": "",
+                "api_key": "",
+                "model": "gpt-4o-mini",
+                "timeout_seconds": 60,
+            },
+        }
+    )
+    with storage._connect() as conn:
+        conn.execute(
+            "DELETE FROM settings_kv WHERE key = ?",
+            (storage.R2_BACKUP_SETTINGS_KEY,),
+        )
+        conn.commit()
+
+    monkeypatch.setenv("R2_ACCESS_KEY_ID", "env-r2-access")
+    monkeypatch.setenv("R2_SECRET_ACCESS_KEY", "env-r2-secret")
+    config.R2_BACKUP_ENABLED = True
+    config.R2_ENDPOINT_URL = "https://account.r2.cloudflarestorage.com"
+    config.R2_BUCKET_NAME = "env-image-backups"
+    config.R2_REGION = "auto"
+    config.R2_KEY_PREFIX = "gallery-env/"
+    config.R2_ACCESS_KEY_ID = "env-r2-access"
+    config.R2_SECRET_ACCESS_KEY = "env-r2-secret"
+
+    settings = storage.load_settings()
+    assert settings["r2_backup"]["enabled"] is True
+    assert settings["r2_backup"]["bucket_name"] == "env-image-backups"
+    assert settings["r2_backup"]["access_key_id"] == "${R2_ACCESS_KEY_ID}"
+    assert settings["r2_backup"]["secret_access_key"] == "${R2_SECRET_ACCESS_KEY}"
+
+    with storage._connect() as conn:
+        raw = storage._get_setting_value(conn, storage.R2_BACKUP_SETTINGS_KEY)
+    assert raw
+    persisted = json.loads(raw)
+    assert persisted["enabled"] is True
+    assert persisted["bucket_name"] == "env-image-backups"
+    assert persisted["key_prefix"] == "gallery-env/"
+    assert persisted["access_key_id"] == "${R2_ACCESS_KEY_ID}"
+    assert persisted["secret_access_key"] == "${R2_SECRET_ACCESS_KEY}"
+
 
 def test_r2_health_uses_draft_settings_and_preserves_masked_credentials(client, monkeypatch):
     settings = client.get("/api/settings").json()

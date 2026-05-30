@@ -334,7 +334,7 @@ The panel supports these upstream paths. The API base URL may either omit or inc
 ## R2 gallery backup sync
 
 - R2 Backup is an incremental backup path, not remote gallery storage.
-- Configure it in `.env` with `R2_BACKUP_ENABLED=true` plus the other `R2_*` variables, or in Web Settings. Web Settings accepts `${ENV_VAR_NAME}` refs for credentials; literal stored credentials require `ALLOW_PLAINTEXT_SECRETS=true`.
+- Configure it in `.env` with `R2_BACKUP_ENABLED=true` plus the other `R2_*` variables, or in Web Settings. When SQLite has no saved R2 settings yet, startup persists the current `.env` R2 values so they appear in Web Settings. Later Web Settings saves take precedence. Web Settings accepts `${ENV_VAR_NAME}` refs for credentials; literal stored credentials require `ALLOW_PLAINTEXT_SECRETS=true`.
 - Test R2 in Settings runs `HeadBucket`, a prefix-scoped `ListObjectsV2`, and a small probe object write; probe cleanup failure is reported as a warning.
 - The Gallery Sync button uploads only local gallery filenames missing from `R2_KEY_PREFIX`; existing bucket objects are skipped, and bucket-only objects are never deleted or overwritten.
 
@@ -370,7 +370,7 @@ The panel supports these upstream paths. The API base URL may either omit or inc
 | `DEFAULT_API_PATH` | `/v1/images/generations` | Default upstream path; supported values are `/v1/images/generations`, `/v1/responses`, and `/v1/chat/completions` |
 | `DEFAULT_RESPONSES_MODEL` | `gpt-5.4` | Fallback top-level model used for `/v1/responses` when no request/preset model is provided |
 | `DEFAULT_UPSTREAM_SOCKS5_PROXY` | empty | Optional default global SOCKS5 proxy or env ref for generation/edit upstream API calls |
-| `ALLOW_PLAINTEXT_SECRETS` | `false` | Allow literal API keys / SOCKS5 proxy URLs / Webhook URLs to be persisted in SQLite instead of requiring `${ENV_VAR_NAME}` refs |
+| `ALLOW_PLAINTEXT_SECRETS` | `false` | Allow literal API keys / SOCKS5 proxy URLs / Webhook URLs / R2 credentials to be persisted in SQLite instead of requiring `${ENV_VAR_NAME}` refs |
 | `PROMPT_OPTIMIZER_ENABLED` | `false` | Enable the server-side prompt optimizer |
 | `PROMPT_OPTIMIZER_API_URL` | empty | Full Chat Completions-compatible endpoint URL used by the prompt optimizer |
 | `PROMPT_OPTIMIZER_API_KEY` | empty | Prompt optimizer API key; use an env ref such as `${OPENAI_API_KEY}` by default. Literal keys require `ALLOW_PLAINTEXT_SECRETS=true` |
@@ -395,11 +395,18 @@ The panel supports these upstream paths. The API base URL may either omit or inc
 | `SLOW_GALLERY_QUERY_MS` | `200` | Log `/api/gallery` requests at or above this threshold with prompt presence/length/hash, other filters, page, total, and DB query time |
 | `ACCESS_KEY` | empty | Required by default; all non-health routes require unlock when set |
 | `ALLOW_UNAUTHENTICATED` | `false` | Set `true` to explicitly allow startup without `ACCESS_KEY` |
+| `ACCESS_KEY_COOKIE_NAME` | `gpt_image_access` | Browser cookie name used for the access-key session |
+| `ACCESS_COOKIE_SECURE` | `true` | Mark the access cookie Secure; set `false` only for plain-HTTP local/private deployments |
+| `ACCESS_MAX_FAILURES` | `5` | Failed access-key attempts before temporary lockout |
+| `ACCESS_LOCKOUT_SECONDS` | `300` | Lockout duration after too many failed access attempts |
 | `IP_ALLOWLIST` | empty | Comma-separated allowed IPs/CIDRs |
 | `TRUST_PROXY_HEADERS` | `false` | Read `X-Forwarded-For`, `X-Real-IP`, `X-Forwarded-Proto`, or `X-Forwarded-Host` from a trusted reverse proxy |
+| `TRUSTED_PROXY_IPS` | empty | Optional comma-separated proxy IPs/CIDRs allowed to provide trusted proxy headers |
 | `PUBLIC_ORIGIN` | empty | Optional canonical browser origin such as `https://panel.example.com`; also contributes to the Host allowlist and CSRF expected origin |
 | `ALLOWED_HOSTS` | empty | Optional comma-separated allowed Host / trusted `X-Forwarded-Host` values; accepts hostnames, `host:port`, or origins |
 | `CSRF_ORIGIN_CHECK_ENABLED` | `true` | Reject cross-origin `POST`, `PATCH`, and `DELETE` requests using `Origin` or `Referer` checks |
+| `UPSTREAM_HOST_ALLOWLIST` | empty | Optional comma-separated hostname allowlist for generation/edit upstream API URLs |
+| `WEBHOOK_HOST_ALLOWLIST` | empty | Optional comma-separated webhook hostname allowlist |
 | `MAX_FILE_SIZE_MB` | `50` | Max uploaded image size in MB for edit source images, imported image files, and downloaded upstream image URLs |
 | `MAX_JSON_BODY_MB` | `1` | Max JSON request body size in MB for non-upload API calls |
 | `MAX_UPSTREAM_JSON_MB` | `128` | Max upstream JSON/SSE response body size in MB before parsing; prefer `response_format=url` for large or multi-image results |
@@ -412,6 +419,9 @@ The panel supports these upstream paths. The API base URL may either omit or inc
 | `MAX_ACTIVE_GENERATE_JOBS` | `2` | Max number of generation and edit jobs running concurrently |
 | `MAX_QUEUED_GENERATE_JOBS` | `20` | Max additional queued generation and edit jobs before new requests are rejected with `429` |
 | `MAX_PENDING_EDIT_SOURCE_MB` | `200` | Max total pending edit source image bytes in MB; set `0` to disable this byte cap |
+| `MAX_SSE_SUBSCRIBERS_GLOBAL` | `200` | Max active SSE subscribers across the process |
+| `MAX_SSE_SUBSCRIBERS_PER_IP` | `10` | Max active SSE subscribers per client IP |
+| `SSE_CONNECTION_TTL_SECONDS` | `3600` | Maximum lifetime for one SSE connection |
 | `IMAGES_DIR` | `./images` | Directory for saved images |
 | `THUMBNAILS_DIR` | `./images/thumbs` | Directory for generated gallery thumbnails |
 | `THUMBNAIL_MAX_SIDE` | `512` | Max thumbnail width/height in pixels |
@@ -420,7 +430,6 @@ The panel supports these upstream paths. The API base URL may either omit or inc
 | `PYTHON_BASE_IMAGE` | `python:3.11-slim` | Docker build base image; override when Docker Hub is slow or blocked |
 | `NODE_BASE_IMAGE` | `node:24-alpine` | Docker frontend build base image; override when Docker Hub is slow or blocked |
 | `WEBHOOK_SIGNING_SECRET` | empty | Required when a global Webhook URL is configured; used to sign webhook payloads (`X-Webhook-Signature`) |
-| `WEBHOOK_HOST_ALLOWLIST` | empty | Optional comma-separated webhook hostname allowlist |
 | `WEBHOOK_TIMEOUT_SECONDS` | `5` | Webhook delivery timeout per attempt (seconds) |
 | `WEBHOOK_MAX_ATTEMPTS` | `3` | Max webhook delivery retry attempts |
 
@@ -866,7 +875,7 @@ curl http://localhost:9090/health
 ## R2 Gallery 备份同步
 
 - R2 Backup 是增量备份路径，不是远端 Gallery 存储。
-- 可以用 `.env` 的 `R2_BACKUP_ENABLED=true` 加其他 `R2_*` 变量配置，也可以在 Web Settings 中保存配置。Web Settings 的凭据字段支持 `${ENV_VAR_NAME}` 引用；直接保存明文凭据需要 `ALLOW_PLAINTEXT_SECRETS=true`。
+- 可以用 `.env` 的 `R2_BACKUP_ENABLED=true` 加其他 `R2_*` 变量配置，也可以在 Web Settings 中保存配置。当 SQLite 里还没有保存过 R2 settings 时，启动会把当前 `.env` R2 值持久化进去，所以 Web Settings 会直接显示这些值；之后 Web Settings 保存的值优先。Web Settings 的凭据字段支持 `${ENV_VAR_NAME}` 引用；直接保存明文凭据需要 `ALLOW_PLAINTEXT_SECRETS=true`。
 - Settings 里的测试 R2 会执行 `HeadBucket`、带 prefix 的 `ListObjectsV2`，并写入一个很小的 probe object；probe 清理失败会作为 warning 返回。
 - Gallery 的同步按钮只上传 `R2_KEY_PREFIX` 下缺失的本地 Gallery filename；已存在对象会跳过，bucket 中额外对象不会删除或覆盖。
 
@@ -926,11 +935,18 @@ curl http://localhost:9090/health
 | `SLOW_GALLERY_QUERY_MS` | `200` | `/api/gallery` 达到该阈值时记录筛选条件、页码、total 和 DB 查询耗时 |
 | `ACCESS_KEY` | 空 | 默认要求设置；设置后每个非健康路由均需解锁 |
 | `ALLOW_UNAUTHENTICATED` | `false` | 设置为 `true` 可显式允许在未设置 `ACCESS_KEY` 时启动 |
+| `ACCESS_KEY_COOKIE_NAME` | `gpt_image_access` | 访问会话使用的浏览器 cookie 名称 |
+| `ACCESS_COOKIE_SECURE` | `true` | 给访问 cookie 添加 Secure；仅在纯 HTTP 本地/内网部署时设为 `false` |
+| `ACCESS_MAX_FAILURES` | `5` | 触发临时锁定前允许的访问密钥失败次数 |
+| `ACCESS_LOCKOUT_SECONDS` | `300` | 失败次数过多后的锁定时长（秒） |
 | `IP_ALLOWLIST` | 空 | 允许访问的 IP/CIDR，逗号分隔 |
 | `TRUST_PROXY_HEADERS` | `false` | 是否读取受信任反向代理的 `X-Forwarded-For`、`X-Real-IP`、`X-Forwarded-Proto` 或 `X-Forwarded-Host` |
+| `TRUSTED_PROXY_IPS` | 空 | 允许提供可信代理头的代理 IP/CIDR，逗号分隔 |
 | `PUBLIC_ORIGIN` | 空 | 可选的浏览器侧规范 origin，例如 `https://panel.example.com`；同时加入 Host 白名单并作为 CSRF expected origin |
 | `ALLOWED_HOSTS` | 空 | 可选的 Host / 受信任 `X-Forwarded-Host` 白名单，逗号分隔；支持 hostname、`host:port` 或 origin |
 | `CSRF_ORIGIN_CHECK_ENABLED` | `true` | 是否通过 `Origin` 或 `Referer` 拒绝跨站 `POST`、`PATCH`、`DELETE` 请求 |
+| `UPSTREAM_HOST_ALLOWLIST` | 空 | 生成/编辑上游 API URL 的可选主机名白名单，逗号分隔 |
+| `WEBHOOK_HOST_ALLOWLIST` | 空 | 可选 webhook 主机名白名单，逗号分隔 |
 | `MAX_FILE_SIZE_MB` | `50` | 上传为编辑源图的图片、导入图片文件和上游图片 URL 下载的最大体积（MB） |
 | `MAX_JSON_BODY_MB` | `1` | 非上传 API 调用的最大 JSON 请求体积（MB） |
 | `MAX_UPSTREAM_JSON_MB` | `128` | 解析前允许的最大上游 JSON/SSE 响应体积（MB）；大图或多图建议使用 `response_format=url` |
@@ -943,16 +959,18 @@ curl http://localhost:9090/health
 | `MAX_ACTIVE_GENERATE_JOBS` | `2` | 生成和编辑任务允许同时运行的最大数量 |
 | `MAX_QUEUED_GENERATE_JOBS` | `20` | 超出并发后允许继续排队的最大任务数；超过后新请求返回 `429` |
 | `MAX_PENDING_EDIT_SOURCE_MB` | `200` | 待处理编辑源图的总字节上限（MB）；设为 `0` 可关闭该字节上限 |
+| `MAX_SSE_SUBSCRIBERS_GLOBAL` | `200` | 全进程允许的最大活跃 SSE 订阅数 |
+| `MAX_SSE_SUBSCRIBERS_PER_IP` | `10` | 单个客户端 IP 允许的最大活跃 SSE 订阅数 |
+| `SSE_CONNECTION_TTL_SECONDS` | `3600` | 单条 SSE 连接的最长生命周期（秒） |
 | `IMAGES_DIR` | `./images` | 图片存储目录 |
 | `THUMBNAILS_DIR` | `./images/thumbs` | Gallery 缩略图生成目录 |
 | `THUMBNAIL_MAX_SIDE` | `512` | 缩略图最大宽/高像素 |
-| `ALLOW_PLAINTEXT_SECRETS` | `false` | 是否允许把 API Key / SOCKS5 代理 URL / Webhook URL 明文持久化到 SQLite；默认要求 `${ENV_VAR_NAME}` 引用 |
+| `ALLOW_PLAINTEXT_SECRETS` | `false` | 是否允许把 API Key / SOCKS5 代理 URL / Webhook URL / R2 凭据明文持久化到 SQLite；默认要求 `${ENV_VAR_NAME}` 引用 |
 | `DATA_DIR` | `./data` | SQLite 运行时数据目录；启动时会收紧到 `0700` |
 | `DATABASE_FILE` | `./data/app.sqlite3` | 保存 Gallery 元数据和 API 预设的 SQLite 数据库；启动时会收紧到 `0600` |
 | `PYTHON_BASE_IMAGE` | `python:3.11-slim` | Docker 构建基础镜像；Docker Hub 慢或不可访问时可覆盖 |
 | `NODE_BASE_IMAGE` | `node:24-alpine` | Docker 前端构建基础镜像；Docker Hub 慢或不可访问时可覆盖 |
 | `WEBHOOK_SIGNING_SECRET` | 空 | 配置全局 Webhook URL 时需要；用于签名 webhook payload（`X-Webhook-Signature`） |
-| `WEBHOOK_HOST_ALLOWLIST` | 空 | 可选 webhook 主机名白名单，逗号分隔 |
 | `WEBHOOK_TIMEOUT_SECONDS` | `5` | 单次 webhook 投递超时时间（秒） |
 | `WEBHOOK_MAX_ATTEMPTS` | `3` | webhook 最大重试次数 |
 
