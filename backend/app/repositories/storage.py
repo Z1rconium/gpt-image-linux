@@ -94,6 +94,7 @@ __all__ = [
     "iter_gallery_export_rows",
     "list_generate_jobs",
     "load_prompt_optimizer_settings",
+    "list_overall_config_values",
     "load_r2_backup_settings",
     "load_settings",
     "list_prompt_snippets",
@@ -103,8 +104,10 @@ __all__ = [
     "safe_image_path",
     "safe_thumbnail_path",
     "save_prompt_optimizer_settings",
+    "save_overall_config_overrides",
     "save_r2_backup_settings",
     "save_settings",
+    "sync_overall_config_env_values",
     "invalidate_thumbnail_cache",
     "sync_gallery_with_image_files",
     "trim_generate_jobs",
@@ -758,6 +761,15 @@ def _ensure_database():
                     updated_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS overall_config_values (
+                    name TEXT PRIMARY KEY,
+                    env_value TEXT NOT NULL DEFAULT '',
+                    override_value TEXT,
+                    is_env_set INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL,
+                    override_updated_at TEXT
+                );
+
                 """
             )
             _migrate_api_presets_schema(conn)
@@ -930,6 +942,96 @@ def _set_setting_value(conn: sqlite3.Connection, key: str, value: str):
         """,
         (key, value),
     )
+
+
+def _overall_config_rows(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT name, env_value, override_value, is_env_set, updated_at, override_updated_at
+        FROM overall_config_values
+        """
+    ).fetchall()
+    return {
+        row["name"]: {
+            "name": row["name"],
+            "env_value": row["env_value"],
+            "override_value": row["override_value"],
+            "is_env_set": bool(row["is_env_set"]),
+            "updated_at": row["updated_at"],
+            "override_updated_at": row["override_updated_at"],
+        }
+        for row in rows
+    }
+
+
+def sync_overall_config_env_values(env_values: dict[str, tuple[str, bool]]) -> dict[str, dict[str, Any]]:
+    _ensure_database()
+    now = utc_now()
+    with _connect() as conn:
+        with _transaction(conn):
+            for name, (env_value, is_env_set) in env_values.items():
+                conn.execute(
+                    """
+                    INSERT INTO overall_config_values (
+                        name,
+                        env_value,
+                        override_value,
+                        is_env_set,
+                        updated_at,
+                        override_updated_at
+                    )
+                    VALUES (?, ?, NULL, ?, ?, NULL)
+                    ON CONFLICT(name) DO UPDATE SET
+                        env_value = excluded.env_value,
+                        is_env_set = excluded.is_env_set,
+                        updated_at = excluded.updated_at
+                    """,
+                    (name, str(env_value or ""), 1 if is_env_set else 0, now),
+                )
+            rows = _overall_config_rows(conn)
+    _secure_data_storage_permissions()
+    return rows
+
+
+def list_overall_config_values() -> dict[str, dict[str, Any]]:
+    _ensure_database()
+    with _connect() as conn:
+        return _overall_config_rows(conn)
+
+
+def save_overall_config_overrides(
+    updates: dict[str, str | None],
+) -> dict[str, dict[str, Any]]:
+    _ensure_database()
+    now = utc_now()
+    with _connect() as conn:
+        with _transaction(conn):
+            for name, value in updates.items():
+                conn.execute(
+                    """
+                    INSERT INTO overall_config_values (
+                        name,
+                        env_value,
+                        override_value,
+                        is_env_set,
+                        updated_at,
+                        override_updated_at
+                    )
+                    VALUES (?, '', ?, 0, ?, ?)
+                    ON CONFLICT(name) DO UPDATE SET
+                        override_value = excluded.override_value,
+                        override_updated_at = excluded.override_updated_at
+                    """,
+                    (
+                        name,
+                        value,
+                        now,
+                        now if value is not None else None,
+                    ),
+                )
+            rows = _overall_config_rows(conn)
+    _secure_data_storage_permissions()
+    return rows
 
 
 def _normalize_settings(settings: dict | None) -> dict:

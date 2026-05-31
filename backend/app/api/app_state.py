@@ -8,6 +8,7 @@ from fastapi import FastAPI
 
 from ..core import security as auth
 from ..core import settings as config
+from ..core import overall_config
 from ..repositories import storage
 
 
@@ -58,6 +59,16 @@ def cleanup_stale_gallery_export_files():
 async def lifespan(app: FastAPI):
     from . import jobs, presets
 
+    Path(config.IMAGES_DIR).mkdir(parents=True, exist_ok=True)
+    Path(config.THUMBNAILS_DIR).mkdir(parents=True, exist_ok=True)
+    Path(config.DATA_DIR).mkdir(parents=True, exist_ok=True)
+    rows = storage.sync_overall_config_env_values(overall_config.current_env_snapshot())
+    overall_config.apply_rows_to_config(
+        rows,
+        include_restart_required=True,
+        overrides_only=True,
+    )
+
     if not config.ACCESS_KEY and not config.ALLOW_UNAUTHENTICATED:
         raise RuntimeError(
             "ACCESS_KEY is required. Set ACCESS_KEY, or set "
@@ -66,9 +77,6 @@ async def lifespan(app: FastAPI):
 
     auth.validate_proxy_config()
 
-    Path(config.IMAGES_DIR).mkdir(parents=True, exist_ok=True)
-    Path(config.THUMBNAILS_DIR).mkdir(parents=True, exist_ok=True)
-    Path(config.DATA_DIR).mkdir(parents=True, exist_ok=True)
     cleanup_stale_edit_source_files()
     cleanup_stale_gallery_export_files()
     storage.verify_storage_writable()

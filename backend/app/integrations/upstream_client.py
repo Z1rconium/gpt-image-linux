@@ -551,6 +551,8 @@ def classify_probe_status(method: str, status: int) -> tuple[str, str]:
         return "ok", f"{method} probe succeeded with HTTP {status}"
     if status in {401, 403}:
         return "ok", f"{method} probe reached the endpoint and got HTTP {status}"
+    if method == "OPTIONS" and status in {404, 410}:
+        return "warning", f"{method} probe returned HTTP {status}; upstream may only support POST"
     if status in {404, 410}:
         return "error", f"{method} probe returned HTTP {status}; check API URL/path"
     if status in {405, 501}:

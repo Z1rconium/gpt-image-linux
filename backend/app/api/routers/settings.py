@@ -24,6 +24,7 @@ from ..presets import (
     persist_api_settings,
 )
 from ...core import settings as config
+from ...core import overall_config
 from ...core import validators as ssrf
 from ...core.api_paths import (
     ALLOWED_API_PATHS,
@@ -34,7 +35,11 @@ from ...core.api_paths import (
 )
 from ...integrations import upstream_client as proxy
 from ...integrations import r2_sync
+from ...repositories import storage as storage_repo
 from ...schemas.models import (
+    OverallConfigItem,
+    OverallConfigResponse,
+    OverallConfigUpdateRequest,
     PresetCreateRequest,
     PresetHealthResponse,
     R2BackupSettingsRequest,
@@ -45,6 +50,125 @@ from ...schemas.models import (
 
 
 router = APIRouter()
+
+
+def _mask_overall_config_value(value: str, *, secret: bool) -> str:
+    if not secret:
+        return value
+    return overall_config.MASKED_OVERALL_SECRET_VALUE if value else ""
+
+
+def _serialize_overall_config(
+    rows: dict[str, dict],
+    *,
+    restart_required_names: list[str] | None = None,
+) -> OverallConfigResponse:
+    items: list[OverallConfigItem] = []
+    for spec in overall_config.OVERALL_CONFIG_REGISTRY:
+        if spec.exposed_in_settings:
+            continue
+        row = rows.get(spec.name, {})
+        raw_value, source = overall_config.effective_value(spec, row)
+        typed = overall_config.typed_value(spec, raw_value)
+        env_value = str(row.get("env_value") or "")
+        override_value = row.get("override_value")
+        items.append(
+            OverallConfigItem(
+                name=spec.name,
+                type=spec.type,
+                group=spec.group,
+                description=spec.description,
+                value=overall_config.MASKED_OVERALL_SECRET_VALUE if spec.secret and raw_value else typed,
+                value_masked=_mask_overall_config_value(raw_value, secret=spec.secret),
+                env_value_masked=_mask_overall_config_value(env_value, secret=spec.secret),
+                override_value_masked=(
+                    _mask_overall_config_value(str(override_value or ""), secret=spec.secret)
+                    if override_value is not None
+                    else None
+                ),
+                source=source,
+                is_env_set=bool(row.get("is_env_set")),
+                has_override=override_value is not None,
+                secret=spec.secret,
+                hot_reload=spec.hot_reload and not spec.restart_required and not spec.build_only,
+                restart_required=spec.restart_required,
+                build_only=spec.build_only,
+                updated_at=row.get("updated_at"),
+                override_updated_at=row.get("override_updated_at"),
+            )
+        )
+    return OverallConfigResponse(
+        items=items,
+        restart_required_names=restart_required_names or [],
+    )
+
+
+@router.get("/api/settings/overall-config", response_model=OverallConfigResponse)
+async def get_overall_config():
+    rows = await asyncio.to_thread(storage_repo.list_overall_config_values)
+    return _serialize_overall_config(rows)
+
+
+@router.put("/api/settings/overall-config", response_model=OverallConfigResponse)
+async def update_overall_config(req: OverallConfigUpdateRequest):
+    current_rows = await asyncio.to_thread(storage_repo.list_overall_config_values)
+    updates: dict[str, str | None] = {}
+    seen_names: set[str] = set()
+    for item in req.updates:
+        if item.name in seen_names:
+            raise HTTPException(status_code=422, detail=f"Duplicate config name: {item.name}")
+        seen_names.add(item.name)
+        spec = overall_config.OVERALL_CONFIG_BY_NAME.get(item.name)
+        if spec is None or spec.exposed_in_settings:
+            raise HTTPException(status_code=422, detail=f"Unknown config name: {item.name}")
+
+        if item.clear_override:
+            updates[item.name] = None
+            continue
+
+        value = item.value
+        if spec.secret and value == overall_config.MASKED_OVERALL_SECRET_VALUE:
+            continue
+        if value is None:
+            raise HTTPException(status_code=422, detail=f"value is required for {item.name}")
+        try:
+            updates[item.name] = overall_config.coerce_value(spec, str(value))
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=f"{item.name}: {e}") from e
+
+    projected_rows = {
+        name: dict(row)
+        for name, row in current_rows.items()
+    }
+    for name, value in updates.items():
+        row = projected_rows.setdefault(
+            name,
+            {
+                "name": name,
+                "env_value": "",
+                "override_value": None,
+                "is_env_set": False,
+                "updated_at": None,
+                "override_updated_at": None,
+            },
+        )
+        row["override_value"] = value
+    try:
+        overall_config.validate_effective_security(projected_rows)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+
+    rows = await asyncio.to_thread(storage_repo.save_overall_config_overrides, updates)
+    overall_config.apply_rows_to_config(rows)
+    restart_required_names = [
+        name
+        for name in updates
+        if (
+            overall_config.OVERALL_CONFIG_BY_NAME[name].restart_required
+            or overall_config.OVERALL_CONFIG_BY_NAME[name].build_only
+        )
+    ]
+    return _serialize_overall_config(rows, restart_required_names=restart_required_names)
 
 
 @router.post("/api/settings", response_model=SettingsResponse)
@@ -210,6 +334,13 @@ def health_status(checks: list[dict]) -> str:
     )
 
 
+def preset_health_status(checks: list[dict]) -> str:
+    blocking_checks = [check for check in checks if check["name"] != "upstream_probe"]
+    if not blocking_checks:
+        return "ok"
+    return health_status(blocking_checks)
+
+
 def validate_health_api_url(api_url: str, api_path: str, checks: list[dict]) -> bool:
     if not api_url:
         add_health_check(checks, "api_url", "error", "API URL is not configured")
@@ -338,4 +469,4 @@ async def check_settings_preset_health(preset_id: str):
             "Skipped upstream probe because local URL/path validation failed",
         )
 
-    return PresetHealthResponse(status=health_status(checks), checks=checks)
+    return PresetHealthResponse(status=preset_health_status(checks), checks=checks)

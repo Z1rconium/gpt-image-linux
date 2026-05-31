@@ -3,6 +3,8 @@ import { apiFetch } from '$lib/api/client';
 import { t } from '$lib/i18n';
 import { confirmStore } from '$lib/stores/confirm';
 import type {
+  OverallConfigResponse,
+  OverallConfigUpdateRequest,
   PresetHealthResponse,
   PromptOptimizerSystemPromptResponse,
   R2BackupSettingsInput,
@@ -173,6 +175,32 @@ function createSettingsStore() {
     return response;
   }
 
+  async function loadOverallConfig() {
+    return apiFetch<OverallConfigResponse>(
+      '/api/settings/overall-config',
+      {},
+      'loading overall config'
+    );
+  }
+
+  async function saveOverallConfig(body: OverallConfigUpdateRequest, showToast: ShowToast) {
+    const response = await apiFetch<OverallConfigResponse>(
+      '/api/settings/overall-config',
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      },
+      'saving overall config'
+    );
+    if (response.restart_required_names.length) {
+      showToast(get(t).messages.overallConfigRestartRequired(response.restart_required_names.length));
+    } else {
+      showToast(get(t).messages.overallConfigSaved);
+    }
+    return response;
+  }
+
   return {
     subscribe,
     loadSettings,
@@ -183,7 +211,9 @@ function createSettingsStore() {
     checkPresetHealth,
     checkR2Health,
     loadPromptOptimizerSystemPrompt,
-    savePromptOptimizerSystemPrompt
+    savePromptOptimizerSystemPrompt,
+    loadOverallConfig,
+    saveOverallConfig
   };
 }
 

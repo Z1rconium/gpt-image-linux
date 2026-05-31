@@ -25,7 +25,10 @@ from backend.app.core import settings as config
 from backend.app.integrations import r2_sync
 from backend.app.core.observability import metrics, record_job_stage_timing
 from backend.app.integrations import session_pool
-from backend.app.integrations.upstream_client import call_image_edit_api as ORIGINAL_CALL_IMAGE_EDIT_API
+from backend.app.integrations.upstream_client import (
+    call_image_edit_api as ORIGINAL_CALL_IMAGE_EDIT_API,
+    classify_probe_status,
+)
 from backend.app.repositories import storage
 from backend.app.schemas.models import EditRequest
 
@@ -54,6 +57,12 @@ def _configure_runtime(tmp_path: Path, *, access_key: str = "", allow_unauthenti
     os.environ["TEST_WEBHOOK_URL"] = "https://hooks.example.com/services/top-secret?token=hidden"
     os.environ["TEST_R2_ACCESS_KEY_ID"] = "r2-access-key"
     os.environ["TEST_R2_SECRET_ACCESS_KEY"] = "r2-secret-key"
+    os.environ["ALLOW_UNAUTHENTICATED"] = "true" if allow_unauthenticated else "false"
+    os.environ["ACCESS_KEY"] = access_key
+    os.environ["ENABLE_METRICS"] = "false"
+    os.environ["GITHUB_REPO"] = "Z1rconium/gpt-image-linux"
+    os.environ["TRUSTED_PROXY_IPS"] = ""
+    os.environ["TRUST_PROXY_HEADERS"] = "false"
 
     config.DEFAULT_API_URL = "https://api.example.com"
     config.DEFAULT_API_KEY = "${TEST_DEFAULT_API_KEY}"
@@ -1979,6 +1988,149 @@ def test_preset_health_and_env_api_key_resolution(client, monkeypatch):
     job = _wait_for_job(client, resp.json()["job_id"])
     assert job["status"] == "success"
     assert seen["generation_key"] == "env-secret"
+
+
+def _overall_config_item(client, name: str):
+    response = client.get("/api/settings/overall-config")
+    assert response.status_code == 200
+    items = response.json()["items"]
+    return next(item for item in items if item["name"] == name)
+
+
+def test_overall_config_syncs_env_and_hot_override(client, monkeypatch):
+    github_repo = _overall_config_item(client, "GITHUB_REPO")
+    assert github_repo["value"] == "Z1rconium/gpt-image-linux"
+    assert github_repo["source"] == "env"
+
+    response = client.put(
+        "/api/settings/overall-config",
+        json={"updates": [{"name": "ENABLE_METRICS", "value": True}]},
+    )
+    assert response.status_code == 200
+    item = next(i for i in response.json()["items"] if i["name"] == "ENABLE_METRICS")
+    assert item["value"] is True
+    assert item["source"] == "override"
+    assert config.ENABLE_METRICS is True
+
+    rows = storage.sync_overall_config_env_values(
+        {"ENABLE_METRICS": ("false", True), "ALLOW_UNAUTHENTICATED": ("true", True)}
+    )
+    assert rows["ENABLE_METRICS"]["override_value"] == "true"
+
+    response = client.put(
+        "/api/settings/overall-config",
+        json={"updates": [{"name": "ENABLE_METRICS", "clear_override": True}]},
+    )
+    assert response.status_code == 200
+    item = next(i for i in response.json()["items"] if i["name"] == "ENABLE_METRICS")
+    assert item["source"] == "env"
+    assert item["value"] is False
+
+
+def test_overall_config_secret_mask_and_preserve(client):
+    response = client.put(
+        "/api/settings/overall-config",
+        json={"updates": [{"name": "WEBHOOK_SIGNING_SECRET", "value": "super-secret"}]},
+    )
+    assert response.status_code == 200
+    item = next(i for i in response.json()["items"] if i["name"] == "WEBHOOK_SIGNING_SECRET")
+    assert item["value"] == "********"
+    assert item["value_masked"] == "********"
+    assert "super-secret" not in response.text
+
+    response = client.put(
+        "/api/settings/overall-config",
+        json={"updates": [{"name": "WEBHOOK_SIGNING_SECRET", "value": "********"}]},
+    )
+    assert response.status_code == 200
+    rows = storage.list_overall_config_values()
+    assert rows["WEBHOOK_SIGNING_SECRET"]["override_value"] == "super-secret"
+
+
+def test_overall_config_validation_errors(client):
+    unknown = client.put(
+        "/api/settings/overall-config",
+        json={"updates": [{"name": "NO_SUCH_ENV", "value": "x"}]},
+    )
+    assert unknown.status_code == 422
+
+    invalid_bool = client.put(
+        "/api/settings/overall-config",
+        json={"updates": [{"name": "ENABLE_METRICS", "value": "maybe"}]},
+    )
+    assert invalid_bool.status_code == 422
+
+    invalid_repo = client.put(
+        "/api/settings/overall-config",
+        json={"updates": [{"name": "GITHUB_REPO", "value": "not a repo"}]},
+    )
+    assert invalid_repo.status_code == 422
+
+    invalid_proxy = client.put(
+        "/api/settings/overall-config",
+        json={"updates": [{"name": "TRUST_PROXY_HEADERS", "value": True}]},
+    )
+    assert invalid_proxy.status_code == 422
+
+
+def test_overall_config_restart_and_build_only_badges(client):
+    response = client.put(
+        "/api/settings/overall-config",
+        json={
+            "updates": [
+                {"name": "ACCESS_KEY_COOKIE_NAME", "value": "custom_access"},
+                {"name": "PYTHON_BASE_IMAGE", "value": "python:3.12-slim"},
+            ]
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert set(body["restart_required_names"]) == {
+        "ACCESS_KEY_COOKIE_NAME",
+        "PYTHON_BASE_IMAGE",
+    }
+    items = {item["name"]: item for item in body["items"]}
+    assert items["ACCESS_KEY_COOKIE_NAME"]["restart_required"] is True
+    assert items["PYTHON_BASE_IMAGE"]["build_only"] is True
+
+
+def test_options_404_probe_is_warning():
+    status, message = classify_probe_status("OPTIONS", 404)
+    assert status == "warning"
+    assert "may only support POST" in message
+
+
+def test_preset_health_ignores_upstream_probe_error_for_overall_status(client, monkeypatch):
+    settings = client.get("/api/settings").json()
+    active_preset_id = settings["active_preset_id"]
+
+    async def fake_probe(api_url, api_path, api_key=""):
+        return {
+            "status": "error",
+            "message": "HEAD probe returned HTTP 404; check API URL/path",
+        }
+
+    monkeypatch.setattr(backend_main.proxy, "probe_upstream_endpoint", fake_probe)
+    updated = client.post(
+        "/api/settings",
+        json={
+            "active_preset_id": active_preset_id,
+            "preset_name": "Probe-only failure",
+            "api_url": "https://api.example.com",
+            "api_key": "${TEST_DEFAULT_API_KEY}",
+            "api_path": "/v1/images/generations",
+        },
+    )
+    assert updated.status_code == 200
+
+    health = client.post(f"/api/settings/presets/{active_preset_id}/health")
+    assert health.status_code == 200
+    body = health.json()
+    assert body["status"] == "ok"
+    assert any(
+        check["name"] == "upstream_probe" and check["status"] == "error"
+        for check in body["checks"]
+    )
 
 
 def test_missing_env_api_key_is_reported(client, monkeypatch):

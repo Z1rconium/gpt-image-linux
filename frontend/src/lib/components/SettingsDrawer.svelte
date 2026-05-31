@@ -3,6 +3,9 @@
   import type {
     ApiPath,
     ApiPreset,
+    OverallConfigItem,
+    OverallConfigResponse,
+    OverallConfigUpdateRequest,
     PresetHealthResponse,
     PresetHealthStatus,
     PromptOptimizerSystemPromptResponse,
@@ -43,6 +46,14 @@
     default_system_prompt: '',
     customized: true
   });
+  export let onLoadOverallConfig: () => Promise<OverallConfigResponse> = async () => ({
+    items: [],
+    restart_required_names: []
+  });
+  export let onSaveOverallConfig: (body: OverallConfigUpdateRequest) => Promise<OverallConfigResponse> = async () => ({
+    items: [],
+    restart_required_names: []
+  });
 
   let activePresetId = '';
   let presetName = '';
@@ -75,6 +86,13 @@
   let systemPromptSaving = false;
   let systemPromptText = '';
   let systemPromptError = '';
+  let overallConfigOpen = false;
+  let overallConfigLoading = false;
+  let overallConfigSaving = false;
+  let overallConfigError = '';
+  let overallConfigItems: OverallConfigItem[] = [];
+  let overallConfigDraft: Record<string, string | boolean | number> = {};
+  let overallConfigClears: Record<string, boolean> = {};
 
   $: activePreset = settings?.presets.find((preset) => preset.id === settings.active_preset_id) || settings?.presets[0] || null;
   $: if (settings && activePreset) {
@@ -128,6 +146,19 @@
     systemPromptOpen = false;
     systemPromptError = '';
   }
+  $: if (!open && overallConfigOpen) {
+    overallConfigOpen = false;
+    overallConfigError = '';
+  }
+  $: overallConfigGroups = overallConfigItems.reduce(
+    (groups, item) => {
+      if (!groups[item.group]) groups[item.group] = [];
+      groups[item.group].push(item);
+      return groups;
+    },
+    {} as Record<string, OverallConfigItem[]>
+  );
+  $: overallConfigGroupNames = Object.keys(overallConfigGroups);
 
   function normalizePromptOptimizerTimeout() {
     const parsed = Number.parseInt(String(promptOptimizerTimeoutSeconds), 10);
@@ -209,6 +240,14 @@
     return $t.settings.healthError;
   }
 
+  function presetHealthDisplayStatus(response: PresetHealthResponse) {
+    const blockingChecks = response.checks.filter((check) => check.name !== 'upstream_probe');
+    if (blockingChecks.length === 0) return 'ok';
+    if (blockingChecks.some((check) => check.status === 'error')) return 'error';
+    if (blockingChecks.some((check) => check.status === 'warning')) return 'warning';
+    return 'ok';
+  }
+
   function healthPanelClass(status: PresetHealthStatus) {
     if (status === 'ok') return 'border-emerald-500/40 bg-emerald-500/10 text-emerald-100';
     if (status === 'warning') return 'border-amber-500/40 bg-amber-500/10 text-amber-100';
@@ -259,6 +298,87 @@
       systemPromptSaving = false;
     }
   }
+
+  function overallDraftValue(item: OverallConfigItem) {
+    if (hasOverallDraft(item.name)) {
+      return overallConfigDraft[item.name];
+    }
+    if (item.secret) return item.value_masked || '';
+    return item.value;
+  }
+
+  function hasOverallDraft(name: string) {
+    return Object.prototype.hasOwnProperty.call(overallConfigDraft, name);
+  }
+
+  function setOverallDraft(item: OverallConfigItem, value: string | boolean | number) {
+    overallConfigDraft = { ...overallConfigDraft, [item.name]: value };
+    overallConfigClears = { ...overallConfigClears, [item.name]: false };
+  }
+
+  async function openOverallConfigModal() {
+    overallConfigOpen = true;
+    overallConfigLoading = true;
+    overallConfigError = '';
+    try {
+      const response = await onLoadOverallConfig();
+      overallConfigItems = response.items;
+      overallConfigDraft = {};
+      overallConfigClears = {};
+    } catch (error) {
+      overallConfigError = error instanceof Error ? error.message : $t.messages.requestFailed;
+    } finally {
+      overallConfigLoading = false;
+    }
+  }
+
+  function closeOverallConfigModal() {
+    if (overallConfigSaving) return;
+    overallConfigOpen = false;
+    overallConfigError = '';
+    overallConfigDraft = {};
+    overallConfigClears = {};
+  }
+
+  function resetOverallConfigItem(item: OverallConfigItem) {
+    overallConfigClears = { ...overallConfigClears, [item.name]: true };
+    const { [item.name]: _discard, ...nextDraft } = overallConfigDraft;
+    overallConfigDraft = nextDraft;
+  }
+
+  async function saveOverallConfigModal() {
+    const updates = overallConfigItems
+      .map((item) => {
+        if (overallConfigClears[item.name]) return { name: item.name, clear_override: true };
+        if (hasOverallDraft(item.name)) {
+          return { name: item.name, value: overallConfigDraft[item.name] };
+        }
+        return null;
+      })
+      .filter(Boolean) as OverallConfigUpdateRequest['updates'];
+    if (!updates.length) {
+      overallConfigOpen = false;
+      return;
+    }
+    overallConfigSaving = true;
+    overallConfigError = '';
+    try {
+      const response = await onSaveOverallConfig({ updates });
+      overallConfigItems = response.items;
+      overallConfigDraft = {};
+      overallConfigClears = {};
+    } catch (error) {
+      overallConfigError = error instanceof Error ? error.message : $t.messages.requestFailed;
+    } finally {
+      overallConfigSaving = false;
+    }
+  }
+
+  function sourceLabel(source: OverallConfigItem['source']) {
+    if (source === 'override') return $t.settings.overallConfigSourceOverride;
+    if (source === 'env') return $t.settings.overallConfigSourceEnv;
+    return $t.settings.overallConfigSourceDefault;
+  }
 </script>
 
 {#if open}
@@ -278,6 +398,14 @@
       </div>
 
       <div class="min-h-0 flex-1 overflow-y-auto p-5">
+        <button
+          type="button"
+          class="control-focus mb-5 w-full rounded-lg border border-zinc-700 px-3 py-2.5 text-sm font-semibold text-zinc-200 transition-colors hover:border-zinc-600 hover:bg-zinc-800"
+          on:click={openOverallConfigModal}
+        >
+          {$t.settings.overallConfig}
+        </button>
+
         <div class="mb-5 flex items-center justify-between">
           <h3 class="text-sm font-semibold text-zinc-200">{$t.settings.presets}</h3>
           <div class="flex gap-2">
@@ -493,11 +621,12 @@
 
       <div class="space-y-3 border-t border-zinc-800 p-5">
         {#if health}
-          <div class={`rounded-lg border p-3 text-xs ${healthPanelClass(health.status)}`}>
+          {@const displayStatus = presetHealthDisplayStatus(health)}
+          <div class={`rounded-lg border p-3 text-xs ${healthPanelClass(displayStatus)}`}>
             <div class="flex items-center justify-between gap-3">
               <span class="font-semibold">{$t.settings.healthStatus}</span>
-              <span class={`rounded-full border px-2 py-0.5 text-[11px] font-semibold ${healthBadgeClass(health.status)}`}>
-                {healthStatusLabel(health.status)}
+              <span class={`rounded-full border px-2 py-0.5 text-[11px] font-semibold ${healthBadgeClass(displayStatus)}`}>
+                {healthStatusLabel(displayStatus)}
               </span>
             </div>
             <div class="mt-2 space-y-1.5">
@@ -535,6 +664,115 @@
         </div>
       </div>
     </aside>
+
+    {#if overallConfigOpen}
+      <div class="fixed inset-0 z-[70] flex items-center justify-center bg-black/70 p-4">
+        <button class="absolute inset-0" type="button" tabindex="-1" aria-label={$t.settings.closeOverallConfig} on:click={closeOverallConfigModal}></button>
+        <div
+          class="fade-in relative flex max-h-[90vh] w-full max-w-5xl flex-col rounded-xl border border-zinc-800 bg-zinc-900 shadow-2xl"
+          aria-labelledby="overall-config-dialog-title"
+          use:dialog={{ open: overallConfigOpen, onClose: closeOverallConfigModal }}
+        >
+          <div class="flex items-start justify-between gap-4 border-b border-zinc-800 p-5">
+            <div class="min-w-0">
+              <h2 id="overall-config-dialog-title" class="text-base font-semibold text-zinc-100">{$t.settings.overallConfig}</h2>
+              <p class="mt-1 text-xs leading-5 text-zinc-500">{$t.settings.overallConfigHint}</p>
+            </div>
+            <button type="button" class="control-focus rounded-lg p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100" aria-label={$t.settings.closeOverallConfig} on:click={closeOverallConfigModal}>
+              x
+            </button>
+          </div>
+
+          <div class="min-h-0 flex-1 overflow-y-auto p-5">
+            {#if overallConfigLoading}
+              <div class="rounded-lg border border-zinc-800 bg-zinc-950/60 p-4 text-sm text-zinc-400">{$t.settings.overallConfigLoading}</div>
+            {:else}
+              <div class="space-y-6">
+                {#each overallConfigGroupNames as group}
+                  <section>
+                    <h3 class="mb-3 text-sm font-semibold text-zinc-200">{group}</h3>
+                    <div class="space-y-3">
+                      {#each overallConfigGroups[group] as item}
+                        <div class="rounded-lg border border-zinc-800 bg-zinc-950/50 p-3" data-testid={`overall-config-${item.name}`}>
+                          <div class="mb-2 flex flex-wrap items-start justify-between gap-2">
+                            <div class="min-w-0">
+                              <div class="font-mono text-xs font-semibold text-zinc-100">{item.name}</div>
+                              <div class="mt-1 text-xs leading-5 text-zinc-500">{item.description}</div>
+                            </div>
+                            <div class="flex shrink-0 flex-wrap justify-end gap-1.5">
+                              <span class="rounded border border-zinc-700 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-zinc-400">{sourceLabel(item.source)}</span>
+                              {#if item.restart_required}
+                                <span class="rounded border border-amber-500/40 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-amber-300">{$t.settings.restartRequired}</span>
+                              {/if}
+                              {#if item.build_only}
+                                <span class="rounded border border-sky-500/40 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-sky-300">{$t.settings.buildOnly}</span>
+                              {/if}
+                            </div>
+                          </div>
+
+                          <div class="grid grid-cols-1 gap-2 sm:grid-cols-[1fr_auto]">
+                            {#if item.type === 'bool'}
+                              <label class="flex items-center gap-2 rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2.5 text-xs text-zinc-300">
+                                <input
+                                  type="checkbox"
+                                  class="control-focus accent-emerald-500"
+                                  checked={Boolean(overallDraftValue(item))}
+                                  on:change={(event) => setOverallDraft(item, event.currentTarget.checked)}
+                                />
+                                {$t.common.active}
+                              </label>
+                            {:else}
+                              <input
+                                value={String(overallDraftValue(item) ?? '')}
+                                type={item.type === 'int' || item.type === 'float' ? 'number' : item.secret ? 'password' : 'text'}
+                                step={item.type === 'float' ? 'any' : '1'}
+                                class="control-focus w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2.5 font-mono text-sm text-zinc-100 focus:border-emerald-500"
+                                on:input={(event) => setOverallDraft(item, event.currentTarget.value)}
+                              />
+                            {/if}
+                            <button
+                              type="button"
+                              class="control-focus rounded-lg border border-zinc-700 px-3 py-2 text-xs font-semibold text-zinc-300 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40"
+                              disabled={!item.has_override && !hasOverallDraft(item.name)}
+                              on:click={() => resetOverallConfigItem(item)}
+                            >
+                              {$t.settings.resetToEnv}
+                            </button>
+                          </div>
+                          {#if item.has_override || item.is_env_set}
+                            <div class="mt-2 grid grid-cols-1 gap-1 text-[11px] text-zinc-500 sm:grid-cols-2">
+                              <div class="truncate">env: <span class="font-mono">{item.env_value_masked || '-'}</span></div>
+                              <div class="truncate">override: <span class="font-mono">{item.override_value_masked || '-'}</span></div>
+                            </div>
+                          {/if}
+                        </div>
+                      {/each}
+                    </div>
+                  </section>
+                {/each}
+              </div>
+            {/if}
+            {#if overallConfigError}
+              <div class="mt-3 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-200">{overallConfigError}</div>
+            {/if}
+          </div>
+
+          <div class="flex justify-end gap-3 border-t border-zinc-800 p-5">
+            <button type="button" class="control-focus rounded-lg border border-zinc-700 px-4 py-2 text-sm text-zinc-300 hover:bg-zinc-800" on:click={closeOverallConfigModal}>
+              {$t.common.close}
+            </button>
+            <button
+              type="button"
+              disabled={overallConfigLoading || overallConfigSaving}
+              class="control-focus rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
+              on:click={saveOverallConfigModal}
+            >
+              {overallConfigSaving ? $t.settings.saving : $t.settings.saveOverallConfig}
+            </button>
+          </div>
+        </div>
+      </div>
+    {/if}
 
     {#if systemPromptOpen}
       <div class="fixed inset-0 z-[70] flex items-center justify-center bg-black/70 p-4">

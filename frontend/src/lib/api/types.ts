@@ -1,5 +1,7 @@
 export type ApiPath = '/v1/images/generations' | '/v1/responses' | '/v1/chat/completions';
 export type ApiKeySource = 'empty' | 'stored' | 'env';
+export type OverallConfigValueType = 'string' | 'secret' | 'bool' | 'int' | 'float';
+export type OverallConfigValueSource = 'override' | 'env' | 'default';
 export type ResponseFormatDefault = '' | 'url' | 'b64_json';
 export type PresetHealthStatus = 'ok' | 'warning' | 'error';
 export type GenerateJobStatusValue = 'queued' | 'running' | 'success' | 'error' | 'cancelled' | 'interrupted' | 'upstream_error';
@@ -115,6 +117,41 @@ export type PresetHealthResponse = {
 };
 
 export type R2HealthResponse = PresetHealthResponse;
+
+export type OverallConfigItem = {
+  name: string;
+  type: OverallConfigValueType;
+  group: string;
+  description: string;
+  value: string | boolean | number;
+  value_masked: string;
+  env_value_masked: string;
+  override_value_masked?: string | null;
+  source: OverallConfigValueSource;
+  is_env_set: boolean;
+  has_override: boolean;
+  secret: boolean;
+  hot_reload: boolean;
+  restart_required: boolean;
+  build_only: boolean;
+  updated_at?: string | null;
+  override_updated_at?: string | null;
+};
+
+export type OverallConfigResponse = {
+  items: OverallConfigItem[];
+  restart_required_names: string[];
+};
+
+export type OverallConfigUpdateItem = {
+  name: string;
+  value?: string | boolean | number | null;
+  clear_override?: boolean;
+};
+
+export type OverallConfigUpdateRequest = {
+  updates: OverallConfigUpdateItem[];
+};
 
 export type AccessStatus = {
   authenticated: boolean;

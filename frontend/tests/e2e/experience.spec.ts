@@ -148,6 +148,88 @@ const settingsResponse = {
   ]
 };
 
+const overallConfigResponse = {
+  restart_required_names: [],
+  items: [
+    {
+      name: 'ENABLE_METRICS',
+      type: 'bool',
+      group: 'Observability',
+      description: 'Enable /api/metrics.',
+      value: false,
+      value_masked: 'false',
+      env_value_masked: 'false',
+      override_value_masked: null,
+      source: 'env',
+      is_env_set: true,
+      has_override: false,
+      secret: false,
+      hot_reload: true,
+      restart_required: false,
+      build_only: false,
+      updated_at: '2026-05-18T12:00:00Z',
+      override_updated_at: null
+    },
+    {
+      name: 'WEBHOOK_SIGNING_SECRET',
+      type: 'secret',
+      group: 'Webhooks',
+      description: 'Webhook signing secret.',
+      value: '********',
+      value_masked: '********',
+      env_value_masked: '',
+      override_value_masked: '********',
+      source: 'override',
+      is_env_set: false,
+      has_override: true,
+      secret: true,
+      hot_reload: true,
+      restart_required: false,
+      build_only: false,
+      updated_at: '2026-05-18T12:00:00Z',
+      override_updated_at: '2026-05-18T12:00:00Z'
+    },
+    {
+      name: 'ACCESS_KEY_COOKIE_NAME',
+      type: 'string',
+      group: 'Access / Security',
+      description: 'Access cookie name.',
+      value: 'gpt_image_access',
+      value_masked: 'gpt_image_access',
+      env_value_masked: 'gpt_image_access',
+      override_value_masked: 'custom_access',
+      source: 'override',
+      is_env_set: false,
+      has_override: true,
+      secret: false,
+      hot_reload: false,
+      restart_required: true,
+      build_only: false,
+      updated_at: '2026-05-18T12:00:00Z',
+      override_updated_at: null
+    },
+    {
+      name: 'PYTHON_BASE_IMAGE',
+      type: 'string',
+      group: 'Docker Build',
+      description: 'Python base image for Docker builds.',
+      value: 'python:3.11-slim',
+      value_masked: 'python:3.11-slim',
+      env_value_masked: 'python:3.11-slim',
+      override_value_masked: null,
+      source: 'default',
+      is_env_set: false,
+      has_override: false,
+      secret: false,
+      hot_reload: false,
+      restart_required: false,
+      build_only: true,
+      updated_at: '2026-05-18T12:00:00Z',
+      override_updated_at: null
+    }
+  ]
+};
+
 const basePromptSnippets: PromptSnippetFixture[] = [
   {
     id: 'snippet-1',
@@ -305,6 +387,7 @@ async function mockApi(page: Page, options: MockOptions = {}) {
   let promptSnippets = [...(options.promptSnippets ?? basePromptSnippets)];
   let promptSnippetCounter = promptSnippets.length + 1;
   let mockedSettings = cloneSettings(options.settings ?? settingsResponse);
+  let mockedOverallConfig: any = structuredClone(overallConfigResponse);
   let optimizerSystemPrompt = 'Default optimizer system prompt';
   const runningJobs = options.runningJobs ?? [];
   let historyJobs = options.historyJobs ?? [job('history-1', 'saved prompt')];
@@ -333,6 +416,37 @@ async function mockApi(page: Page, options: MockOptions = {}) {
     }
     if (url.pathname === '/api/version/latest') {
       await route.fulfill(json({ latest_version: null, has_update: false, checked_at: null }));
+      return;
+    }
+    if (url.pathname === '/api/settings/overall-config' && request.method() === 'GET') {
+      await route.fulfill(json(mockedOverallConfig));
+      return;
+    }
+    if (url.pathname === '/api/settings/overall-config' && request.method() === 'PUT') {
+      const body = JSON.parse(request.postData() || '{}');
+      const restartNames: string[] = [];
+      mockedOverallConfig = {
+        ...mockedOverallConfig,
+        restart_required_names: restartNames,
+        items: mockedOverallConfig.items.map((item: any) => {
+          const update = body.updates?.find((candidate: { name?: string }) => candidate.name === item.name);
+          if (!update) return item;
+          if (update.clear_override) {
+            return { ...item, has_override: false, override_value_masked: null, source: item.is_env_set ? 'env' : 'default' };
+          }
+          if (item.restart_required || item.build_only) restartNames.push(item.name);
+          const masked = item.secret ? '********' : String(update.value);
+          return {
+            ...item,
+            value: item.secret ? '********' : update.value,
+            value_masked: masked,
+            override_value_masked: masked,
+            source: 'override',
+            has_override: true
+          };
+        })
+      };
+      await route.fulfill(json(mockedOverallConfig));
       return;
     }
     if (url.pathname === '/api/settings') {
@@ -655,6 +769,39 @@ test('settings drawer edits the prompt optimizer system prompt', async ({ page }
   expect(request.postDataJSON()).toEqual({ system_prompt: 'Custom optimizer system prompt' });
   await expect(page.getByRole('status')).toContainText('Prompt Optimizer system prompt saved');
   await expect(editor).toBeHidden();
+});
+
+test('settings drawer edits overall config overrides', async ({ page }) => {
+  await loadApp(page);
+
+  await page.getByRole('button', { name: 'Settings' }).click();
+  const drawer = page.getByRole('dialog', { name: 'Settings' });
+  await drawer.getByRole('button', { name: 'Overall Config' }).click();
+
+  const modal = page.getByRole('dialog', { name: 'Overall Config' });
+  await expect(modal).toBeVisible();
+  await expect(modal).toContainText('ENABLE_METRICS');
+  await expect(modal).toContainText('WEBHOOK_SIGNING_SECRET');
+  await expect(modal).toContainText('restart');
+  await expect(modal).toContainText('build only');
+
+  await modal.getByTestId('overall-config-ENABLE_METRICS').locator('input[type="checkbox"]').check();
+  await modal.getByTestId('overall-config-WEBHOOK_SIGNING_SECRET').locator('input').fill('********');
+  await modal.getByTestId('overall-config-ACCESS_KEY_COOKIE_NAME').getByRole('button', { name: 'Reset to .env' }).click();
+
+  const saveRequest = page.waitForRequest(
+    (request) => new URL(request.url()).pathname === '/api/settings/overall-config' && request.method() === 'PUT'
+  );
+  await modal.getByRole('button', { name: 'Save config' }).click();
+  const request = await saveRequest;
+  expect(request.postDataJSON()).toEqual({
+    updates: [
+      { name: 'ENABLE_METRICS', value: true },
+      { name: 'WEBHOOK_SIGNING_SECRET', value: '********' },
+      { name: 'ACCESS_KEY_COOKIE_NAME', clear_override: true }
+    ]
+  });
+  await expect(page.getByRole('status')).toContainText('Overall config saved');
 });
 
 test('active preset response format default is applied to prompt form', async ({ page }) => {

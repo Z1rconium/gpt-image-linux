@@ -13,6 +13,8 @@ from ..core.validators import (
 
 ApiPath = Literal["/v1/images/generations", "/v1/responses", "/v1/chat/completions"]
 ApiKeySource = Literal["empty", "stored", "env"]
+OverallConfigValueType = Literal["string", "secret", "bool", "int", "float"]
+OverallConfigValueSource = Literal["override", "env", "default"]
 ResponseFormatDefault = Literal["", "url", "b64_json"]
 PresetHealthStatus = Literal["ok", "warning", "error"]
 MASKED_SECRET_VALUE = "********"
@@ -196,6 +198,47 @@ class PresetHealthResponse(BaseModel):
 
 class R2HealthResponse(PresetHealthResponse):
     pass
+
+
+class OverallConfigItem(BaseModel):
+    name: str
+    type: OverallConfigValueType
+    group: str
+    description: str
+    value: str | bool | int | float
+    value_masked: str
+    env_value_masked: str
+    override_value_masked: Optional[str] = None
+    source: OverallConfigValueSource
+    is_env_set: bool
+    has_override: bool
+    secret: bool = False
+    hot_reload: bool = True
+    restart_required: bool = False
+    build_only: bool = False
+    updated_at: Optional[str] = None
+    override_updated_at: Optional[str] = None
+
+
+class OverallConfigResponse(BaseModel):
+    items: list[OverallConfigItem]
+    restart_required_names: list[str] = Field(default_factory=list)
+
+
+class OverallConfigUpdateItem(StrictRequestModel):
+    name: str = Field(..., min_length=1, max_length=128)
+    value: str | bool | int | float | None = None
+    clear_override: bool = False
+
+    @model_validator(mode="after")
+    def validate_action(self):
+        if self.clear_override and self.value is not None:
+            raise ValueError("clear_override cannot be combined with value")
+        return self
+
+
+class OverallConfigUpdateRequest(StrictRequestModel):
+    updates: list[OverallConfigUpdateItem] = Field(default_factory=list, max_length=128)
 
 
 class AccessRequest(StrictRequestModel):

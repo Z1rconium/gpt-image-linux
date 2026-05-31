@@ -262,18 +262,19 @@ curl http://localhost:9090/health
 12. optionally configure R2 Backup with endpoint URL, bucket, prefix, and access key env refs such as `${R2_ACCESS_KEY_ID}` / `${R2_SECRET_ACCESS_KEY}`, then click Test R2
 13. optionally configure Prompt Optimizer with an endpoint URL, model, timeout seconds, and API key/env ref; literal keys require `ALLOW_PLAINTEXT_SECRETS=true`
 14. optionally click Edit System Prompt in the Prompt Optimizer settings to edit the optimizer system prompt stored at `DATA_DIR/prompt_optimizer_system_prompt.md`
-15. optionally run Health check for the saved preset
-16. click Save Preset
-17. enter a prompt
-18. click Prompt Helper tags to append common modifiers
-19. click Optimize to rewrite the prompt through the server-side optimizer
-20. open Prompts in the header to save or reuse prompt snippets; using a snippet replaces the current prompt
-21. choose generation options, including API path for per-request upstream routing
-22. click Generate
-23. optionally upload one or more edit reference images, pick "Edit this image" in Gallery/Lightbox, or combine both; uploads append to the current edit sources and Clear removes all edit sources
-24. click Edits to run image-to-image
-25. use Gallery/Lightbox "Use prompt" or "Use all" to reuse historical prompt text or full parameters
-26. view preview and gallery; click Gallery Sync to upload local gallery images missing from the configured R2 bucket prefix
+15. optionally open Overall Config for `.env.example` variables that are not already exposed in the main Settings form
+16. optionally run Health check for the saved preset
+17. click Save Preset
+18. enter a prompt
+19. click Prompt Helper tags to append common modifiers
+20. click Optimize to rewrite the prompt through the server-side optimizer
+21. open Prompts in the header to save or reuse prompt snippets; using a snippet replaces the current prompt
+22. choose generation options, including API path for per-request upstream routing
+23. click Generate
+24. optionally upload one or more edit reference images, pick "Edit this image" in Gallery/Lightbox, or combine both; uploads append to the current edit sources and Clear removes all edit sources
+25. click Edits to run image-to-image
+26. use Gallery/Lightbox "Use prompt" or "Use all" to reuse historical prompt text or full parameters
+27. view preview and gallery; click Gallery Sync to upload local gallery images missing from the configured R2 bucket prefix
 
 ## API paths
 
@@ -312,9 +313,19 @@ The panel supports these upstream paths. The API base URL may either omit or inc
 
 - `POST /api/settings/presets/{preset_id}/health` validates the saved preset without sending a generation request
 - checks include API path allowability, HTTPS URL/hostname validation, upstream host allowlist and SSRF DNS/private-IP validation, API key/env-ref presence, and a low-cost `OPTIONS`/`HEAD` upstream probe
+- upstream probe failures are diagnostic only: `OPTIONS 404/410` is reported as a warning because many GPT-compatible gateways only implement `POST`, and an isolated `upstream_probe` error does not fail the overall preset health
 - returned shape is `{ status, checks: [{ name, status, message }] }`, where each status is `ok`, `warning`, or `error`
 - API key env refs use the exact `${ENV_VAR_NAME}` form; the database stores the reference string and generation/edit calls resolve it from the server environment at request time
 - literal API keys are rejected by default; set `ALLOW_PLAINTEXT_SECRETS=true` only if you intentionally want plaintext SQLite storage
+
+## Overall Config
+
+- Settings includes an `Overall Config` modal for `.env.example` variables that are not already managed by the main Settings form.
+- On startup, the server syncs current process environment values into SQLite. Effective priority is `SQLite override > current env > code default`.
+- Saving in the modal writes SQLite overrides; it does not rewrite `.env`. Container rebuilds keep saved overrides as long as `data/app.sqlite3` is preserved.
+- Secret values are stored as real override values when saved, but API responses and the UI only return masked values. Sending `********` preserves the existing secret override; `Reset to .env` clears that override.
+- Hot-reloadable fields update in memory immediately. Runtime paths, access/session startup behavior, queue concurrency, and Docker build image values are marked as restart-required or build-only.
+- `DATABASE_FILE`, `DATA_DIR`, `IMAGES_DIR`, and `THUMBNAILS_DIR` can be displayed and saved as overrides, but the running process cannot move the current SQLite connection or storage directories without restart.
 
 ## Upstream SOCKS5 proxy
 
@@ -362,6 +373,8 @@ The panel supports these upstream paths. The API base URL may either omit or inc
 - imported image entries must pass file extension, content-type/magic-byte, full decoder, and pixel-count validation before they are stored
 
 ## Environment variables
+
+All variables listed in `.env.example` are also tracked in SQLite for Overall Config. Variables already exposed in the main Settings form stay there; the Overall Config modal shows the remaining runtime/security/limit/build knobs.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -444,6 +457,8 @@ The panel supports these upstream paths. The API base URL may either omit or inc
 | `POST` | `/api/access` | Unlock access for 3 hours |
 | `POST` | `/api/settings` | Save the active API preset |
 | `GET` | `/api/settings` | Get current settings and presets |
+| `GET` | `/api/settings/overall-config` | List environment-backed Overall Config fields, masked secrets, sources, and restart/build-only metadata |
+| `PUT` | `/api/settings/overall-config` | Save or clear SQLite overrides for Overall Config fields |
 | `POST` | `/api/settings/r2/health` | Validate a draft R2 Backup config and run bucket/list/write checks |
 | `POST` | `/api/prompt/optimize` | Rewrite a prompt through the server-side optimizer |
 | `GET` | `/api/prompt/optimizer-system-prompt` | Read the Prompt Optimizer system prompt, falling back to the built-in default |
@@ -803,18 +818,19 @@ curl http://localhost:9090/health
 11. 可选：填写全局 Webhook URL，或填写 `${WEBHOOK_URL}` 这类环境变量引用，用于生成/编辑任务完成回调
 12. 可选：配置 R2 备份的 endpoint URL、储存桶、prefix，以及 `${R2_ACCESS_KEY_ID}` / `${R2_SECRET_ACCESS_KEY}` 这类环境变量引用，然后点击测试 R2
 13. 可选：配置提示词优化器的 endpoint URL、模型、超时时间和 API Key/环境变量引用；直接填写的 key 需要显式设置 `ALLOW_PLAINTEXT_SECRETS=true`
-14. 可选：对已保存预设执行 Health check
-15. 点击 Save Preset
-16. 输入提示词
-17. 点击提示词助手标签追加常用修饰词
-18. 点击 Optimize 通过服务端优化器改写提示词
-19. 点击右上角提示词按钮保存或复用提示词片段；使用片段会替换当前提示词
-20. 选择生成参数；需要逐次复用不同上游路径时可直接选择 API Path
-21. 点击 Generate
-22. 也可以上传一张或多张编辑参考图、在 Gallery/Lightbox 中选择 “Edit this image”，或两者组合；上传会追加到当前编辑源，Clear 会清空全部编辑源
-23. 点击 Edits 执行图生图
-24. 在 Gallery/Lightbox 使用 “Use prompt” 或 “Use all” 复用历史提示词或完整参数
-25. 查看预览和 Gallery；点击 Gallery 的同步按钮可把本地 Gallery 中 R2 prefix 下缺失的图片上传到配置的储存桶
+14. 可选：打开 Overall Config，编辑主 Settings 表单里没有覆盖的 `.env.example` 变量
+15. 可选：对已保存预设执行 Health check
+16. 点击 Save Preset
+17. 输入提示词
+18. 点击提示词助手标签追加常用修饰词
+19. 点击 Optimize 通过服务端优化器改写提示词
+20. 点击右上角提示词按钮保存或复用提示词片段；使用片段会替换当前提示词
+21. 选择生成参数；需要逐次复用不同上游路径时可直接选择 API Path
+22. 点击 Generate
+23. 也可以上传一张或多张编辑参考图、在 Gallery/Lightbox 中选择 “Edit this image”，或两者组合；上传会追加到当前编辑源，Clear 会清空全部编辑源
+24. 点击 Edits 执行图生图
+25. 在 Gallery/Lightbox 使用 “Use prompt” 或 “Use all” 复用历史提示词或完整参数
+26. 查看预览和 Gallery；点击 Gallery 的同步按钮可把本地 Gallery 中 R2 prefix 下缺失的图片上传到配置的储存桶
 
 ## 支持的 API Path
 
@@ -853,9 +869,19 @@ curl http://localhost:9090/health
 
 - `POST /api/settings/presets/{preset_id}/health` 会校验已保存预设，不会发送真实生成请求
 - 检查项包括 API Path 是否允许、HTTPS URL/hostname、上游 host allowlist、SSRF DNS/内网 IP 校验、API Key/环境变量引用是否可用，以及低成本 `OPTIONS`/`HEAD` 上游探测
+- 上游探测只作为诊断信息：`OPTIONS 404/410` 会显示为 warning，因为很多 GPT-compatible 网关只实现 `POST`；如果只有 `upstream_probe` 是 error，整体预设健康状态仍显示正常
 - 返回结构为 `{ status, checks: [{ name, status, message }] }`，状态值为 `ok`、`warning` 或 `error`
 - API Key 环境变量引用必须使用完整的 `${ENV_VAR_NAME}` 格式；数据库只保存引用字符串，生成/编辑请求会在执行时从服务端环境变量解析真实值
 - 默认拒绝直接把 API Key 明文持久化到 SQLite；只有显式设置 `ALLOW_PLAINTEXT_SECRETS=true` 才允许
+
+## Overall Config
+
+- Settings 里有 `Overall Config` 弹窗，用来管理主 Settings 表单未覆盖的 `.env.example` 变量。
+- 服务启动时会把当前进程环境变量同步到 SQLite。生效优先级是 `SQLite override > 当前 env > 代码默认值`。
+- 弹窗保存的是 SQLite override，不会改写 `.env` 文件；只要保留 `data/app.sqlite3`，容器重建后 override 仍保留。
+- Secret 保存时会把真实 override 写入 SQLite，但 API 响应和 UI 只返回打码值。提交 `********` 会保留已有 secret override；`Reset to .env` 会清除该 override。
+- 可热生效字段会立即更新内存配置。运行路径、访问/session 启动行为、队列并发和 Docker build image 会标记为需重启或仅构建期生效。
+- `DATABASE_FILE`、`DATA_DIR`、`IMAGES_DIR`、`THUMBNAILS_DIR` 可以显示和保存，但当前进程不能不重启就迁移 SQLite 连接或存储目录。
 
 ## 上游 SOCKS5 代理
 
@@ -903,6 +929,8 @@ curl http://localhost:9090/health
 - 导入图片条目在存储前必须通过扩展名、Content-Type/文件魔数、完整解码和像素数量校验
 
 ## 环境变量
+
+`.env.example` 中列出的变量都会同步到 SQLite 的 Overall Config。主 Settings 表单已覆盖的变量仍在原位置管理；Overall Config 弹窗显示其余运行时、安全、限制和构建相关配置。
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
@@ -985,6 +1013,8 @@ curl http://localhost:9090/health
 | `POST` | `/api/access` | 解锁访问 3 小时 |
 | `POST` | `/api/settings` | 保存当前 API 预设 |
 | `GET` | `/api/settings` | 获取当前设置和预设列表 |
+| `GET` | `/api/settings/overall-config` | 获取 Overall Config 字段、打码 secret、来源和需重启/仅构建元数据 |
+| `PUT` | `/api/settings/overall-config` | 保存或清除 Overall Config 字段的 SQLite override |
 | `POST` | `/api/settings/r2/health` | 校验草稿 R2 Backup 配置并执行 bucket/list/write 检查 |
 | `POST` | `/api/prompt/optimize` | 通过服务端提示词优化器改写提示词 |
 | `GET` | `/api/prompt-snippets` | 查询提示词片段，可选 `query` 筛选 |

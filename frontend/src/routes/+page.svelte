@@ -20,6 +20,7 @@
     ApiPath,
     GalleryEntry,
     GenerateJobStatus,
+    OverallConfigUpdateRequest,
     PromptOptimizeResponse,
     PromptSnippet,
     PromptSnippetCreateInput,
@@ -364,6 +365,14 @@
 
   function savePromptOptimizerSystemPrompt(systemPrompt: string) {
     return settingsStore.savePromptOptimizerSystemPrompt(systemPrompt, showToast);
+  }
+
+  function loadOverallConfig() {
+    return settingsStore.loadOverallConfig();
+  }
+
+  function saveOverallConfig(body: OverallConfigUpdateRequest) {
+    return settingsStore.saveOverallConfig(body, showToast);
   }
 
   function updatePreviewFromJob(job: GenerateJobStatus) {
@@ -801,6 +810,8 @@
   onR2HealthCheck={checkR2Health}
   onLoadPromptOptimizerSystemPrompt={loadPromptOptimizerSystemPrompt}
   onSavePromptOptimizerSystemPrompt={savePromptOptimizerSystemPrompt}
+  onLoadOverallConfig={loadOverallConfig}
+  onSaveOverallConfig={saveOverallConfig}
 />
 
 <PromptSnippetsDrawer
