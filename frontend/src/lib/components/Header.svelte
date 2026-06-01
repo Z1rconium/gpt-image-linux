@@ -16,12 +16,12 @@
   $: safeReleaseUrl = releaseUrl?.startsWith('https://github.com/') ? releaseUrl : null;
 </script>
 
-<header class="sticky top-0 z-40 border-b border-zinc-800 bg-zinc-950/80 backdrop-blur-md">
+<header class="app-header sticky top-0 z-40 border-b border-zinc-800 bg-zinc-950/80 backdrop-blur-md">
   <div class="mx-auto flex max-w-5xl items-center justify-between px-4 py-4 sm:px-6">
     <div class="flex items-center gap-3">
       <button
         type="button"
-        class="control-focus h-8 min-w-12 rounded-lg border border-zinc-700 px-2 text-xs font-semibold text-zinc-300 transition-colors hover:border-emerald-500/60 hover:bg-zinc-800 hover:text-zinc-100"
+        class="mobile-touch-target control-focus h-8 min-w-12 rounded-lg border border-zinc-700 px-2 text-xs font-semibold text-zinc-300 transition-colors hover:border-emerald-500/60 hover:bg-zinc-800 hover:text-zinc-100"
         title={$t.language.toggleTitle}
         aria-label={$t.language.toggleTitle}
         aria-pressed={$language === 'zh-CN'}
@@ -59,7 +59,7 @@
     <div class="flex items-center gap-2">
       <button
         type="button"
-        class="control-focus relative inline-flex h-10 min-w-10 items-center justify-center rounded-lg px-2 text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100"
+        class="mobile-touch-target control-focus relative inline-flex h-10 min-w-10 items-center justify-center rounded-lg px-2 text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100"
         title={$t.header.promptSnippets}
         aria-label={$t.header.promptSnippets}
         on:click={() => onOpenPromptSnippets()}
@@ -68,7 +68,7 @@
       </button>
       <button
         type="button"
-        class="control-focus relative inline-flex h-10 min-w-10 items-center justify-center rounded-lg px-2 text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100"
+        class="mobile-touch-target control-focus relative inline-flex h-10 min-w-10 items-center justify-center rounded-lg px-2 text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100"
         title={$t.header.jobHistory}
         aria-label={$t.header.jobHistory}
         on:click={() => onOpenJobs()}
@@ -82,7 +82,7 @@
       </button>
       <button
         type="button"
-        class="control-focus inline-flex h-10 min-w-10 items-center justify-center rounded-lg px-2 text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100"
+        class="mobile-touch-target control-focus inline-flex h-10 min-w-10 items-center justify-center rounded-lg px-2 text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100"
         title={$t.common.settings}
         aria-label={$t.common.settings}
         on:click={() => onOpenSettings()}

@@ -19,17 +19,78 @@
   export let navigating = false;
   export let onNavigatePrevious: () => void = () => {};
   export let onNavigateNext: () => void = () => {};
+
+  const SWIPE_MIN_DISTANCE = 52;
+  const SWIPE_MAX_DURATION_MS = 800;
+  const SWIPE_AXIS_RATIO = 1.25;
+  const SWIPE_IGNORE_SELECTOR = 'a, button, input, select, textarea, [role="button"], [data-swipe-ignore]';
+
+  let swipePointerId: number | null = null;
+  let swipeStartX = 0;
+  let swipeStartY = 0;
+  let swipeStartTime = 0;
+
+  function resetSwipe() {
+    swipePointerId = null;
+    swipeStartX = 0;
+    swipeStartY = 0;
+    swipeStartTime = 0;
+  }
+
+  function canStartSwipe(event: PointerEvent) {
+    const target = event.target;
+    return (
+      event.isPrimary &&
+      event.pointerType !== 'mouse' &&
+      !navigating &&
+      (canNavigatePrevious || canNavigateNext) &&
+      !(target instanceof Element && target.closest(SWIPE_IGNORE_SELECTOR))
+    );
+  }
+
+  function handleSwipePointerDown(event: PointerEvent) {
+    if (!canStartSwipe(event)) return;
+    swipePointerId = event.pointerId;
+    swipeStartX = event.clientX;
+    swipeStartY = event.clientY;
+    swipeStartTime = Date.now();
+    (event.currentTarget as HTMLElement).setPointerCapture?.(event.pointerId);
+  }
+
+  function handleSwipePointerUp(event: PointerEvent) {
+    if (swipePointerId !== event.pointerId) return;
+
+    const dx = event.clientX - swipeStartX;
+    const dy = event.clientY - swipeStartY;
+    const absX = Math.abs(dx);
+    const absY = Math.abs(dy);
+    const elapsed = Date.now() - swipeStartTime;
+    const horizontalSwipe = absX >= SWIPE_MIN_DISTANCE && absX > absY * SWIPE_AXIS_RATIO && elapsed <= SWIPE_MAX_DURATION_MS;
+
+    if (horizontalSwipe && dx < 0 && canNavigateNext) onNavigateNext();
+    else if (horizontalSwipe && dx > 0 && canNavigatePrevious) onNavigatePrevious();
+
+    (event.currentTarget as HTMLElement).releasePointerCapture?.(event.pointerId);
+    resetSwipe();
+  }
 </script>
 
 {#if open && image}
-  <div class="fixed inset-0 z-[70] flex items-center justify-center bg-black/75 p-4">
+  <div class="mobile-lightbox-root fixed inset-0 z-[70] flex items-center justify-center bg-black/75 p-4">
     <button class="absolute inset-0" type="button" tabindex="-1" aria-label={$t.lightbox.closeLabel} on:click={onClose}></button>
     <div
       class="lightbox-shell relative"
       aria-labelledby="lightbox-title"
       use:dialog={{ open, onClose }}
     >
-      <div class="lightbox-media">
+      <div
+        class="lightbox-media"
+        role="group"
+        aria-label={$t.lightbox.title}
+        on:pointerdown={handleSwipePointerDown}
+        on:pointerup={handleSwipePointerUp}
+        on:pointercancel={resetSwipe}
+      >
         <div class="flex h-full min-h-0 w-full flex-col">
           <div class="flex min-h-0 flex-1 items-center justify-center">
             <img
@@ -46,7 +107,7 @@
             {#if canNavigatePrevious}
               <button
                 type="button"
-                class="control-focus inline-flex h-10 w-10 items-center justify-center rounded-lg border border-zinc-700 text-lg leading-none text-zinc-300 transition-colors hover:bg-zinc-800 hover:text-zinc-100 disabled:cursor-not-allowed disabled:opacity-40"
+                class="mobile-touch-target control-focus inline-flex h-10 w-10 items-center justify-center rounded-lg border border-zinc-700 text-lg leading-none text-zinc-300 transition-colors hover:bg-zinc-800 hover:text-zinc-100 disabled:cursor-not-allowed disabled:opacity-40"
                 aria-label={$t.lightbox.previousImage}
                 disabled={navigating}
                 on:click={onNavigatePrevious}
@@ -60,7 +121,7 @@
             {#if canNavigateNext}
               <button
                 type="button"
-                class="control-focus inline-flex h-10 w-10 items-center justify-center rounded-lg border border-zinc-700 text-lg leading-none text-zinc-300 transition-colors hover:bg-zinc-800 hover:text-zinc-100 disabled:cursor-not-allowed disabled:opacity-40"
+                class="mobile-touch-target control-focus inline-flex h-10 w-10 items-center justify-center rounded-lg border border-zinc-700 text-lg leading-none text-zinc-300 transition-colors hover:bg-zinc-800 hover:text-zinc-100 disabled:cursor-not-allowed disabled:opacity-40"
                 aria-label={$t.lightbox.nextImage}
                 disabled={navigating}
                 on:click={onNavigateNext}
@@ -79,7 +140,7 @@
             <h2 id="lightbox-title" class="text-sm font-semibold text-zinc-100">{$t.lightbox.title}</h2>
             <p class="mt-1 truncate text-xs text-zinc-500">{image.filename}</p>
           </div>
-          <button type="button" class="control-focus rounded-lg p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100" aria-label={$t.lightbox.closeLabel} on:click={onClose}>x</button>
+          <button type="button" class="mobile-touch-target control-focus rounded-lg p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100" aria-label={$t.lightbox.closeLabel} on:click={onClose}>x</button>
         </div>
         <div class="min-h-0 flex-1 space-y-4 overflow-y-auto p-5">
           <div>
@@ -109,7 +170,7 @@
             </div>
           </div>
         </div>
-        <div class="grid grid-cols-2 gap-2 border-t border-zinc-800 p-5">
+        <div class="lightbox-details-actions grid grid-cols-2 gap-2 border-t border-zinc-800 p-5">
           <button type="button" class="control-focus rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800" on:click={() => onEdit(image)}>{$t.common.edit}</button>
           <button type="button" class="control-focus rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800" on:click={() => onFavorite(image)}>{image.favorite ? $t.common.unfavorite : $t.common.favorite}</button>
           <button type="button" class="control-focus rounded-lg border border-emerald-500/40 px-3 py-2 text-xs text-emerald-200 hover:bg-emerald-500/10" on:click={() => onUsePrompt(image)}>{$t.common.usePrompt}</button>

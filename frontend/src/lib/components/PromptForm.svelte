@@ -1,5 +1,6 @@
 <script lang="ts">
   import PromptHelperPanel from '$lib/components/PromptHelperPanel.svelte';
+  import { plainTextInput } from '$lib/actions/plainTextInput';
   import { t } from '$lib/i18n';
   import type { PromptFormState } from '$lib/stores/preview';
   import { RESPONSE_FORMAT_OPTIONS, sanitizeQuantityInput } from '$lib/utils/promptForm';
@@ -71,9 +72,11 @@
           maxlength="4000"
           rows="8"
           autocomplete="off"
+          spellcheck="false"
           aria-label={$t.common.prompt}
           placeholder={$t.promptForm.placeholder}
           class="control-focus h-full min-h-[13rem] w-full flex-1 resize-y rounded-xl border border-zinc-800 bg-zinc-950 px-4 py-3 pb-8 text-sm leading-6 text-zinc-100 focus:border-emerald-500 lg:resize-none"
+          use:plainTextInput
         ></textarea>
         <div class="pointer-events-none absolute bottom-3 right-4 text-xs text-zinc-500">{promptLen}/4000</div>
       </div>

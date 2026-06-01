@@ -16,6 +16,8 @@
     SettingsResponse
   } from '$lib/api/types';
   import { dialog } from '$lib/actions/dialog';
+  import { plainTextInput } from '$lib/actions/plainTextInput';
+  import { swipeClose } from '$lib/actions/swipeClose';
   import { RESPONSE_FORMAT_OPTIONS, normalizeResponseFormat } from '$lib/utils/promptForm';
 
   const MASKED_API_KEY_VALUE = '********';
@@ -394,22 +396,23 @@
 </script>
 
 {#if open}
-  <div class="fixed inset-0 z-50">
+  <div class="mobile-drawer-root fixed inset-0 z-50">
     <button class="drawer-backdrop absolute inset-0" type="button" tabindex="-1" aria-label={$t.settings.closeLabel} on:click={onClose}></button>
     <aside
-      class="fade-in absolute right-0 top-0 flex h-full w-full max-w-lg flex-col border-l border-zinc-800 bg-zinc-900 shadow-2xl"
+      class="mobile-drawer-panel fade-in absolute right-0 top-0 flex h-full w-full max-w-lg flex-col border-l border-zinc-800 bg-zinc-900 shadow-2xl"
       aria-labelledby="settings-drawer-title"
       use:dialog={{ open, onClose }}
+      use:swipeClose={{ enabled: open, onClose }}
     >
       <div class="flex items-center justify-between border-b border-zinc-800 p-5">
         <div>
           <h2 id="settings-drawer-title" class="text-lg font-semibold text-zinc-100">{$t.settings.title}</h2>
           <p class="mt-1 text-xs text-zinc-500">{$t.settings.subtitle}</p>
         </div>
-        <button type="button" class="control-focus rounded-lg p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100" aria-label={$t.settings.closeLabel} on:click={onClose}>x</button>
+        <button type="button" class="mobile-touch-target control-focus rounded-lg p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100" aria-label={$t.settings.closeLabel} on:click={onClose}>x</button>
       </div>
 
-      <div class="min-h-0 flex-1 overflow-y-auto p-5">
+      <div class="mobile-drawer-scroll min-h-0 flex-1 overflow-y-auto p-5">
         <button
           type="button"
           class="control-focus mb-5 w-full rounded-lg border border-zinc-700 px-3 py-2.5 text-sm font-semibold text-zinc-200 transition-colors hover:border-zinc-600 hover:bg-zinc-800"
@@ -683,10 +686,10 @@
     </aside>
 
     {#if overallConfigOpen}
-      <div class="fixed inset-0 z-[70] flex items-center justify-center bg-black/70 p-4">
+      <div class="mobile-dialog-root fixed inset-0 z-[70] flex items-center justify-center bg-black/70 p-4">
         <button class="absolute inset-0" type="button" tabindex="-1" aria-label={$t.settings.closeOverallConfig} on:click={closeOverallConfigModal}></button>
         <div
-          class="fade-in relative flex max-h-[90vh] w-full max-w-5xl flex-col rounded-xl border border-zinc-800 bg-zinc-900 shadow-2xl"
+          class="mobile-dvh-dialog fade-in relative flex max-h-[90vh] w-full max-w-5xl flex-col rounded-xl border border-zinc-800 bg-zinc-900 shadow-2xl"
           aria-labelledby="overall-config-dialog-title"
           use:dialog={{ open: overallConfigOpen, onClose: closeOverallConfigModal }}
         >
@@ -695,7 +698,7 @@
               <h2 id="overall-config-dialog-title" class="text-base font-semibold text-zinc-100">{$t.settings.overallConfig}</h2>
               <p class="mt-1 text-xs leading-5 text-zinc-500">{$t.settings.overallConfigHint}</p>
             </div>
-            <button type="button" class="control-focus rounded-lg p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100" aria-label={$t.settings.closeOverallConfig} on:click={closeOverallConfigModal}>
+            <button type="button" class="mobile-touch-target control-focus rounded-lg p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100" aria-label={$t.settings.closeOverallConfig} on:click={closeOverallConfigModal}>
               x
             </button>
           </div>
@@ -792,10 +795,10 @@
     {/if}
 
     {#if systemPromptOpen}
-      <div class="fixed inset-0 z-[70] flex items-center justify-center bg-black/70 p-4">
+      <div class="mobile-dialog-root fixed inset-0 z-[70] flex items-center justify-center bg-black/70 p-4">
         <button class="absolute inset-0" type="button" tabindex="-1" aria-label={$t.settings.closeSystemPromptEditor} on:click={closeSystemPromptEditor}></button>
         <div
-          class="fade-in relative flex max-h-[88vh] w-full max-w-3xl flex-col rounded-xl border border-zinc-800 bg-zinc-900 shadow-2xl"
+          class="mobile-dvh-dialog fade-in relative flex max-h-[88vh] w-full max-w-3xl flex-col rounded-xl border border-zinc-800 bg-zinc-900 shadow-2xl"
           aria-labelledby="system-prompt-dialog-title"
           use:dialog={{ open: systemPromptOpen, onClose: closeSystemPromptEditor }}
         >
@@ -804,7 +807,7 @@
               <h2 id="system-prompt-dialog-title" class="text-base font-semibold text-zinc-100">{$t.settings.systemPromptTitle}</h2>
               <p class="mt-1 text-xs leading-5 text-zinc-500">{$t.settings.systemPromptHint}</p>
             </div>
-            <button type="button" class="control-focus rounded-lg p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100" aria-label={$t.settings.closeSystemPromptEditor} on:click={closeSystemPromptEditor}>
+            <button type="button" class="mobile-touch-target control-focus rounded-lg p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100" aria-label={$t.settings.closeSystemPromptEditor} on:click={closeSystemPromptEditor}>
               x
             </button>
           </div>
@@ -817,9 +820,10 @@
                 <span class="mb-2 block text-xs font-medium text-zinc-400">{$t.settings.systemPromptLabel}</span>
                 <textarea
                   bind:value={systemPromptText}
-                  class="control-focus min-h-[420px] w-full resize-y rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-3 font-mono text-xs leading-5 text-zinc-100 focus:border-emerald-500"
+                  class="system-prompt-textarea control-focus min-h-[420px] w-full resize-y rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-3 font-mono text-xs leading-5 text-zinc-100 focus:border-emerald-500"
                   spellcheck="false"
                   data-autofocus
+                  use:plainTextInput
                 ></textarea>
               </label>
             {/if}

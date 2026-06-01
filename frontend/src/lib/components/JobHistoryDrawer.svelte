@@ -5,6 +5,7 @@
   import { formatBeijingTime, jobFailureMessage, operationLabel, stageLabel, statusLabel } from '$lib/utils/format';
   import { isActiveJobStatus, isFailureJobStatus } from '$lib/utils/jobs';
   import { dialog } from '$lib/actions/dialog';
+  import { swipeClose } from '$lib/actions/swipeClose';
 
   type JobsTab = 'running' | 'history';
   type MaybePromise = void | Promise<void>;
@@ -150,19 +151,20 @@
 </script>
 
 {#if open}
-  <div class="fixed inset-0 z-50">
+  <div class="mobile-drawer-root fixed inset-0 z-50">
     <button class="drawer-backdrop absolute inset-0" type="button" tabindex="-1" aria-label={$t.jobs.closeLabel} on:click={onClose}></button>
     <aside
-      class="fade-in absolute right-0 top-0 flex h-full w-full max-w-lg flex-col border-l border-zinc-800 bg-zinc-900 shadow-2xl"
+      class="mobile-drawer-panel fade-in absolute right-0 top-0 flex h-full w-full max-w-lg flex-col border-l border-zinc-800 bg-zinc-900 shadow-2xl"
       aria-labelledby="jobs-drawer-title"
       use:dialog={{ open, onClose }}
+      use:swipeClose={{ enabled: open, onClose }}
     >
       <div class="flex items-center justify-between border-b border-zinc-800 p-5">
         <div class="min-w-0">
           <h2 id="jobs-drawer-title" class="text-lg font-semibold text-zinc-100">{$t.jobs.title}</h2>
           <p class="mt-1 text-xs text-zinc-500">{$t.jobs.subtitle}</p>
         </div>
-        <button type="button" class="control-focus rounded-lg p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100" aria-label={$t.jobs.closeLabel} on:click={onClose}>x</button>
+        <button type="button" class="mobile-touch-target control-focus rounded-lg p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100" aria-label={$t.jobs.closeLabel} on:click={onClose}>x</button>
       </div>
 
       <div class="flex flex-col gap-3 border-b border-zinc-800 p-5 sm:flex-row sm:items-center sm:justify-between">
@@ -207,7 +209,7 @@
         </div>
       </div>
 
-      <div bind:this={historyScrollEl} class="min-h-0 flex-1 overflow-y-auto p-5" on:scroll={handleHistoryScroll}>
+      <div bind:this={historyScrollEl} class="mobile-drawer-scroll min-h-0 flex-1 overflow-y-auto p-5" on:scroll={handleHistoryScroll}>
         {#if internalActiveTab === 'running' && jobs.length === 0}
           <div class="rounded-xl border border-dashed border-zinc-800 bg-zinc-950/35 px-4 py-10 text-center">
             <p class="text-sm font-medium text-zinc-300">{$t.jobs.noRunning}</p>

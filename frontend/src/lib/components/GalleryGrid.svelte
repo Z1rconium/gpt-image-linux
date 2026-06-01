@@ -2,7 +2,7 @@
   import type { GalleryEntry, GalleryResponse } from '$lib/api/types';
   import { t } from '$lib/i18n';
   import type { GalleryFilters, GalleryOperationStatus } from '$lib/stores/gallery';
-  import { formatBytes, galleryImageSize, thumbnailUrl } from '$lib/utils/format';
+  import { formatBytes, galleryImageSize, imageUrl, thumbnailUrl } from '$lib/utils/format';
 
   export let gallery: GalleryResponse | null = null;
   export let filters: GalleryFilters;
@@ -104,6 +104,11 @@
   function handleSearchInput(event: Event) {
     const value = (event.currentTarget as HTMLInputElement).value;
     onFilter('prompt', value);
+  }
+
+  function thumbnailSrcset(image: GalleryEntry) {
+    const fullWidth = image.image_width && image.image_width > 512 ? image.image_width : 1024;
+    return `${thumbnailUrl(image.filename, image.thumbnail_url)} 512w, ${imageUrl(image.filename)} ${fullWidth}w`;
   }
 </script>
 
@@ -237,7 +242,7 @@
   {/if}
 
   {#if initialLoading}
-    <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3" aria-label={$t.gallery.loading}>
+    <div class="grid gap-4 sm:grid-cols-2 md:gap-5 lg:grid-cols-3 lg:gap-4" aria-label={$t.gallery.loading}>
       {#each skeletonCards as _}
         <div class="overflow-hidden rounded-xl border border-zinc-800 bg-zinc-950/45">
           <div class="aspect-square animate-pulse bg-zinc-800/60"></div>
@@ -267,7 +272,7 @@
         </div>
       {/if}
 
-      <div class={`grid gap-4 sm:grid-cols-2 lg:grid-cols-3 ${loading ? 'opacity-70' : ''}`}>
+      <div class={`grid gap-4 sm:grid-cols-2 md:gap-5 lg:grid-cols-3 lg:gap-4 ${loading ? 'opacity-70' : ''}`}>
         {#each images as image, index (image.id)}
           <article class={`gallery-card overflow-hidden rounded-xl border ${selectedIds.has(image.id) ? 'border-emerald-400 bg-emerald-500/10' : 'border-zinc-800 bg-zinc-950/45'}`}>
             <button type="button" class="control-focus relative block aspect-square w-full bg-zinc-950" on:click={() => handleImageClick(image)}>
@@ -276,16 +281,23 @@
                   {selectedIds.has(image.id) ? '✓' : ''}
                 </span>
               {/if}
-              <img
-                src={thumbnailUrl(image.filename, image.thumbnail_url)}
-                alt={image.prompt}
-                class="h-full w-full object-cover"
-                loading={index < EAGER_THUMB_COUNT ? 'eager' : 'lazy'}
-                fetchpriority={index < EAGER_THUMB_COUNT ? 'high' : 'auto'}
-                decoding="async"
-                width={image.image_width || undefined}
-                height={image.image_height || undefined}
-              />
+              <picture class="block h-full w-full">
+                <source
+                  media="(max-width: 1023px)"
+                  srcset={thumbnailSrcset(image)}
+                  sizes="(max-width: 639px) calc(100vw - 32px), calc((100vw - 64px) / 2)"
+                />
+                <img
+                  src={thumbnailUrl(image.filename, image.thumbnail_url)}
+                  alt={image.prompt}
+                  class="h-full w-full object-cover"
+                  loading={index < EAGER_THUMB_COUNT ? 'eager' : 'lazy'}
+                  fetchpriority={index < EAGER_THUMB_COUNT ? 'high' : 'auto'}
+                  decoding="async"
+                  width={image.image_width || undefined}
+                  height={image.image_height || undefined}
+                />
+              </picture>
             </button>
             <div class="space-y-3 p-3">
               <div class="min-w-0">
@@ -293,12 +305,12 @@
                 <p class="mt-1 text-xs text-zinc-500">{galleryImageSize(image)} / {image.model || '-'}</p>
               </div>
               <div class="flex flex-wrap gap-2">
-                <button type="button" class="control-focus rounded-md border border-emerald-500/40 px-2 py-1 text-xs text-emerald-200 hover:bg-emerald-500/10" on:click={(event) => handleGalleryAction(event, () => onUsePrompt(image))}>{$t.common.usePrompt}</button>
-                <button type="button" class="control-focus rounded-md border border-emerald-500/40 px-2 py-1 text-xs text-emerald-200 hover:bg-emerald-500/10" on:click={(event) => handleGalleryAction(event, () => onUseAll(image))}>{$t.common.useAllParams}</button>
-                <button type="button" class="control-focus rounded-md border border-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800" on:click={(event) => handleGalleryAction(event, () => onEdit(image))}>{$t.common.edit}</button>
-                <button type="button" class="control-focus rounded-md border border-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800" on:click={(event) => handleGalleryAction(event, () => onFavorite(image))}>{image.favorite ? $t.common.unfavorite : $t.common.favorite}</button>
-                <a href={`/api/download/${encodeURIComponent(image.filename)}`} class="control-focus rounded-md border border-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800" on:click|stopPropagation>{$t.common.download}</a>
-                <button type="button" class="control-focus rounded-md border border-red-500/40 px-2 py-1 text-xs text-red-300 hover:bg-red-500/10" on:click={(event) => handleGalleryAction(event, () => onDelete(image))}>{$t.common.delete}</button>
+                <button type="button" class="gallery-card-action control-focus rounded-md border border-emerald-500/40 px-2 py-1 text-xs text-emerald-200 hover:bg-emerald-500/10" on:click={(event) => handleGalleryAction(event, () => onUsePrompt(image))}>{$t.common.usePrompt}</button>
+                <button type="button" class="gallery-card-action control-focus rounded-md border border-emerald-500/40 px-2 py-1 text-xs text-emerald-200 hover:bg-emerald-500/10" on:click={(event) => handleGalleryAction(event, () => onUseAll(image))}>{$t.common.useAllParams}</button>
+                <button type="button" class="gallery-card-action control-focus rounded-md border border-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800" on:click={(event) => handleGalleryAction(event, () => onEdit(image))}>{$t.common.edit}</button>
+                <button type="button" class="gallery-card-action control-focus rounded-md border border-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800" on:click={(event) => handleGalleryAction(event, () => onFavorite(image))}>{image.favorite ? $t.common.unfavorite : $t.common.favorite}</button>
+                <a href={`/api/download/${encodeURIComponent(image.filename)}`} class="gallery-card-action control-focus rounded-md border border-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800" on:click|stopPropagation>{$t.common.download}</a>
+                <button type="button" class="gallery-card-action control-focus rounded-md border border-red-500/40 px-2 py-1 text-xs text-red-300 hover:bg-red-500/10" on:click={(event) => handleGalleryAction(event, () => onDelete(image))}>{$t.common.delete}</button>
               </div>
             </div>
           </article>
