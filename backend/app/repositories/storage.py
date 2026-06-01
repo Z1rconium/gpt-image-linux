@@ -208,6 +208,8 @@ R2_BACKUP_SETTINGS_KEY = "r2_backup_settings"
 SQLITE_TIMEOUT_SECONDS = 30.0
 DATA_DIR_MODE = 0o700
 DATA_FILE_MODE = 0o600
+DATA_PERMISSION_CHECK_INTERVAL_SECONDS = 60.0
+GALLERY_SYNC_BATCH_SIZE = 500
 GALLERY_FTS_VERSION_KEY = "gallery_fts_version"
 GALLERY_FTS_VERSION = "trigram-v1"
 GALLERY_FTS_MIN_QUERY_LENGTH = 3
@@ -217,7 +219,10 @@ _GALLERY_BYTES_CACHE_MAX_SIZE = 512
 _db_initialized = False
 _db_init_lock = threading.RLock()
 _storage_lock = threading.RLock()
+_gallery_file_write_lock = threading.RLock()
 _dirs_initialized = False
+_last_permissions_check = -DATA_PERMISSION_CHECK_INTERVAL_SECONDS
+_permissions_check_lock = threading.RLock()
 
 _filter_options_cache: "GalleryFilterOptions | None" = None
 _filter_options_cache_lock = threading.RLock()
@@ -290,7 +295,20 @@ def _chmod_path(path: Path, mode: int) -> None:
         logger.warning("Failed to chmod %s to %#o: %s", path, mode, e)
 
 
-def _secure_data_storage_permissions() -> None:
+def _secure_data_storage_permissions(*, force: bool = False) -> None:
+    global _last_permissions_check
+    if os.name == "nt":
+        return
+
+    now = time.monotonic()
+    with _permissions_check_lock:
+        if (
+            not force
+            and now - _last_permissions_check < DATA_PERMISSION_CHECK_INTERVAL_SECONDS
+        ):
+            return
+        _last_permissions_check = now
+
     data_dir = Path(config.DATA_DIR)
     database_path = Path(config.DATABASE_FILE)
     for directory in {data_dir, database_path.parent}:
@@ -536,7 +554,7 @@ def _ensure_directories():
     Path(config.THUMBNAILS_DIR).mkdir(parents=True, exist_ok=True)
     Path(config.DATA_DIR).mkdir(parents=True, exist_ok=True)
     Path(config.DATABASE_FILE).parent.mkdir(parents=True, exist_ok=True)
-    _secure_data_storage_permissions()
+    _secure_data_storage_permissions(force=True)
     _dirs_initialized = True
 
 
@@ -571,7 +589,6 @@ def _open_connection() -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA busy_timeout = 30000")
     conn.execute("PRAGMA synchronous = NORMAL")
-    _secure_data_storage_permissions()
     return conn
 
 
@@ -680,12 +697,10 @@ def _ensure_gallery_fts(conn: sqlite3.Connection):
 def _ensure_database():
     global _db_initialized
     if _db_initialized and Path(config.DATABASE_FILE).exists():
-        _secure_data_storage_permissions()
         return
 
     with _db_init_lock:
         if _db_initialized and Path(config.DATABASE_FILE).exists():
-            _secure_data_storage_permissions()
             return
 
         with _connect() as conn:
@@ -803,7 +818,7 @@ def _ensure_database():
             conn.commit()
 
         _db_initialized = True
-        _secure_data_storage_permissions()
+        _secure_data_storage_permissions(force=True)
 
 
 def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -1992,13 +2007,14 @@ def _save_images_and_insert_gallery_entries(
                     prepared.thumbnail_filename
                 )
 
-        with _storage_lock:
-            _promote_prepared_images(prepared_files)
-            with _connect() as conn:
-                with _transaction(conn):
-                    with observe_job_stage("db_insert"):
-                        _insert_gallery_entries_on_conn(conn, gallery_entries)
-            _promote_prepared_thumbnails(prepared_files)
+        with _gallery_file_write_lock:
+            with _storage_lock:
+                _promote_prepared_images(prepared_files)
+                with _connect() as conn:
+                    with _transaction(conn):
+                        with observe_job_stage("db_insert"):
+                            _insert_gallery_entries_on_conn(conn, gallery_entries)
+                _promote_prepared_thumbnails(prepared_files)
     except BaseException:
         _cleanup_prepared_gallery_files(prepared_files)
         raise
@@ -2028,13 +2044,18 @@ def import_gallery_entries(
         if not normalized_entries:
             return 0
 
-        with _storage_lock:
+        with _gallery_file_write_lock:
             with _connect() as conn:
                 _dedupe_import_entries_on_conn(conn, normalized_entries, prepared_files)
-                _promote_prepared_images(prepared_files)
-                with _transaction(conn):
-                    with observe_job_stage("db_insert"):
-                        _insert_gallery_entries_on_conn(conn, normalized_entries)
+
+            _promote_prepared_images(prepared_files)
+
+            with _storage_lock:
+                with _connect() as conn:
+                    with _transaction(conn):
+                        with observe_job_stage("db_insert"):
+                            _insert_gallery_entries_on_conn(conn, normalized_entries)
+
             _promote_prepared_thumbnails(prepared_files)
         return len(normalized_entries)
     except BaseException:
@@ -2752,23 +2773,44 @@ def sync_gallery_with_image_files() -> int:
     _ensure_database()
     with _storage_lock:
         image_filenames = _scan_image_files()
+        removed_count = 0
         with _connect() as conn:
             with _transaction(conn):
-                rows = conn.execute("SELECT id, filename FROM gallery_entries").fetchall()
-                stale_ids = [
-                    row["id"]
-                    for row in rows
-                    if row["filename"] and row["filename"] not in image_filenames
-                ]
-                if stale_ids:
+                last_id = ""
+                while True:
+                    rows = conn.execute(
+                        """
+                        SELECT id, filename
+                        FROM gallery_entries
+                        WHERE id > ?
+                        ORDER BY id
+                        LIMIT ?
+                        """,
+                        (last_id, GALLERY_SYNC_BATCH_SIZE),
+                    ).fetchall()
+                    if not rows:
+                        break
+
+                    last_id = str(rows[-1]["id"])
+                    stale_ids = [
+                        row["id"]
+                        for row in rows
+                        if row["filename"] and row["filename"] not in image_filenames
+                    ]
+                    if not stale_ids:
+                        continue
+
                     conn.executemany(
                         "DELETE FROM gallery_entries WHERE id = ?",
                         [(entry_id,) for entry_id in stale_ids],
                     )
+                    removed_count += len(stale_ids)
+
+                if removed_count:
                     _invalidate_filter_options_cache()
                     _invalidate_gallery_total_bytes_cache()
                     _clear_verified_thumbnails()
-                return len(stale_ids)
+                return removed_count
 
 
 def _delete_gallery_entries_by_ids(

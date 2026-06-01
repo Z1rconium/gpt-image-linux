@@ -55,6 +55,58 @@ SYNC_JOB_TTL_SECONDS = 1800
 SCHEDULED_R2_SYNC_DISABLED_POLL_SECONDS = 60
 
 
+def _resolve_gallery_image_path(filename: str) -> Path | None:
+    path = storage.safe_image_path(filename)
+    if not path or not path.exists():
+        return None
+    if not storage.is_gallery_filename_referenced(filename):
+        return None
+    return path
+
+
+def _resolve_gallery_thumbnail_path(filename: str) -> Path | None:
+    if not storage.is_gallery_filename_referenced(filename):
+        return None
+
+    thumbnail_filename = storage.ensure_thumbnail_for_image(filename)
+    if not thumbnail_filename:
+        return None
+
+    path = storage.safe_thumbnail_path(thumbnail_filename)
+    if path and path.exists():
+        return path
+
+    storage.invalidate_thumbnail_cache(thumbnail_filename)
+    thumbnail_filename = storage.ensure_thumbnail_for_image(filename)
+    if not thumbnail_filename:
+        return None
+
+    path = storage.safe_thumbnail_path(thumbnail_filename)
+    if not path or not path.exists():
+        return None
+    return path
+
+
+def _resolve_batch_download_entries(
+    entries: list[GalleryEntry],
+) -> tuple[list[GalleryEntry], list[dict[str, str]]]:
+    exportable_entries: list[GalleryEntry] = []
+    skipped_entries: list[dict[str, str]] = []
+    for entry in entries:
+        path = storage.safe_image_path(entry.filename)
+        if path and path.exists():
+            exportable_entries.append(entry)
+            continue
+        skipped_entries.append(
+            {
+                "id": entry.id,
+                "filename": entry.filename,
+                "reason": "image_file_missing",
+            }
+        )
+    return exportable_entries, skipped_entries
+
+
 def normalize_gallery_date_filter(value: str | None, end_of_day: bool = False) -> str | None:
     raw_value = str(value or "").strip()
     if not raw_value:
@@ -787,7 +839,6 @@ async def download_gallery_batch(req: GalleryBatchRequest):
         raise HTTPException(status_code=404, detail="Gallery entries not found")
 
     missing_ids = _missing_gallery_ids(req.ids, entries)
-    exportable_entries: list[GalleryEntry] = []
     skipped_entries = [
         {
             "id": image_id,
@@ -795,18 +846,11 @@ async def download_gallery_batch(req: GalleryBatchRequest):
         }
         for image_id in missing_ids
     ]
-    for entry in entries:
-        path = await asyncio.to_thread(storage.safe_image_path, entry.filename)
-        if path and await asyncio.to_thread(path.exists):
-            exportable_entries.append(entry)
-            continue
-        skipped_entries.append(
-            {
-                "id": entry.id,
-                "filename": entry.filename,
-                "reason": "image_file_missing",
-            }
-        )
+    exportable_entries, file_skipped_entries = await asyncio.to_thread(
+        _resolve_batch_download_entries,
+        entries,
+    )
+    skipped_entries.extend(file_skipped_entries)
 
     return await _gallery_zip_response(
         exportable_entries,
@@ -1052,10 +1096,8 @@ async def get_gallery_item(image_id: str):
 
 
 async def _image_file_response(filename: str, *, download: bool = False):
-    path = await asyncio.to_thread(storage.safe_image_path, filename)
-    if not path or not await asyncio.to_thread(path.exists):
-        raise HTTPException(status_code=404, detail="Image not found")
-    if not await asyncio.to_thread(storage.is_gallery_filename_referenced, filename):
+    path = await asyncio.to_thread(_resolve_gallery_image_path, filename)
+    if not path:
         raise HTTPException(status_code=404, detail="Image not found")
 
     media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
@@ -1081,27 +1123,12 @@ async def serve_image(filename: str):
 
 @router.get("/api/thumb/{filename}")
 async def serve_thumbnail(filename: str):
-    if not await asyncio.to_thread(storage.is_gallery_filename_referenced, filename):
-        raise HTTPException(status_code=404, detail="Thumbnail not found")
-    thumbnail_filename = await asyncio.to_thread(
-        storage.ensure_thumbnail_for_image,
+    path = await asyncio.to_thread(
+        _resolve_gallery_thumbnail_path,
         filename,
     )
-    if not thumbnail_filename:
+    if not path:
         raise HTTPException(status_code=404, detail="Thumbnail not found")
-
-    path = storage.safe_thumbnail_path(thumbnail_filename)
-    if not path or not path.exists():
-        await asyncio.to_thread(storage.invalidate_thumbnail_cache, thumbnail_filename)
-        thumbnail_filename = await asyncio.to_thread(
-            storage.ensure_thumbnail_for_image,
-            filename,
-        )
-        if not thumbnail_filename:
-            raise HTTPException(status_code=404, detail="Thumbnail not found")
-        path = storage.safe_thumbnail_path(thumbnail_filename)
-        if not path or not path.exists():
-            raise HTTPException(status_code=404, detail="Thumbnail not found")
 
     return FileResponse(
         path,
