@@ -7,6 +7,7 @@ import secrets
 import sqlite3
 import threading
 import time
+from collections import OrderedDict
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -220,13 +221,17 @@ _db_initialized = False
 _db_init_lock = threading.RLock()
 _storage_lock = threading.RLock()
 _gallery_file_write_lock = threading.RLock()
+_thread_local = threading.local()
 _dirs_initialized = False
 _last_permissions_check = -DATA_PERMISSION_CHECK_INTERVAL_SECONDS
 _permissions_check_lock = threading.RLock()
 
 _filter_options_cache: "GalleryFilterOptions | None" = None
 _filter_options_cache_lock = threading.RLock()
-_gallery_total_bytes_cache: dict[tuple[str, str, tuple[Any, ...]], tuple[float, int]] = {}
+_gallery_total_bytes_cache: OrderedDict[
+    tuple[str, str, tuple[Any, ...]],
+    tuple[float, int],
+] = OrderedDict()
 _gallery_total_bytes_cache_lock = threading.RLock()
 _gallery_fts_available: bool | None = None
 
@@ -594,16 +599,60 @@ def _open_connection() -> sqlite3.Connection:
 
 @contextmanager
 def _connect() -> Iterator[sqlite3.Connection]:
-    conn = _open_connection()
+    conn = _get_thread_connection()
+    depth = int(getattr(_thread_local, "connection_depth", 0))
+    _thread_local.connection_depth = depth + 1
     try:
         yield conn
+    except Exception:
+        if depth == 0 and conn.in_transaction:
+            conn.rollback()
+        raise
     finally:
+        _thread_local.connection_depth = depth
+        if depth == 0 and conn.in_transaction:
+            conn.rollback()
+
+
+def _get_thread_connection() -> sqlite3.Connection:
+    database_file = str(config.DATABASE_FILE)
+    conn = getattr(_thread_local, "conn", None)
+    conn_database_file = getattr(_thread_local, "database_file", None)
+    if (
+        conn is not None
+        and conn_database_file == database_file
+        and Path(database_file).exists()
+    ):
+        return conn
+
+    _close_thread_connection()
+    conn = _open_connection()
+    _thread_local.conn = conn
+    _thread_local.database_file = database_file
+    _thread_local.connection_depth = 0
+    return conn
+
+
+def _close_thread_connection():
+    conn = getattr(_thread_local, "conn", None)
+    if conn is None:
+        return
+    try:
+        if conn.in_transaction:
+            conn.rollback()
         conn.close()
+    finally:
+        _thread_local.conn = None
+        _thread_local.database_file = None
+        _thread_local.connection_depth = 0
 
 
 def close_database_connections():
-    """No-op kept for API compatibility; connections are now per-call."""
+    """Close this thread's cached SQLite connection and clear storage caches."""
+    _close_thread_connection()
     _clear_verified_thumbnails()
+    _invalidate_filter_options_cache()
+    _invalidate_gallery_total_bytes_cache()
 
 
 
@@ -2122,53 +2171,54 @@ def _backfill_gallery_bytes_from_known_rows_on_conn(conn: sqlite3.Connection) ->
     return conn.total_changes - before_changes
 
 
-def _backfill_gallery_bytes_from_filenames_on_conn(
-    conn: sqlite3.Connection,
-) -> int:
+def _backfill_gallery_bytes_from_filenames() -> int:
     total_updated = 0
     batch_size = 200
     last_filename = ""
     while True:
-        rows = conn.execute(
-            """
-            SELECT filename
-            FROM gallery_entries
-            WHERE filename IS NOT NULL
-              AND TRIM(filename) != ''
-              AND bytes IS NULL
-              AND filename > ?
-            GROUP BY filename
-            ORDER BY filename ASC
-            LIMIT ?
-            """,
-            (last_filename, batch_size),
-        ).fetchall()
+        with _connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT filename
+                FROM gallery_entries
+                WHERE filename IS NOT NULL
+                  AND TRIM(filename) != ''
+                  AND bytes IS NULL
+                  AND filename > ?
+                GROUP BY filename
+                ORDER BY filename ASC
+                LIMIT ?
+                """,
+                (last_filename, batch_size),
+            ).fetchall()
         if not rows:
             break
 
         backfills: list[tuple[int, str]] = []
         for row in rows:
-            filename = str(row["filename"] or "").strip()
+            stored_filename = str(row["filename"] or "")
+            filename = stored_filename.strip()
             if not filename:
                 continue
-            last_filename = filename
+            last_filename = stored_filename
             size = _stat_image_bytes(filename)
             if size is None:
                 continue
-            backfills.append((size, filename))
+            backfills.append((size, stored_filename))
 
         if backfills:
-            before_changes = conn.total_changes
-            with _transaction(conn):
-                conn.executemany(
-                    """
-                    UPDATE gallery_entries
-                    SET bytes = ?
-                    WHERE filename = ? AND bytes IS NULL
-                    """,
-                    backfills,
-                )
-            total_updated += conn.total_changes - before_changes
+            with _connect() as conn:
+                before_changes = conn.total_changes
+                with _transaction(conn):
+                    conn.executemany(
+                        """
+                        UPDATE gallery_entries
+                        SET bytes = ?
+                        WHERE filename = ? AND bytes IS NULL
+                        """,
+                        backfills,
+                    )
+                total_updated += conn.total_changes - before_changes
 
         if len(rows) < batch_size:
             break
@@ -2185,7 +2235,7 @@ def backfill_missing_gallery_bytes() -> int:
     _ensure_database()
     with _connect() as conn:
         updated = _backfill_gallery_bytes_from_known_rows_on_conn(conn)
-        updated += _backfill_gallery_bytes_from_filenames_on_conn(conn)
+    updated += _backfill_gallery_bytes_from_filenames()
     if updated:
         _invalidate_gallery_total_bytes_cache()
     return updated
@@ -2220,7 +2270,10 @@ def _get_gallery_total_bytes_on_conn(
     with _gallery_total_bytes_cache_lock:
         cached = _gallery_total_bytes_cache.get(cache_key)
         if cached and (now - cached[0]) < GALLERY_TOTAL_BYTES_CACHE_SECONDS:
+            _gallery_total_bytes_cache.move_to_end(cache_key)
             return cached[1]
+        if cached:
+            _gallery_total_bytes_cache.pop(cache_key, None)
 
     row = conn.execute(
         f"""
@@ -2238,9 +2291,10 @@ def _get_gallery_total_bytes_on_conn(
     total_bytes = int(row["total_bytes"] or 0) if row else 0
 
     with _gallery_total_bytes_cache_lock:
-        if len(_gallery_total_bytes_cache) >= _GALLERY_BYTES_CACHE_MAX_SIZE:
-            _gallery_total_bytes_cache.clear()
         _gallery_total_bytes_cache[cache_key] = (now, total_bytes)
+        _gallery_total_bytes_cache.move_to_end(cache_key)
+        while len(_gallery_total_bytes_cache) > _GALLERY_BYTES_CACHE_MAX_SIZE:
+            _gallery_total_bytes_cache.popitem(last=False)
 
     return total_bytes
 

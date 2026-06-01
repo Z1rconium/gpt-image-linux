@@ -162,6 +162,9 @@ function createJobsStore() {
         stopJobsPolling();
         if (Array.isArray(data)) applyActiveJobs(data);
       },
+      onNetworkError: () => {
+        startJobsPolling();
+      },
       onError: () => {
         startJobsPolling();
       }
@@ -209,6 +212,9 @@ function createJobsStore() {
           terminal = true;
           closeActiveJobSource();
         }
+      },
+      onNetworkError: () => {
+        if (!terminal && trackedJobId === jobId) void pollJob(jobId, updatePreviewFromJob, setPreviewError);
       },
       onError: () => {
         closeActiveJobEventSource();

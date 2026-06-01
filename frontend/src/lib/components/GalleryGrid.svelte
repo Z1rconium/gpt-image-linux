@@ -101,13 +101,9 @@
     commitPageInput();
   }
 
-  let searchTimeout: ReturnType<typeof setTimeout> | undefined;
   function handleSearchInput(event: Event) {
     const value = (event.currentTarget as HTMLInputElement).value;
-    clearTimeout(searchTimeout);
-    searchTimeout = setTimeout(() => {
-      onFilter('prompt', value);
-    }, 300);
+    onFilter('prompt', value);
   }
 </script>
 
