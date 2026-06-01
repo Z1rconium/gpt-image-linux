@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient
 from backend.app import main as backend_main
 from backend.app.api import jobs
 from backend.app.api.routers import access as access_router
+from backend.app.api.routers import gallery as gallery_router
 from backend.app.api.routers import settings as settings_router
 from backend.app.api.routers import static as static_router
 from backend.app.api.jobs import EditImageSource
@@ -119,6 +120,7 @@ def _configure_runtime(tmp_path: Path, *, access_key: str = "", allow_unauthenti
     config.R2_KEY_PREFIX = "gallery/"
     config.R2_ACCESS_KEY_ID = ""
     config.R2_SECRET_ACCESS_KEY = ""
+    config.R2_SYNC_INTERVAL_HOURS = 0
     config.MAX_SSE_SUBSCRIBERS_GLOBAL = 200
     config.MAX_SSE_SUBSCRIBERS_PER_IP = 10
     config.SSE_CONNECTION_TTL_SECONDS = 3600
@@ -1317,6 +1319,7 @@ def test_r2_backup_settings_mask_preserve_and_clear(client):
     settings = client.get("/api/settings").json()
     assert settings["r2_backup"]["enabled"] is False
     assert settings["r2_backup"]["key_prefix"] == "gallery/"
+    assert settings["r2_backup"]["sync_interval_hours"] == 0
 
     updated = client.post(
         "/api/settings",
@@ -1328,6 +1331,7 @@ def test_r2_backup_settings_mask_preserve_and_clear(client):
                 "bucket_name": "image-backups",
                 "region": "auto",
                 "key_prefix": "gallery-test",
+                "sync_interval_hours": 6,
                 "access_key_id": "${TEST_R2_ACCESS_KEY_ID}",
                 "secret_access_key": "${TEST_R2_SECRET_ACCESS_KEY}",
             },
@@ -1341,6 +1345,7 @@ def test_r2_backup_settings_mask_preserve_and_clear(client):
     assert r2["endpoint_url"] == "https://account.r2.cloudflarestorage.com"
     assert r2["bucket_name"] == "image-backups"
     assert r2["key_prefix"] == "gallery-test/"
+    assert r2["sync_interval_hours"] == 6
     assert r2["has_access_key_id"] is True
     assert r2["access_key_id_source"] == "env"
     assert r2["access_key_id_env_var"] == "TEST_R2_ACCESS_KEY_ID"
@@ -1361,6 +1366,7 @@ def test_r2_backup_settings_mask_preserve_and_clear(client):
                 "bucket_name": "image-backups",
                 "region": "auto",
                 "key_prefix": "gallery-test/",
+                "sync_interval_hours": 6,
                 "access_key_id": "********",
                 "secret_access_key": "********",
             },
@@ -1380,6 +1386,7 @@ def test_r2_backup_settings_mask_preserve_and_clear(client):
                 "bucket_name": "",
                 "region": "auto",
                 "key_prefix": "gallery/",
+                "sync_interval_hours": 0,
                 "access_key_id": "",
                 "secret_access_key": "",
             },
@@ -1388,8 +1395,25 @@ def test_r2_backup_settings_mask_preserve_and_clear(client):
     assert cleared.status_code == 200
     assert cleared.json()["r2_backup"]["has_access_key_id"] is False
     assert cleared.json()["r2_backup"]["has_secret_access_key"] is False
+    assert cleared.json()["r2_backup"]["sync_interval_hours"] == 0
     assert storage.load_r2_backup_settings()["access_key_id"] == ""
     assert storage.load_r2_backup_settings()["secret_access_key"] == ""
+
+
+def test_r2_backup_settings_rejects_invalid_sync_interval(client):
+    settings = client.get("/api/settings").json()
+
+    negative = client.post(
+        "/api/settings",
+        json=_settings_payload(settings, r2_backup={"sync_interval_hours": -1}),
+    )
+    assert negative.status_code == 422
+
+    non_numeric = client.post(
+        "/api/settings",
+        json=_settings_payload(settings, r2_backup={"sync_interval_hours": "6"}),
+    )
+    assert non_numeric.status_code == 422
 
 
 def test_r2_env_defaults_fill_empty_persisted_settings(tmp_path, monkeypatch):
@@ -1430,6 +1454,23 @@ def test_r2_env_defaults_fill_empty_persisted_settings(tmp_path, monkeypatch):
     assert persisted["bucket_name"] == "env-image-backups"
     assert persisted["access_key_id"] == "${R2_ACCESS_KEY_ID}"
     assert persisted["secret_access_key"] == "${R2_SECRET_ACCESS_KEY}"
+
+
+def test_r2_sync_interval_env_default_and_invalid_normalization(tmp_path):
+    _configure_runtime(tmp_path)
+    config.R2_SYNC_INTERVAL_HOURS = 4
+
+    settings = storage.load_r2_backup_settings()
+    assert settings["sync_interval_hours"] == 4
+
+    storage.save_r2_backup_settings({"sync_interval_hours": "bad"})
+    assert storage.load_r2_backup_settings()["sync_interval_hours"] == 0
+
+    storage.save_r2_backup_settings({"sync_interval_hours": -2})
+    assert storage.load_r2_backup_settings()["sync_interval_hours"] == 0
+
+    storage.save_r2_backup_settings({"sync_interval_hours": 1.5})
+    assert storage.load_r2_backup_settings()["sync_interval_hours"] == 0
 
 
 def test_missing_r2_settings_key_persists_env_defaults_to_sqlite(tmp_path, monkeypatch):
@@ -1475,12 +1516,14 @@ def test_missing_r2_settings_key_persists_env_defaults_to_sqlite(tmp_path, monke
     config.R2_KEY_PREFIX = "gallery-env/"
     config.R2_ACCESS_KEY_ID = "env-r2-access"
     config.R2_SECRET_ACCESS_KEY = "env-r2-secret"
+    config.R2_SYNC_INTERVAL_HOURS = 8
 
     settings = storage.load_settings()
     assert settings["r2_backup"]["enabled"] is True
     assert settings["r2_backup"]["bucket_name"] == "env-image-backups"
     assert settings["r2_backup"]["access_key_id"] == "${R2_ACCESS_KEY_ID}"
     assert settings["r2_backup"]["secret_access_key"] == "${R2_SECRET_ACCESS_KEY}"
+    assert settings["r2_backup"]["sync_interval_hours"] == 8
 
     with storage._connect() as conn:
         raw = storage._get_setting_value(conn, storage.R2_BACKUP_SETTINGS_KEY)
@@ -1488,6 +1531,7 @@ def test_missing_r2_settings_key_persists_env_defaults_to_sqlite(tmp_path, monke
     persisted = json.loads(raw)
     assert persisted["enabled"] is True
     assert persisted["bucket_name"] == "env-image-backups"
+    assert persisted["sync_interval_hours"] == 8
     assert persisted["key_prefix"] == "gallery-env/"
     assert persisted["access_key_id"] == "${R2_ACCESS_KEY_ID}"
     assert persisted["secret_access_key"] == "${R2_SECRET_ACCESS_KEY}"
@@ -3211,6 +3255,83 @@ def test_gallery_sync_job_accepts_enabled_r2_env_defaults(tmp_path, monkeypatch)
         finished = _wait_for_gallery_sync_job(client, created.json()["job_id"])
         assert finished["status"] == "success"
         assert finished["total_count"] == 1
+
+
+def test_scheduled_gallery_sync_skips_when_disabled(client):
+    _fake_gallery_entry("scheduled-disabled", "one", "1024x1024", "scheduled-disabled.png")
+
+    async def run_once():
+        backend_main.app.state.gallery_sync_lock = asyncio.Lock()
+        return await gallery_router._run_scheduled_gallery_r2_sync_once()
+
+    outcome = asyncio.run(run_once())
+    assert outcome == {"started": False, "reason": "disabled"}
+
+
+def test_scheduled_gallery_sync_creates_regular_sync_job(client, monkeypatch):
+    _fake_gallery_entry("scheduled-sync", "one", "1024x1024", "scheduled-sync.png")
+    storage.save_r2_backup_settings(
+        {
+            "enabled": True,
+            "endpoint_url": "https://account.r2.cloudflarestorage.com",
+            "bucket_name": "image-backups",
+            "region": "auto",
+            "key_prefix": "gallery-test/",
+            "sync_interval_hours": 1,
+            "access_key_id": "${TEST_R2_ACCESS_KEY_ID}",
+            "secret_access_key": "${TEST_R2_SECRET_ACCESS_KEY}",
+        }
+    )
+    seen = {}
+
+    def fake_sync(settings, entries, *, total_count, progress_cb=None, client_factory=None):
+        seen["settings"] = settings
+        seen["entries"] = list(entries)
+        return r2_sync.R2SyncResult(total_count=total_count, compared_count=1)
+
+    monkeypatch.setattr(r2_sync, "sync_gallery_to_r2", fake_sync)
+
+    async def run_once():
+        backend_main.app.state.gallery_sync_lock = asyncio.Lock()
+        outcome = await gallery_router._run_scheduled_gallery_r2_sync_once()
+        assert outcome["started"] is True
+        task = gallery_router._gallery_sync_tasks()[outcome["job_id"]]
+        await task
+        return gallery_router._gallery_sync_jobs()[outcome["job_id"]]
+
+    job = asyncio.run(run_once())
+    assert job["status"] == "success"
+    assert job["total_count"] == 1
+    assert seen["settings"]["sync_interval_hours"] == 1
+    assert [entry["id"] for entry in seen["entries"]] == ["scheduled-sync"]
+
+
+def test_scheduled_gallery_sync_skips_active_sync(client):
+    _fake_gallery_entry("scheduled-active", "one", "1024x1024", "scheduled-active.png")
+    storage.save_r2_backup_settings(
+        {
+            "enabled": True,
+            "endpoint_url": "https://account.r2.cloudflarestorage.com",
+            "bucket_name": "image-backups",
+            "region": "auto",
+            "key_prefix": "gallery-test/",
+            "sync_interval_hours": 1,
+            "access_key_id": "${TEST_R2_ACCESS_KEY_ID}",
+            "secret_access_key": "${TEST_R2_SECRET_ACCESS_KEY}",
+        }
+    )
+
+    async def run_once():
+        backend_main.app.state.gallery_sync_lock = asyncio.Lock()
+        gallery_router._gallery_sync_jobs()["active-sync"] = {
+            "job_id": "active-sync",
+            "status": "running",
+            "updated_at": "2026-05-18T12:00:00Z",
+        }
+        return await gallery_router._run_scheduled_gallery_r2_sync_once()
+
+    outcome = asyncio.run(run_once())
+    assert outcome == {"started": False, "reason": "active_sync"}
 
 
 def test_gallery_sync_job_rejects_empty_gallery_and_missing_r2_config(client):

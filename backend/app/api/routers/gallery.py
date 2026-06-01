@@ -52,6 +52,7 @@ MAX_ACTIVE_SYNC_JOBS = 1
 EXPORT_JOB_TTL_SECONDS = 1800
 EXPORT_JOB_GC_INTERVAL_SECONDS = 300
 SYNC_JOB_TTL_SECONDS = 1800
+SCHEDULED_R2_SYNC_DISABLED_POLL_SECONDS = 60
 
 
 def normalize_gallery_date_filter(value: str | None, end_of_day: bool = False) -> str | None:
@@ -532,6 +533,81 @@ async def _create_reserved_gallery_sync_job(total_count: int) -> dict:
                 detail="A gallery R2 sync job is already queued or running.",
             )
         return _create_gallery_sync_job(total_count)
+
+
+def _r2_sync_interval_hours(r2_settings: dict | None) -> int:
+    if not isinstance(r2_settings, dict):
+        return 0
+    try:
+        interval_hours = int(r2_settings.get("sync_interval_hours") or 0)
+    except (TypeError, ValueError):
+        return 0
+    return interval_hours if interval_hours > 0 else 0
+
+
+async def _scheduled_gallery_r2_sync_delay_seconds() -> int:
+    try:
+        r2_settings = await asyncio.to_thread(storage.load_r2_backup_settings)
+    except Exception:
+        logger.warning("Failed to load R2 settings for scheduled sync", exc_info=True)
+        return SCHEDULED_R2_SYNC_DISABLED_POLL_SECONDS
+    if not r2_settings.get("enabled"):
+        return SCHEDULED_R2_SYNC_DISABLED_POLL_SECONDS
+    interval_hours = _r2_sync_interval_hours(r2_settings)
+    if interval_hours <= 0:
+        return SCHEDULED_R2_SYNC_DISABLED_POLL_SECONDS
+    return interval_hours * 3600
+
+
+async def _run_scheduled_gallery_r2_sync_once() -> dict[str, object]:
+    r2_settings = await asyncio.to_thread(storage.load_r2_backup_settings)
+    interval_hours = _r2_sync_interval_hours(r2_settings)
+    if not r2_settings.get("enabled") or interval_hours <= 0:
+        return {"started": False, "reason": "disabled"}
+
+    try:
+        await asyncio.to_thread(
+            r2_sync.resolve_r2_backup_settings,
+            r2_settings,
+            require_enabled=True,
+        )
+    except r2_sync.R2ConfigurationError as e:
+        logger.info("Skipping scheduled R2 gallery sync: %s", e)
+        return {"started": False, "reason": "invalid_config"}
+
+    gallery_count = await asyncio.to_thread(storage.get_gallery_count)
+    if gallery_count <= 0:
+        return {"started": False, "reason": "empty_gallery"}
+
+    async with _gallery_sync_lock():
+        _cleanup_gallery_sync_jobs()
+        if _active_gallery_sync_count() >= MAX_ACTIVE_SYNC_JOBS:
+            return {"started": False, "reason": "active_sync"}
+        job = _create_gallery_sync_job(gallery_count)
+
+    task = asyncio.create_task(
+        _run_gallery_sync_job(
+            job["job_id"],
+            r2_settings,
+            storage.iter_gallery_export_rows(),
+            total_count=gallery_count,
+        )
+    )
+    _gallery_sync_tasks()[job["job_id"]] = task
+    logger.info("Queued scheduled R2 gallery sync job %s", job["job_id"])
+    return {"started": True, "job_id": job["job_id"]}
+
+
+async def run_gallery_r2_scheduled_sync() -> None:
+    while True:
+        delay_seconds = await _scheduled_gallery_r2_sync_delay_seconds()
+        await asyncio.sleep(delay_seconds)
+        try:
+            await _run_scheduled_gallery_r2_sync_once()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("Scheduled R2 gallery sync failed before job creation", exc_info=True)
 
 
 async def _run_gallery_sync_job(

@@ -124,6 +124,7 @@ const settingsResponse = {
     bucket_name: '',
     region: 'auto',
     key_prefix: 'gallery/',
+    sync_interval_hours: 0,
     access_key_id_masked: '********',
     has_access_key_id: false,
     access_key_id_source: 'empty',
@@ -721,6 +722,7 @@ test('settings drawer traps focus and key form controls have accessible names', 
   await expect(page.getByLabel('Default model')).toHaveValue('preset-default-model');
   await expect(page.getByLabel('Default response format')).toHaveValue('url');
   await expect(page.getByLabel('Webhook URL')).toHaveValue('https://hooks.example.com/***');
+  await expect(page.getByLabel('Sync interval hours')).toHaveValue('0');
   await expect(page.getByLabel('Timeout seconds')).toHaveValue('60');
   await expect(drawer).toContainText('Literal keys are saved as plaintext.');
   await expect(page.getByLabel('Filter prompt')).toBeVisible();
@@ -745,6 +747,20 @@ test('settings drawer saves prompt optimizer timeout seconds', async ({ page }) 
 
   expect(request.postDataJSON().prompt_optimizer).toMatchObject({
     timeout_seconds: 90
+  });
+});
+
+test('settings drawer saves R2 sync interval hours', async ({ page }) => {
+  await loadApp(page);
+
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await page.getByLabel('Sync interval hours').fill('6');
+  const saveRequest = page.waitForRequest((request) => new URL(request.url()).pathname === '/api/settings' && request.method() === 'POST');
+  await page.getByRole('button', { name: 'Save Preset' }).click();
+  const request = await saveRequest;
+
+  expect(request.postDataJSON().r2_backup).toMatchObject({
+    sync_interval_hours: 6
   });
 });
 

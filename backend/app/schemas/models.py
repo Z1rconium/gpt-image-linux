@@ -1,4 +1,4 @@
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator, model_validator
 from typing import Annotated, Literal, Optional
 from datetime import datetime
 
@@ -337,6 +337,7 @@ class R2BackupSettingsResponse(BaseModel):
     bucket_name: str = ""
     region: str = "auto"
     key_prefix: str = "gallery/"
+    sync_interval_hours: int = 0
     access_key_id_masked: str = "***"
     has_access_key_id: bool = False
     access_key_id_source: ApiKeySource = "empty"
@@ -353,6 +354,7 @@ class R2BackupSettingsRequest(StrictRequestModel):
     bucket_name: Optional[str] = Field(default=None, max_length=255)
     region: Optional[str] = Field(default=None, max_length=100)
     key_prefix: Optional[str] = Field(default=None, max_length=1024)
+    sync_interval_hours: Optional[Annotated[StrictInt, Field(ge=0)]] = None
     access_key_id: Optional[str] = Field(default=None, max_length=8192)
     secret_access_key: Optional[str] = Field(default=None, max_length=8192)
 

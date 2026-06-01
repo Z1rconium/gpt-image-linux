@@ -43,7 +43,7 @@ Key characteristics:
 - gallery with filters (FTS-backed prompt search, model, preset, size, date range, favorite), URL-synced page/non-prompt-filter/lightbox/job-history state, direct page-number jump, lightbox previous/next navigation and left/right keyboard shortcuts, “Edit this image”, download, custom delete confirmations with 5-second undo for single images, batch actions with partial-success feedback, delete/delete-all, prompt/image-url copy, and on-demand total-size metadata
 - prompt snippets drawer for reusable prompt templates, stored separately from gallery images in SQLite
 - ZIP export/import (`metadata.json`) with streaming upload, safety validation, low-memory export path, skipped-entry metadata for partial batch downloads, and visible import/export/download progress states
-- Cloudflare R2 gallery backup sync: configurable in `.env` or Web Settings, health-probed from Settings, and manually synced from Gallery without changing local gallery storage as the source of truth
+- Cloudflare R2 gallery backup sync: configurable in `.env` or Web Settings, health-probed from Settings, and manually or periodically synced from Gallery without changing local gallery storage as the source of truth
 - access-key gate, Host/public-origin allowlist, IP allowlist/proxy-header support, GitHub version badge, and CSP nonce injection
 - observability hooks for job stage timings, slow `/api/gallery` query logging, queue/failure metrics, and optional JSON/Prometheus metrics endpoints
 
@@ -348,6 +348,7 @@ The panel supports these upstream paths. The API base URL may either omit or inc
 - Configure it in `.env` with `R2_BACKUP_ENABLED=true` plus the other `R2_*` variables, or in Web Settings. When SQLite has no saved R2 settings yet, startup persists the current `.env` R2 values so they appear in Web Settings. Later Web Settings saves take precedence. Web Settings accepts `${ENV_VAR_NAME}` refs for credentials; literal stored credentials require `ALLOW_PLAINTEXT_SECRETS=true`.
 - Test R2 in Settings runs `HeadBucket`, a prefix-scoped `ListObjectsV2`, and a small probe object write; probe cleanup failure is reported as a warning.
 - The Gallery Sync button uploads only local gallery filenames missing from `R2_KEY_PREFIX`; existing bucket objects are skipped, and bucket-only objects are never deleted or overwritten.
+- Set `R2_SYNC_INTERVAL_HOURS` or the Web Settings interval to a positive integer to run the same incremental sync periodically. `0` disables automatic sync, and startup waits one full interval before the first scheduled run.
 
 ## Image size modes
 
@@ -397,6 +398,7 @@ All variables listed in `.env.example` are also tracked in SQLite for Overall Co
 | `R2_BUCKET_NAME` | empty | Bucket used by Gallery Sync backup |
 | `R2_REGION` | `auto` | S3 client region name for R2 |
 | `R2_KEY_PREFIX` | `gallery/` | Object key prefix for gallery backups; use a dedicated prefix such as `gallery-test/` for validation |
+| `R2_SYNC_INTERVAL_HOURS` | `0` | Scheduled Gallery Sync interval in hours; `0` disables automatic sync |
 | `R2_ACCESS_KEY_ID` | empty | R2 access key ID used by env-ref credentials |
 | `R2_SECRET_ACCESS_KEY` | empty | R2 secret access key used by env-ref credentials |
 | `APP_VERSION` | `VERSION` file | Override the app version shown in the UI and returned by `/api/version`; read on each request |
@@ -600,7 +602,7 @@ GPT Image Panel 是一个轻量级 FastAPI Web 界面，用于图像生成和图
 - Gallery：筛选（FTS 提示词搜索、模型、预设、尺寸、日期区间、收藏）、URL 同步的 page/非提示词筛选/lightbox/job history 状态、页码输入跳转、Lightbox 上一张/下一张导航和左右方向键快捷键、”Edit this image”、下载/删除、批量操作部分成功反馈、单图 5 秒撤销删除、复制提示词/图片链接、按需总大小统计
 - 提示词收藏夹：可复用 prompt 模板，与 Gallery 图片分开存储和管理
 - ZIP 导出导入（含 `metadata.json`）+ 流式上传 + 安全校验 + 低内存导出路径 + 批量下载 skipped metadata + 可见导入/导出/下载进度状态
-- Cloudflare R2 Gallery 备份同步：可通过 `.env` 或 Web Settings 配置，可在 Settings 测试连通性，并可从 Gallery 手动增量同步；本地 Gallery 存储仍是唯一源数据
+- Cloudflare R2 Gallery 备份同步：可通过 `.env` 或 Web Settings 配置，可在 Settings 测试连通性，并可从 Gallery 手动或定时增量同步；本地 Gallery 存储仍是唯一源数据
 - 访问密钥、Host/public origin 白名单、IP 白名单/反向代理头、版本检测、CSP nonce
 - 观测能力：任务分段耗时、慢 `/api/gallery` 查询日志、队列/失败率指标、可选 JSON/Prometheus metrics
 
@@ -904,6 +906,7 @@ curl http://localhost:9090/health
 - 可以用 `.env` 的 `R2_BACKUP_ENABLED=true` 加其他 `R2_*` 变量配置，也可以在 Web Settings 中保存配置。当 SQLite 里还没有保存过 R2 settings 时，启动会把当前 `.env` R2 值持久化进去，所以 Web Settings 会直接显示这些值；之后 Web Settings 保存的值优先。Web Settings 的凭据字段支持 `${ENV_VAR_NAME}` 引用；直接保存明文凭据需要 `ALLOW_PLAINTEXT_SECRETS=true`。
 - Settings 里的测试 R2 会执行 `HeadBucket`、带 prefix 的 `ListObjectsV2`，并写入一个很小的 probe object；probe 清理失败会作为 warning 返回。
 - Gallery 的同步按钮只上传 `R2_KEY_PREFIX` 下缺失的本地 Gallery filename；已存在对象会跳过，bucket 中额外对象不会删除或覆盖。
+- 将 `R2_SYNC_INTERVAL_HOURS` 或 Web Settings 里的同步间隔设为正整数，可按相同增量逻辑定时同步。`0` 表示关闭自动同步，服务启动后会等待完整间隔再执行第一次定时同步。
 
 ## 图像尺寸模式
 
@@ -952,6 +955,7 @@ curl http://localhost:9090/health
 | `R2_BUCKET_NAME` | 空 | Gallery 同步备份使用的储存桶 |
 | `R2_REGION` | `auto` | R2 使用的 S3 client region name |
 | `R2_KEY_PREFIX` | `gallery/` | Gallery 备份对象 key prefix；手动验证建议使用 `gallery-test/` 这类独立 prefix |
+| `R2_SYNC_INTERVAL_HOURS` | `0` | Gallery Sync 定时同步间隔，单位小时；`0` 表示关闭自动同步 |
 | `R2_ACCESS_KEY_ID` | 空 | env-ref 凭据解析使用的 R2 access key ID |
 | `R2_SECRET_ACCESS_KEY` | 空 | env-ref 凭据解析使用的 R2 secret access key |
 | `APP_VERSION` | `VERSION` 文件 | 覆盖界面显示和 `/api/version` 返回的当前应用版本；每次请求实时读取 |

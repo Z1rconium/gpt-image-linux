@@ -28,6 +28,14 @@ def env_flag(name: str, default: str = "false") -> bool:
     }
 
 
+def env_non_negative_int(name: str, default: int = 0) -> int:
+    try:
+        parsed = int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed >= 0 else default
+
+
 def _validate_github_repo(value: str) -> str:
     val = value.strip()
     if not val:
@@ -117,3 +125,4 @@ R2_REGION = os.getenv("R2_REGION", "auto").strip() or "auto"
 R2_KEY_PREFIX = os.getenv("R2_KEY_PREFIX", "gallery/").strip()
 R2_ACCESS_KEY_ID = os.getenv("R2_ACCESS_KEY_ID", "").strip()
 R2_SECRET_ACCESS_KEY = os.getenv("R2_SECRET_ACCESS_KEY", "").strip()
+R2_SYNC_INTERVAL_HOURS = env_non_negative_int("R2_SYNC_INTERVAL_HOURS", 0)

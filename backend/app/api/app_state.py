@@ -124,8 +124,11 @@ async def lifespan(app: FastAPI):
     app.state.gallery_sync_tasks = {}
     app.state.gallery_sync_subscribers = {}
     app.state.gallery_sync_lock = asyncio.Lock()
-    from .routers.gallery import gc_gallery_export_jobs
-    app.state.gallery_export_gc_task = asyncio.create_task(gc_gallery_export_jobs())
+    from .routers import gallery as gallery_router
+    app.state.gallery_export_gc_task = asyncio.create_task(gallery_router.gc_gallery_export_jobs())
+    app.state.gallery_r2_scheduled_sync_task = asyncio.create_task(
+        gallery_router.run_gallery_r2_scheduled_sync()
+    )
     app.state.pending_edit_source_bytes = 0
     app.state.access_failures: OrderedDict[str, tuple[int, float]] = OrderedDict()
     jobs.reconcile_active_generate_jobs_from_storage()
@@ -141,6 +144,9 @@ async def lifespan(app: FastAPI):
         gc_task = getattr(app.state, "gallery_export_gc_task", None)
         if gc_task and not gc_task.done():
             gc_task.cancel()
+        scheduled_sync_task = getattr(app.state, "gallery_r2_scheduled_sync_task", None)
+        if scheduled_sync_task and not scheduled_sync_task.done():
+            scheduled_sync_task.cancel()
         tasks = list(jobs.get_generate_job_tasks().values())
         gallery_export_tasks = list(getattr(app.state, "gallery_export_tasks", {}).values())
         gallery_sync_tasks = list(getattr(app.state, "gallery_sync_tasks", {}).values())
@@ -156,6 +162,7 @@ async def lifespan(app: FastAPI):
                 backfill_task,
                 broadcast_task,
                 gc_task,
+                scheduled_sync_task,
                 *tasks,
                 *gallery_export_tasks,
                 *gallery_sync_tasks,

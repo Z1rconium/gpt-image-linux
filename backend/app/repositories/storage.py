@@ -407,6 +407,7 @@ def _default_r2_backup_settings() -> dict:
             "R2_SECRET_ACCESS_KEY",
             config.R2_SECRET_ACCESS_KEY,
         ),
+        "sync_interval_hours": config.R2_SYNC_INTERVAL_HOURS,
     }
 
 
@@ -416,6 +417,18 @@ def _coerce_positive_int(value, default: int) -> int:
     except (TypeError, ValueError):
         return default
     return parsed if parsed > 0 else default
+
+
+def _coerce_non_negative_int(value, default: int) -> int:
+    if value is None:
+        return default
+    if isinstance(value, float) and not value.is_integer():
+        return 0
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return parsed if parsed >= 0 else 0
 
 
 def _normalize_prompt_optimizer_settings(settings: dict | None) -> dict:
@@ -458,6 +471,10 @@ def _normalize_r2_backup_settings(settings: dict | None) -> dict:
         ),
         "access_key_id": access_key_id or default["access_key_id"],
         "secret_access_key": secret_access_key or default["secret_access_key"],
+        "sync_interval_hours": _coerce_non_negative_int(
+            settings.get("sync_interval_hours"),
+            default["sync_interval_hours"],
+        ),
     }
 
 
@@ -466,6 +483,12 @@ def _has_r2_backup_storage_values(settings: dict | None) -> bool:
         return False
     if _coerce_bool(settings.get("enabled"), False):
         return True
+    if "sync_interval_hours" in settings:
+        try:
+            if int(settings.get("sync_interval_hours") or 0) > 0:
+                return True
+        except (TypeError, ValueError):
+            return True
     return any(
         str(settings.get(key) or "").strip()
         for key in (

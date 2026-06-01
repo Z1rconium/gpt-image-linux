@@ -133,6 +133,16 @@ def _coerce_positive_int(value, default: int) -> int:
     return parsed if parsed > 0 else default
 
 
+def _coerce_non_negative_int(value, default: int = 0) -> int:
+    if isinstance(value, float) and not value.is_integer():
+        return default
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed >= 0 else default
+
+
 def normalize_prompt_optimizer_settings(raw: dict | None) -> dict:
     defaults = _default_prompt_optimizer_settings()
     if not isinstance(raw, dict):
@@ -363,6 +373,10 @@ def build_r2_backup_settings_response(raw: dict | None) -> R2BackupSettingsRespo
         bucket_name=str(settings.get("bucket_name") or "").strip(),
         region=str(settings.get("region") or "auto").strip() or "auto",
         key_prefix=str(settings.get("key_prefix") or "").strip(),
+        sync_interval_hours=_coerce_non_negative_int(
+            settings.get("sync_interval_hours"),
+            0,
+        ),
         **access_key_fields,
         **secret_key_fields,
     )
@@ -441,6 +455,8 @@ def apply_r2_backup_settings(current: dict | None, req_r2: object) -> dict:
         current["region"] = req_r2.region.strip() or "auto"
     if hasattr(req_r2, "key_prefix") and req_r2.key_prefix is not None:
         current["key_prefix"] = req_r2.key_prefix.strip()
+    if hasattr(req_r2, "sync_interval_hours") and req_r2.sync_interval_hours is not None:
+        current["sync_interval_hours"] = int(req_r2.sync_interval_hours)
     for field in ("access_key_id", "secret_access_key"):
         if not hasattr(req_r2, field):
             continue

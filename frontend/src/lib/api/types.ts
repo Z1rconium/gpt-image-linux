@@ -65,6 +65,7 @@ export type R2BackupSettings = {
   bucket_name: string;
   region: string;
   key_prefix: string;
+  sync_interval_hours: number;
   access_key_id_masked: string;
   has_access_key_id: boolean;
   access_key_id_source: ApiKeySource;
@@ -81,6 +82,7 @@ export type R2BackupSettingsInput = {
   bucket_name?: string | null;
   region?: string | null;
   key_prefix?: string | null;
+  sync_interval_hours?: number | null;
   access_key_id?: string | null;
   secret_access_key?: string | null;
 };

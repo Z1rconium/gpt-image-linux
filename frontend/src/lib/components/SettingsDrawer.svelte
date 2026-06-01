@@ -77,6 +77,7 @@
   let r2BucketName = '';
   let r2Region = 'auto';
   let r2KeyPrefix = 'gallery/';
+  let r2SyncIntervalHours: number | string = 0;
   let r2AccessKeyId = '';
   let r2SecretAccessKey = '';
   let r2AccessKeyIdInputType = 'password';
@@ -125,6 +126,7 @@
     r2BucketName = settings.r2_backup?.bucket_name || '';
     r2Region = settings.r2_backup?.region || 'auto';
     r2KeyPrefix = settings.r2_backup?.key_prefix || 'gallery/';
+    r2SyncIntervalHours = settings.r2_backup?.sync_interval_hours ?? 0;
     r2AccessKeyId =
       settings.r2_backup?.access_key_id_source === 'env' && settings.r2_backup.access_key_id_env_var
         ? `\${${settings.r2_backup.access_key_id_env_var}}`
@@ -170,6 +172,15 @@
     return Number.isFinite(parsed) && parsed > 0 ? parsed : 60;
   }
 
+  function normalizeR2SyncIntervalHours() {
+    r2SyncIntervalHours = r2SyncIntervalHoursValue();
+  }
+
+  function r2SyncIntervalHoursValue() {
+    const parsed = Number(r2SyncIntervalHours);
+    return Number.isInteger(parsed) && parsed >= 0 ? parsed : 0;
+  }
+
   function r2BackupPayload(): R2BackupSettingsInput {
     return {
       enabled: r2BackupEnabled,
@@ -177,6 +188,7 @@
       bucket_name: r2BucketName.trim(),
       region: r2Region.trim() || 'auto',
       key_prefix: r2KeyPrefix.trim(),
+      sync_interval_hours: r2SyncIntervalHoursValue(),
       access_key_id: r2AccessKeyId.trim() === MASKED_API_KEY_VALUE ? null : r2AccessKeyId.trim(),
       secret_access_key: r2SecretAccessKey.trim() === MASKED_API_KEY_VALUE ? null : r2SecretAccessKey.trim()
     };
@@ -526,6 +538,11 @@
                   <input bind:value={r2KeyPrefix} class="control-focus w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2.5 font-mono text-sm text-zinc-100 focus:border-emerald-500" placeholder="gallery/" />
                 </label>
               </div>
+              <label class="block">
+                <span class="mb-1.5 block text-xs font-medium text-zinc-400">{$t.settings.r2SyncIntervalHours}</span>
+                <input bind:value={r2SyncIntervalHours} type="number" min="0" step="1" class="control-focus w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2.5 font-mono text-sm text-zinc-100 focus:border-emerald-500" on:blur={normalizeR2SyncIntervalHours} />
+                <span class="mt-1.5 block text-xs text-zinc-500">{$t.settings.r2SyncIntervalHint}</span>
+              </label>
               <label class="block">
                 <span class="mb-1.5 block text-xs font-medium text-zinc-400">{$t.settings.r2AccessKeyId}</span>
                 <input bind:value={r2AccessKeyId} type={r2AccessKeyIdInputType} class="control-focus w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2.5 font-mono text-sm text-zinc-100 focus:border-emerald-500" />
