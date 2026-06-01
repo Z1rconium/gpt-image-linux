@@ -13,6 +13,7 @@
   $: versionTitle = hasVersionUpdate
     ? $t.header.versionUpdateTitle(version, latestVersion)
     : $t.header.versionTitle(version);
+  $: safeReleaseUrl = releaseUrl?.startsWith('https://github.com/') ? releaseUrl : null;
 </script>
 
 <header class="sticky top-0 z-40 border-b border-zinc-800 bg-zinc-950/80 backdrop-blur-md">
@@ -36,7 +37,7 @@
           <h1 class="text-base font-semibold text-zinc-100">GPT Image Panel</h1>
           {#if version}
             <a
-              href={releaseUrl || undefined}
+              href={safeReleaseUrl || undefined}
               target="_blank"
               rel="noreferrer"
               title={versionTitle}

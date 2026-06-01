@@ -238,7 +238,7 @@ uvicorn backend.app.main:app --host 0.0.0.0 --port 9090 --reload
 
 Then open `http://localhost:9090`.
 
-If you want to run without access auth during local dev, set `ALLOW_UNAUTHENTICATED=true`.
+If you want to run without access auth during local dev, set `ALLOW_UNAUTHENTICATED=true`. Startup logs a warning in that mode because every non-health API route is unauthenticated when `ACCESS_KEY` is unset.
 
 ### Health check
 
@@ -409,7 +409,7 @@ All variables listed in `.env.example` are also tracked in SQLite for Overall Co
 | `ENABLE_METRICS` | `false` | Enable `/api/metrics` JSON counters/gauges/rates/latency summaries and Prometheus text output |
 | `SLOW_GALLERY_QUERY_MS` | `200` | Log `/api/gallery` requests at or above this threshold with prompt presence/length/hash, other filters, page, total, and DB query time |
 | `ACCESS_KEY` | empty | Required by default; all non-health routes require unlock when set |
-| `ALLOW_UNAUTHENTICATED` | `false` | Set `true` to explicitly allow startup without `ACCESS_KEY` |
+| `ALLOW_UNAUTHENTICATED` | `false` | Set `true` to explicitly allow startup without `ACCESS_KEY`; startup logs a warning because non-health API routes are unauthenticated |
 | `ACCESS_KEY_COOKIE_NAME` | `gpt_image_access` | Browser cookie name used for the access-key session |
 | `ACCESS_COOKIE_SECURE` | `true` | Mark the access cookie Secure; set `false` only for plain-HTTP local/private deployments |
 | `ACCESS_MAX_FAILURES` | `5` | Failed access-key attempts before temporary lockout |
@@ -419,8 +419,8 @@ All variables listed in `.env.example` are also tracked in SQLite for Overall Co
 | `TRUSTED_PROXY_IPS` | empty | Optional comma-separated proxy IPs/CIDRs allowed to provide trusted proxy headers |
 | `PUBLIC_ORIGIN` | empty | Optional canonical browser origin such as `https://panel.example.com`; also contributes to the Host allowlist and CSRF expected origin |
 | `ALLOWED_HOSTS` | empty | Optional comma-separated allowed Host / trusted `X-Forwarded-Host` values; accepts hostnames, `host:port`, or origins |
-| `CSRF_ORIGIN_CHECK_ENABLED` | `true` | Reject cross-origin `POST`, `PATCH`, and `DELETE` requests using `Origin` or `Referer` checks |
-| `UPSTREAM_HOST_ALLOWLIST` | empty | Optional comma-separated hostname allowlist for generation/edit upstream API URLs |
+| `CSRF_ORIGIN_CHECK_ENABLED` | `true` | Reject unsafe `POST`, `PATCH`, and `DELETE` requests unless `Origin`, `Referer`, or same-origin `Sec-Fetch-Site` proves the browser source |
+| `UPSTREAM_HOST_ALLOWLIST` | empty | Optional comma-separated hostname allowlist for generation/edit upstream API URLs; with a SOCKS5 upstream proxy, the proxy is the trust boundary for remote DNS/network reachability |
 | `WEBHOOK_HOST_ALLOWLIST` | empty | Optional comma-separated webhook hostname allowlist |
 | `MAX_FILE_SIZE_MB` | `50` | Max uploaded image size in MB for edit source images, imported image files, and downloaded upstream image URLs |
 | `MAX_JSON_BODY_MB` | `1` | Max JSON request body size in MB for non-upload API calls |
@@ -454,7 +454,7 @@ All variables listed in `.env.example` are also tracked in SQLite for Overall Co
 |--------|------|-------------|
 | `GET` | `/` | Frontend UI |
 | `GET` | `/health` | Health check |
-| `GET` | `/api/version` | Current app version, configured GitHub repo, and latest-release URL |
+| `GET` | `/api/version` | Current app version, configured GitHub repo, and latest-release URL; requires access unlock when `ACCESS_KEY` is set |
 | `GET` | `/api/access/status` | Check access-key session status |
 | `POST` | `/api/access` | Unlock access for 3 hours |
 | `POST` | `/api/settings` | Save the active API preset |
@@ -504,8 +504,10 @@ All variables listed in `.env.example` are also tracked in SQLite for Overall Co
 
 ## Runtime behavior notes
 
-- app version comes from `APP_VERSION` then `VERSION`; both the local app version and optional GitHub remote check are evaluated on each web-triggered version request. The remote check reads the latest release first, falls back to the configured branch `VERSION`, and can show a `New` badge without blocking usage.
-- when `PUBLIC_ORIGIN` or `ALLOWED_HOSTS` is configured, unknown `Host` or trusted `X-Forwarded-Host` values are rejected before CSRF checks; `Sec-Fetch-Site: same-origin` does not bypass the Host allowlist
+- app version comes from `APP_VERSION` then `VERSION`; both the local app version and optional GitHub remote check are evaluated on each web-triggered version request after access unlock. The remote check reads the latest release first, falls back to the configured branch `VERSION`, and can show a `New` badge without blocking usage.
+- when `PUBLIC_ORIGIN` or `ALLOWED_HOSTS` is configured, unknown `Host` or trusted `X-Forwarded-Host` values are rejected before CSRF checks; unsafe browser requests must include `Origin`, `Referer`, or same-origin `Sec-Fetch-Site`, and `Sec-Fetch-Site: same-origin` does not bypass the Host allowlist
+- upstream-returned image URLs must use HTTPS; plain HTTP image downloads are rejected before the backend fetches them
+- when an upstream SOCKS5 proxy is configured, the backend still validates the upstream URL before connecting and logs a warning if the hostname resolves locally to private/internal IPs, but the SOCKS5 proxy is the trust boundary for remote DNS and network reachability
 - presets, prompt snippets, and gallery/job data persist only in `DATABASE_FILE`
 - SQLite repository operations use short-lived connections with WAL enabled at startup; `DATA_DIR` is chmodded to `0700`, the SQLite DB/sidecars are chmodded to `0600`, and app shutdown/tests call the storage close hook so connection lifecycle stays explicit
 - generation and edit share one queue measured in image units (`MAX_ACTIVE_GENERATE_JOBS` + `MAX_QUEUED_GENERATE_JOBS`), all edit source images are staged under `DATA_DIR/edit-sources` and additionally capped by `MAX_PENDING_EDIT_SOURCE_MB`, support cancellation, and persist terminal history including `completed_at`
@@ -797,7 +799,7 @@ uvicorn backend.app.main:app --host 0.0.0.0 --port 9090 --reload
 
 然后打开 `http://localhost:9090`。
 
-若本地开发需要无鉴权启动，请设置 `ALLOW_UNAUTHENTICATED=true`。
+若本地开发需要无鉴权启动，请设置 `ALLOW_UNAUTHENTICATED=true`。该模式启动时会输出 warning，因为未设置 `ACCESS_KEY` 时所有非健康检查 API 都不需要鉴权。
 
 ### 健康检查
 
@@ -966,7 +968,7 @@ curl http://localhost:9090/health
 | `ENABLE_METRICS` | `false` | 启用 `/api/metrics` JSON counters/gauges/rates/延迟摘要和 Prometheus 文本输出 |
 | `SLOW_GALLERY_QUERY_MS` | `200` | `/api/gallery` 达到该阈值时记录筛选条件、页码、total 和 DB 查询耗时 |
 | `ACCESS_KEY` | 空 | 默认要求设置；设置后每个非健康路由均需解锁 |
-| `ALLOW_UNAUTHENTICATED` | `false` | 设置为 `true` 可显式允许在未设置 `ACCESS_KEY` 时启动 |
+| `ALLOW_UNAUTHENTICATED` | `false` | 设置为 `true` 可显式允许在未设置 `ACCESS_KEY` 时启动；启动时会输出 warning，因为非健康检查 API 不需要鉴权 |
 | `ACCESS_KEY_COOKIE_NAME` | `gpt_image_access` | 访问会话使用的浏览器 cookie 名称 |
 | `ACCESS_COOKIE_SECURE` | `true` | 给访问 cookie 添加 Secure；仅在纯 HTTP 本地/内网部署时设为 `false` |
 | `ACCESS_MAX_FAILURES` | `5` | 触发临时锁定前允许的访问密钥失败次数 |
@@ -976,8 +978,8 @@ curl http://localhost:9090/health
 | `TRUSTED_PROXY_IPS` | 空 | 允许提供可信代理头的代理 IP/CIDR，逗号分隔 |
 | `PUBLIC_ORIGIN` | 空 | 可选的浏览器侧规范 origin，例如 `https://panel.example.com`；同时加入 Host 白名单并作为 CSRF expected origin |
 | `ALLOWED_HOSTS` | 空 | 可选的 Host / 受信任 `X-Forwarded-Host` 白名单，逗号分隔；支持 hostname、`host:port` 或 origin |
-| `CSRF_ORIGIN_CHECK_ENABLED` | `true` | 是否通过 `Origin` 或 `Referer` 拒绝跨站 `POST`、`PATCH`、`DELETE` 请求 |
-| `UPSTREAM_HOST_ALLOWLIST` | 空 | 生成/编辑上游 API URL 的可选主机名白名单，逗号分隔 |
+| `CSRF_ORIGIN_CHECK_ENABLED` | `true` | 是否拒绝无法通过 `Origin`、`Referer` 或同源 `Sec-Fetch-Site` 证明来源的 `POST`、`PATCH`、`DELETE` 请求 |
+| `UPSTREAM_HOST_ALLOWLIST` | 空 | 生成/编辑上游 API URL 的可选主机名白名单，逗号分隔；配置 SOCKS5 上游代理时，代理本身是远端 DNS/网络可达性的信任边界 |
 | `WEBHOOK_HOST_ALLOWLIST` | 空 | 可选 webhook 主机名白名单，逗号分隔 |
 | `MAX_FILE_SIZE_MB` | `50` | 上传为编辑源图的图片、导入图片文件和上游图片 URL 下载的最大体积（MB） |
 | `MAX_JSON_BODY_MB` | `1` | 非上传 API 调用的最大 JSON 请求体积（MB） |
@@ -1012,7 +1014,7 @@ curl http://localhost:9090/health
 |------|------|------|
 | `GET` | `/` | 前端页面 |
 | `GET` | `/health` | 健康检查 |
-| `GET` | `/api/version` | 当前应用版本、配置的 GitHub 仓库和 latest release URL |
+| `GET` | `/api/version` | 当前应用版本、配置的 GitHub 仓库和 latest release URL；设置 `ACCESS_KEY` 时需要先解锁 |
 | `GET` | `/api/access/status` | 访问密钥会话状态 |
 | `POST` | `/api/access` | 解锁访问 3 小时 |
 | `POST` | `/api/settings` | 保存当前 API 预设 |
@@ -1060,8 +1062,10 @@ curl http://localhost:9090/health
 
 ## 运行时注意事项
 
-- 版本读取顺序是 `APP_VERSION` -> `VERSION`；本地版本和可选 GitHub 远端检查都会在每次 Web 端触发版本请求时实时计算。远端检查会先读 latest release，再回退到配置分支的 `VERSION`，仅用于显示 `New`，不会阻塞使用。
-- 配置 `PUBLIC_ORIGIN` 或 `ALLOWED_HOSTS` 后，未知 `Host` 或受信任 `X-Forwarded-Host` 会在 CSRF 检查前被拒绝；`Sec-Fetch-Site: same-origin` 不能绕过 Host 白名单
+- 版本读取顺序是 `APP_VERSION` -> `VERSION`；本地版本和可选 GitHub 远端检查都会在访问解锁后、每次 Web 端触发版本请求时实时计算。远端检查会先读 latest release，再回退到配置分支的 `VERSION`，仅用于显示 `New`，不会阻塞使用。
+- 配置 `PUBLIC_ORIGIN` 或 `ALLOWED_HOSTS` 后，未知 `Host` 或受信任 `X-Forwarded-Host` 会在 CSRF 检查前被拒绝；有副作用的浏览器请求必须带 `Origin`、`Referer` 或同源 `Sec-Fetch-Site`，且 `Sec-Fetch-Site: same-origin` 不能绕过 Host 白名单
+- 上游返回的图片 URL 必须使用 HTTPS；后端发起下载前会拒绝 plain HTTP 图片 URL
+- 配置上游 SOCKS5 代理时，后端仍会在连接前验证上游 URL，并在主机名本地解析到私有/内部 IP 时记录 warning；但远端 DNS 和网络可达性由 SOCKS5 代理决定，代理本身就是信任边界
 - 预设、提示词收藏夹和 Gallery/Job 数据只保存在 `DATABASE_FILE`
 - SQLite 仓储操作使用短连接，并在启动时启用 WAL；`DATA_DIR` 会 chmod 为 `0700`，SQLite 数据库和 sidecar 文件会 chmod 为 `0600`；应用 shutdown 和测试 reset 会调用 storage close hook，连接生命周期保持显式
 - 生成与编辑共用按 image units 计量的队列（`MAX_ACTIVE_GENERATE_JOBS` + `MAX_QUEUED_GENERATE_JOBS`）；所有编辑源图先落到 `DATA_DIR/edit-sources` 并额外受 `MAX_PENDING_EDIT_SOURCE_MB` 总量限制；支持取消，并持久化终态历史（含 `completed_at`）

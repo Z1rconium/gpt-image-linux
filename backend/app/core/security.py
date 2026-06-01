@@ -9,12 +9,15 @@ from typing import Optional
 from fastapi import Request
 
 from . import settings as config
+from .validators import resolve_env_var_ref
 
 
 def _signature_secret() -> bytes:
-    key = config.ACCESS_KEY or config.DEFAULT_API_KEY
+    key = config.ACCESS_KEY or resolve_env_var_ref(config.DEFAULT_API_KEY)
     if not key:
-        key = "gpt-image-panel-dev-secret"
+        raise RuntimeError(
+            "No signing secret available. Set ACCESS_KEY or DEFAULT_API_KEY."
+        )
     return key.encode("utf-8")
 
 

@@ -106,6 +106,10 @@
     jobsStore.startJobsEvents();
   }
 
+  async function loadAuthenticatedData() {
+    await Promise.all([versionStore.loadVersion(), loadInitialData()]);
+  }
+
   function showToast(message: string, variant?: 'status' | 'error', options?: ToastOptions) {
     uiStore.showToast(message, variant, options);
   }
@@ -735,8 +739,7 @@
 
   onMount(() => {
     accessStore.installUnauthorizedHandler();
-    void versionStore.loadVersion();
-    void accessStore.checkAccess(loadInitialData);
+    void accessStore.checkAccess(loadAuthenticatedData);
 
     const popstate = () => {
       void applyUrlStateToApp();
@@ -779,7 +782,7 @@
   <title>GPT Image Panel</title>
 </svelte:head>
 
-<AccessGate visible={$accessStore.gateVisible} error={$accessStore.error} loading={$accessStore.loading} onUnlock={(key) => accessStore.unlockAccess(key, loadInitialData)} />
+<AccessGate visible={$accessStore.gateVisible} error={$accessStore.error} loading={$accessStore.loading} onUnlock={(key) => accessStore.unlockAccess(key, loadAuthenticatedData)} />
 <Header
   version={$versionStore.version}
   latestVersion={$versionStore.latestVersion}

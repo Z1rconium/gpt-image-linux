@@ -7,7 +7,8 @@ export function imageUrl(filename: string) {
 }
 
 export function thumbnailUrl(filename: string, url?: string | null) {
-  return url || `/api/thumb/${encodeURIComponent(filename)}`;
+  const safeUrl = url && url.startsWith('/api/') ? url : null;
+  return safeUrl || `/api/thumb/${encodeURIComponent(filename)}`;
 }
 
 export function downloadUrl(filename: string) {

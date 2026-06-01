@@ -10,6 +10,7 @@ import stat
 import threading
 import time
 import zipfile
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -27,6 +28,7 @@ from backend.app.integrations import r2_sync
 from backend.app.core.observability import metrics, record_job_stage_timing
 from backend.app.integrations import session_pool
 from backend.app.integrations.upstream_client import (
+    call_image_generation_api as ORIGINAL_CALL_IMAGE_GENERATION_API,
     call_image_edit_api as ORIGINAL_CALL_IMAGE_EDIT_API,
     classify_probe_status,
 )
@@ -40,6 +42,51 @@ PNG_BYTES = base64.b64decode(
 JPEG_BYTES = base64.b64decode(
     "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAABAAEDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDi6KKK+ZP3E//Z"
 )
+CSRF_SOURCE_HEADERS = {"origin", "referer", "sec-fetch-site"}
+CSRF_PROTECTED_TEST_METHODS = {"POST", "PATCH", "DELETE"}
+
+
+class _CsrfTestClient:
+    def __init__(self, client: TestClient):
+        self._client = client
+
+    def __getattr__(self, name):
+        return getattr(self._client, name)
+
+    def _with_default_origin(self, method: str, kwargs: dict):
+        if method.upper() not in CSRF_PROTECTED_TEST_METHODS:
+            return kwargs
+
+        headers = dict(kwargs.get("headers") or {})
+        if not any(name.lower() in CSRF_SOURCE_HEADERS for name in headers):
+            headers["Origin"] = "http://testserver"
+            kwargs["headers"] = headers
+        return kwargs
+
+    def request(self, method: str, url: str, **kwargs):
+        return self._client.request(
+            method,
+            url,
+            **self._with_default_origin(method, kwargs),
+        )
+
+    def get(self, url: str, **kwargs):
+        return self._client.get(url, **kwargs)
+
+    def post(self, url: str, **kwargs):
+        return self.request("POST", url, **kwargs)
+
+    def patch(self, url: str, **kwargs):
+        return self.request("PATCH", url, **kwargs)
+
+    def delete(self, url: str, **kwargs):
+        return self.request("DELETE", url, **kwargs)
+
+
+@contextmanager
+def _test_client(**kwargs):
+    with TestClient(backend_main.app, **kwargs) as test_client:
+        yield _CsrfTestClient(test_client)
 
 
 def _configure_runtime(tmp_path: Path, *, access_key: str = "", allow_unauthenticated: bool = True):
@@ -138,7 +185,7 @@ def _configure_runtime(tmp_path: Path, *, access_key: str = "", allow_unauthenti
 @pytest.fixture()
 def client(tmp_path):
     _configure_runtime(tmp_path)
-    with TestClient(backend_main.app) as test_client:
+    with _test_client() as test_client:
         yield test_client
 
 
@@ -592,7 +639,7 @@ def test_frontend_index_uses_csp_nonce(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(backend_main.app.state, "frontend_build_dir", build_dir, raising=False)
 
-    with TestClient(backend_main.app) as client:
+    with _test_client() as client:
         resp = client.get("/")
 
     assert resp.status_code == 200
@@ -602,14 +649,21 @@ def test_frontend_index_uses_csp_nonce(tmp_path, monkeypatch):
     assert f"script-src-elem 'self' 'nonce-{nonce}'" in csp
     assert "script-src-attr 'none'" in csp
     assert "'unsafe-inline'" not in csp.split("script-src-elem", 1)[1].split(";", 1)[0]
+    assert "style-src 'self'" in csp
+    assert "style-src-attr 'unsafe-inline'" in csp
 
 
 def test_access_cookie_and_status(tmp_path):
     _configure_runtime(tmp_path, access_key="secret", allow_unauthenticated=False)
-    with TestClient(backend_main.app) as client:
+    with _test_client() as client:
         denied = client.get("/api/settings")
         assert denied.status_code == 401
         assert denied.json()["detail"] == "Access key required"
+
+        version = client.get("/api/version")
+        assert version.status_code == 401
+        latest_version = client.get("/api/version/latest")
+        assert latest_version.status_code == 401
 
         bad = client.post("/api/access", json={"access_key": "nope"})
         assert bad.status_code == 401
@@ -629,6 +683,30 @@ def test_access_cookie_and_status(tmp_path):
         assert status.json()["authenticated"] is True
         assert status.json()["expires_at"]
 
+        version_after_unlock = client.get("/api/version")
+        assert version_after_unlock.status_code == 200
+
+
+def test_access_token_signature_requires_configured_secret(monkeypatch):
+    from backend.app.core import security as auth_security
+
+    monkeypatch.setattr(config, "ACCESS_KEY", "")
+    monkeypatch.setattr(config, "DEFAULT_API_KEY", "")
+
+    with pytest.raises(RuntimeError, match="No signing secret available"):
+        auth_security.create_access_token()
+
+
+def test_allow_unauthenticated_startup_logs_warning(tmp_path, caplog):
+    _configure_runtime(tmp_path, access_key="", allow_unauthenticated=True)
+
+    caplog.set_level(logging.WARNING, logger="backend.app.api.app_state")
+    with _test_client():
+        pass
+
+    assert "ALLOW_UNAUTHENTICATED=true" in caplog.text
+    assert "without access-key authentication" in caplog.text
+
 
 def test_frontend_build_assets_are_available_before_access_unlock(tmp_path, monkeypatch):
     _configure_runtime(tmp_path, access_key="secret", allow_unauthenticated=False)
@@ -638,7 +716,7 @@ def test_frontend_build_assets_are_available_before_access_unlock(tmp_path, monk
     asset_path.write_text("console.log('ok');", encoding="utf-8")
     monkeypatch.setattr(backend_main.app.state, "frontend_build_dir", build_dir, raising=False)
 
-    with TestClient(backend_main.app) as client:
+    with _test_client() as client:
         asset = client.get("/_app/immutable/entry/app.js")
         api = client.get("/api/settings")
 
@@ -649,7 +727,7 @@ def test_frontend_build_assets_are_available_before_access_unlock(tmp_path, monk
 
 def test_access_lockout(tmp_path):
     _configure_runtime(tmp_path, access_key="secret", allow_unauthenticated=False)
-    with TestClient(backend_main.app, raise_server_exceptions=False) as client:
+    with _test_client(raise_server_exceptions=False) as client:
         for _ in range(config.ACCESS_MAX_FAILURES + 1):
             resp = client.post("/api/access", json={"access_key": "wrong"})
         assert resp.status_code == 429
@@ -666,7 +744,7 @@ def test_access_failures_stays_bounded_under_unique_ips(tmp_path, monkeypatch):
         lambda request: current_ip["value"],
     )
 
-    with TestClient(backend_main.app, raise_server_exceptions=False) as client:
+    with _test_client(raise_server_exceptions=False) as client:
         for index in range(5):
             current_ip["value"] = f"10.0.0.{index}"
             resp = client.post("/api/access", json={"access_key": "wrong"})
@@ -714,7 +792,7 @@ def test_session_pool_close_all_closes_retired_sessions(monkeypatch):
 def test_ip_allowlist_blocks_api_but_not_health(tmp_path):
     _configure_runtime(tmp_path)
     config.IP_ALLOWLIST = "10.0.0.1"
-    with TestClient(backend_main.app, raise_server_exceptions=False) as client:
+    with _test_client(raise_server_exceptions=False) as client:
         health = client.get("/health")
         assert health.status_code == 200
         blocked = client.get("/api/version")
@@ -781,7 +859,7 @@ def test_csrf_origin_check_blocks_cross_site_state_changes(client, method, path,
 def test_csrf_origin_check_allows_same_origin_fetch_metadata_through_dev_proxy(tmp_path):
     _configure_runtime(tmp_path, access_key="secret", allow_unauthenticated=False)
 
-    with TestClient(backend_main.app) as client:
+    with _test_client() as client:
         resp = client.post(
             "/api/access",
             headers={
@@ -796,11 +874,21 @@ def test_csrf_origin_check_allows_same_origin_fetch_metadata_through_dev_proxy(t
     assert resp.json()["authenticated"] is True
 
 
+def test_csrf_origin_check_blocks_missing_source_on_access_unlock(tmp_path):
+    _configure_runtime(tmp_path, access_key="secret", allow_unauthenticated=False)
+
+    with TestClient(backend_main.app) as client:
+        resp = client.post("/api/access", json={"access_key": "secret"})
+
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "CSRF origin check failed"
+
+
 def test_host_allowlist_blocks_unknown_host_even_with_same_origin_fetch_metadata(tmp_path):
     _configure_runtime(tmp_path, access_key="secret", allow_unauthenticated=False)
     config.ALLOWED_HOSTS = "panel.example.com"
 
-    with TestClient(backend_main.app) as client:
+    with _test_client() as client:
         resp = client.post(
             "/api/access",
             headers={
@@ -2573,7 +2661,8 @@ def test_gallery_slow_query_logs_filters_page_and_total(client, caplog):
     assert metrics.snapshot()["counters"]["sqlite.slow_queries"] == 1
 
 
-def test_storage_connect_closes_sqlite_handle(client, monkeypatch):
+def test_storage_connect_closes_sqlite_handle(tmp_path, monkeypatch):
+    _configure_runtime(tmp_path)
     closed_paths: list[str] = []
     real_connect = sqlite3.connect
 
@@ -2916,7 +3005,7 @@ def test_cancelled_edit_job_cleans_temp_source(tmp_path, monkeypatch):
 
     monkeypatch.setattr(backend_main.proxy, "call_image_edit_api", blocking_edit_api)
 
-    with TestClient(backend_main.app) as test_client:
+    with _test_client() as test_client:
         edit = test_client.post(
             "/api/edits",
             data={
@@ -2984,7 +3073,7 @@ def test_edit_queue_capacity_uses_pending_source_bytes(tmp_path, monkeypatch):
 
     monkeypatch.setattr(backend_main.proxy, "call_image_edit_api", blocking_edit_api)
 
-    with TestClient(backend_main.app) as test_client:
+    with _test_client() as test_client:
         first = test_client.post(
             "/api/edits",
             data={
@@ -3022,7 +3111,7 @@ def test_edit_queue_capacity_counts_multiple_source_bytes(tmp_path):
     config.MAX_PENDING_EDIT_SOURCE_MB = 1
     large_png = PNG_BYTES + (b"\0" * (600 * 1024))
 
-    with TestClient(backend_main.app) as test_client:
+    with _test_client() as test_client:
         edit = test_client.post(
             "/api/edits",
             data={
@@ -3249,7 +3338,7 @@ def test_gallery_sync_job_accepts_enabled_r2_env_defaults(tmp_path, monkeypatch)
 
     monkeypatch.setattr(r2_sync, "sync_gallery_to_r2", fake_sync)
 
-    with TestClient(backend_main.app) as client:
+    with _test_client() as client:
         created = client.post("/api/gallery/sync-jobs")
         assert created.status_code == 202, created.json()
         finished = _wait_for_gallery_sync_job(client, created.json()["job_id"])
@@ -3891,7 +3980,7 @@ def test_generate_queue_capacity_and_concurrency_limit(tmp_path, monkeypatch):
 
     monkeypatch.setattr(backend_main.proxy, "call_image_generation_api", blocking_generation_api)
 
-    with TestClient(backend_main.app) as client:
+    with _test_client() as client:
         first = client.post(
             "/api/generate",
             json={"prompt": "one", "model": "gpt-image-2"},
@@ -3960,7 +4049,7 @@ def test_batch_generate_counts_image_units_and_bounds_upstream_calls(tmp_path, m
 
     monkeypatch.setattr(backend_main.proxy, "call_image_generation_api", blocking_generation_api)
 
-    with TestClient(backend_main.app) as client:
+    with _test_client() as client:
         first = client.post(
             "/api/generate",
             json={"prompt": "batch", "model": "gpt-image-2", "n": 3},
@@ -4041,7 +4130,7 @@ def test_edit_jobs_share_queue_capacity(tmp_path, monkeypatch):
     monkeypatch.setattr(backend_main.proxy, "call_image_generation_api", blocking_generation_api)
     monkeypatch.setattr(backend_main.proxy, "call_image_edit_api", blocking_edit_api)
 
-    with TestClient(backend_main.app) as client:
+    with _test_client() as client:
         generate = client.post(
             "/api/generate",
             json={"prompt": "one", "model": "gpt-image-2"},
@@ -4090,6 +4179,19 @@ def test_image_url_download_disables_redirects_and_validates_redirect_target(cli
 
     assert session.requested_urls == ["https://example.com/image.png"]
     assert session.allow_redirects_values == [False]
+
+
+def test_image_url_download_rejects_plain_http(client):
+    session = _FakeSession(
+        [
+            _FakeResponse(200, {}, [PNG_BYTES], peer_ip="93.184.216.34"),
+        ]
+    )
+
+    with pytest.raises(ValueError, match="Only HTTPS URLs are allowed"):
+        asyncio.run(_download_with_fake_session(session, "http://example.com/image.png"))
+
+    assert session.requested_urls == []
 
 
 def test_image_url_download_rejects_large_content_length(client):
@@ -4202,6 +4304,33 @@ def test_image_url_download_rejects_private_peer_ip(client):
 
     with pytest.raises(ValueError, match="private/internal IP"):
         asyncio.run(_download_with_fake_session(session, "https://example.com/image.png"))
+
+
+def test_socks5_upstream_private_dns_logs_trust_boundary_warning(tmp_path, monkeypatch, caplog):
+    _configure_runtime(tmp_path)
+    from backend.app.integrations import upstream_client
+    from backend.app.schemas.models import GenerateRequest
+
+    monkeypatch.setattr(
+        upstream_client.ssrf,
+        "resolve_hostname",
+        lambda hostname: (hostname, ["10.0.0.5"]),
+    )
+
+    caplog.set_level(logging.WARNING, logger="backend.app.integrations.upstream_client")
+    with pytest.raises(ValueError, match="private/internal IP"):
+        asyncio.run(
+            ORIGINAL_CALL_IMAGE_GENERATION_API(
+                "https://api.example.com",
+                "key",
+                "/v1/images/generations",
+                GenerateRequest(prompt="private dns"),
+                socks5_proxy="socks5://127.0.0.1:1080",
+            )
+        )
+
+    assert "SOCKS5 proxy is enabled" in caplog.text
+    assert "proxy is the trust boundary" in caplog.text
 
 
 def test_upstream_returned_image_url_download_stays_direct(tmp_path, monkeypatch):
@@ -4408,7 +4537,7 @@ def test_running_progress_persists_only_terminal_states(tmp_path, monkeypatch):
     monkeypatch.setattr(storage, "upsert_generate_job", tracking_upsert)
     monkeypatch.setattr(backend_main.proxy, "call_image_generation_api", noisy_generation_api)
 
-    with TestClient(backend_main.app) as client:
+    with _test_client() as client:
         resp = client.post("/api/generate", json={"prompt": "noisy", "model": "gpt-image-2"})
         assert resp.status_code == 202
         job = _wait_for_job(client, resp.json()["job_id"])
@@ -4546,7 +4675,7 @@ def test_clear_generate_jobs_history_deletes_only_terminal_jobs(client):
 
 def test_validation_422_and_global_500(tmp_path, monkeypatch):
     _configure_runtime(tmp_path)
-    with TestClient(backend_main.app, raise_server_exceptions=False) as client:
+    with _test_client(raise_server_exceptions=False) as client:
         bad = client.post(
             "/api/generate",
             json={"prompt": "x", "size": "1025x1025"},

@@ -13,8 +13,6 @@ AUTH_EXEMPT_PATHS = {
     "/",
     "/api/access",
     "/api/access/status",
-    "/api/version",
-    "/api/version/latest",
     "/favicon.ico",
     "/health",
 }
@@ -254,6 +252,8 @@ def csrf_origin_allowed(request: Request) -> bool:
     sec_fetch_site = request.headers.get("sec-fetch-site", "").strip().lower()
     if sec_fetch_site == "same-origin":
         return True
+    if sec_fetch_site == "cross-site":
+        return False
 
     origin = request.headers.get("origin")
     if origin is not None:
@@ -263,9 +263,10 @@ def csrf_origin_allowed(request: Request) -> bool:
     if referer:
         return normalize_origin(referer) == expected_origin
 
-    cookie_name = config.ACCESS_KEY_COOKIE_NAME
-    has_auth_cookie = bool(cookie_name and request.cookies.get(cookie_name))
-    return not has_auth_cookie
+    # Auth-exempt mutation endpoints still need a browser source signal. If the
+    # request has no Origin, Referer, or same-origin fetch metadata, we cannot
+    # distinguish it from a cross-site form/request.
+    return False
 
 
 

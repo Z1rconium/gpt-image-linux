@@ -284,8 +284,8 @@ def redact_url(url: str | None) -> str:
 def validate_image_url(url: str) -> None:
     _validate_url_base(
         url,
-        allowed_schemes={"http", "https"},
-        scheme_error="Only HTTP/HTTPS URLs are allowed for image URLs",
+        allowed_schemes={"https"},
+        scheme_error="Only HTTPS URLs are allowed for image URLs",
         missing_hostname_error="Invalid URL: no hostname",
         blocked_hostname_error="Hostname '{hostname}' is not allowed",
         private_ip_error="Image URL hostname '{hostname}' resolves to private/internal IP(s): {resolved_info}",

@@ -234,7 +234,7 @@
         {#if operationStatus.progress === null}
           <div class="h-full w-1/3 animate-pulse rounded-full bg-sky-300"></div>
         {:else}
-          <div class="h-full rounded-full bg-sky-300 transition-[width]" style={`width: ${operationStatus.progress}%`}></div>
+          <div class="h-full rounded-full bg-sky-300 transition-[width]" style={`width: ${Number(operationStatus.progress) || 0}%`}></div>
         {/if}
       </div>
     </div>

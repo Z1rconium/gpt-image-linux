@@ -74,6 +74,11 @@ async def lifespan(app: FastAPI):
             "ACCESS_KEY is required. Set ACCESS_KEY, or set "
             "ALLOW_UNAUTHENTICATED=true to explicitly run without authentication."
         )
+    if config.ALLOW_UNAUTHENTICATED and not config.ACCESS_KEY:
+        logger.warning(
+            "ALLOW_UNAUTHENTICATED=true and ACCESS_KEY is unset; all non-health API "
+            "routes are running without access-key authentication."
+        )
 
     auth.validate_proxy_config()
 

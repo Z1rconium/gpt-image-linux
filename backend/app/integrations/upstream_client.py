@@ -2,11 +2,12 @@ import aiohttp
 import asyncio
 import base64
 import json
+import logging
 import re
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, Protocol
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
 from ..core import settings as config
 from ..core.api_paths import (
@@ -22,6 +23,7 @@ from ..schemas.models import EditRequest, GenerateRequest
 from .session_pool import TIMEOUT_PROBE, TIMEOUT_UPSTREAM, get_pool
 
 ProgressCallback = Callable[[str, str], None]
+logger = logging.getLogger(__name__)
 
 
 class ImageEditSource(Protocol):
@@ -65,6 +67,33 @@ HTTP_IMAGE_URL_RE = re.compile(r"https?://[^\s<>'\")]+")
 
 
 DOWNLOAD_CONCURRENCY = 3
+
+
+def _warn_if_socks5_upstream_resolves_private(
+    upstream_url: str,
+    socks5_proxy: str | None,
+) -> None:
+    if not socks5_proxy:
+        return
+
+    parsed = urlsplit(upstream_url)
+    hostname = (parsed.hostname or "").lower()
+    if not hostname:
+        return
+
+    _resolved_host, resolved_ips = ssrf.resolve_hostname(hostname)
+    private_ips = [ip for ip in resolved_ips if ssrf.is_private_ip(ip)]
+    if not private_ips:
+        return
+
+    logger.warning(
+        "SOCKS5 proxy is enabled and upstream host '%s' resolved locally to "
+        "private/internal IP(s): %s. Pre-connection SSRF validation still blocks "
+        "private local resolutions, but the SOCKS5 proxy is the trust boundary "
+        "for remote DNS and upstream network reachability.",
+        hostname,
+        ", ".join(private_ips),
+    )
 
 
 def get_output_format_info(output_format: str) -> dict[str, str]:
@@ -753,6 +782,7 @@ async def call_image_generation_api(
     api_path = normalize_api_path(api_path)
     upstream_url = build_upstream_url(api_url, api_path)
 
+    _warn_if_socks5_upstream_resolves_private(upstream_url, socks5_proxy)
     ssrf.validate_upstream_url(upstream_url, config.UPSTREAM_HOST_ALLOWLIST)
 
     headers = {
@@ -858,6 +888,7 @@ async def call_image_edit_api(
     api_path = "/v1/images/edits"
     upstream_url = build_upstream_url(api_url, api_path)
 
+    _warn_if_socks5_upstream_resolves_private(upstream_url, socks5_proxy)
     ssrf.validate_upstream_url(upstream_url, config.UPSTREAM_HOST_ALLOWLIST)
 
     headers = {
