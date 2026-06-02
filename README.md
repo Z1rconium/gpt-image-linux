@@ -178,6 +178,8 @@ An external GPT-compatible image API is required for actual image generation.
 
 ### Docker
 
+Direct Docker runs expose the FastAPI/Granian process without nginx. This path keeps image responses on normal `FileResponse` and is useful for simple local deployments.
+
 ```bash
 docker build -t gpt-image-panel .
 docker run -d --name gpt-image-panel \
@@ -198,6 +200,8 @@ docker build \
 
 ### Docker Compose
 
+Compose runs nginx in front of the backend. The browser still uses `http://127.0.0.1:9090`; nginx owns that host port, proxies API/index requests to FastAPI, serves immutable SvelteKit assets directly, and sends authorized gallery image/thumbnail/download bytes through nginx internal redirects after the backend has checked access and gallery references.
+
 ```bash
 cp .env.example .env
 # edit .env if needed
@@ -211,6 +215,8 @@ For Docker Hub timeout issues with Compose, set this in `.env` before building:
 PYTHON_BASE_IMAGE=docker.m.daocloud.io/library/python:3.11-slim
 NODE_BASE_IMAGE=docker.m.daocloud.io/library/node:24-alpine
 ```
+
+`GRANIAN_RUNTIME_THREADS` defaults to `2`. On machines with more available CPU, `GRANIAN_RUNTIME_THREADS=4` is a reasonable first bump. Keep `GRANIAN_WORKERS=1` unless the app queue/SSE/cancellation state is moved out of process memory.
 
 ### Local development
 
@@ -384,6 +390,8 @@ All variables listed in `.env.example` are also tracked in SQLite for Overall Co
 | `DEFAULT_API_PATH` | `/v1/images/generations` | Default upstream path; supported values are `/v1/images/generations`, `/v1/responses`, and `/v1/chat/completions` |
 | `DEFAULT_RESPONSES_MODEL` | `gpt-5.4` | Fallback top-level model used for `/v1/responses` when no request/preset model is provided |
 | `DEFAULT_UPSTREAM_SOCKS5_PROXY` | empty | Optional default global SOCKS5 proxy or env ref for generation/edit upstream API calls |
+| `AIOHTTP_CONNECTION_LIMIT` | `100` | Total aiohttp connector connection limit for upstream/probe/download calls |
+| `AIOHTTP_CONNECTION_LIMIT_PER_HOST` | `20` | Per-host aiohttp connector connection limit; `0` disables the per-host cap |
 | `ALLOW_PLAINTEXT_SECRETS` | `false` | Allow literal API keys / SOCKS5 proxy URLs / Webhook URLs / R2 credentials to be persisted in SQLite instead of requiring `${ENV_VAR_NAME}` refs |
 | `PROMPT_OPTIMIZER_ENABLED` | `false` | Enable the server-side prompt optimizer |
 | `PROMPT_OPTIMIZER_API_URL` | empty | Full Chat Completions-compatible endpoint URL used by the prompt optimizer |
@@ -408,6 +416,7 @@ All variables listed in `.env.example` are also tracked in SQLite for Overall Co
 | `VERSION_CHECK_BRANCH` | `main` | Branch used for the fallback raw `VERSION` file check |
 | `ENABLE_METRICS` | `false` | Enable `/api/metrics` JSON counters/gauges/rates/latency summaries and Prometheus text output |
 | `SLOW_GALLERY_QUERY_MS` | `200` | Log `/api/gallery` requests at or above this threshold with prompt presence/length/hash, other filters, page, total, and DB query time |
+| `ENABLE_NGINX_ACCEL_REDIRECT` | `false` | Return `X-Accel-Redirect` for authorized image/thumb/download responses when nginx internal aliases are in front; Compose enables this by default |
 | `ACCESS_KEY` | empty | Required by default; all non-health routes require unlock when set |
 | `ALLOW_UNAUTHENTICATED` | `false` | Set `true` to explicitly allow startup without `ACCESS_KEY`; startup logs a warning because non-health API routes are unauthenticated |
 | `ACCESS_KEY_COOKIE_NAME` | `gpt_image_access` | Browser cookie name used for the access-key session |
@@ -518,7 +527,7 @@ All variables listed in `.env.example` are also tracked in SQLite for Overall Co
 - terminal job history includes `stage_timings` for `upstream_wait`, `download_decode`, `validate`, `thumbnail`, and `db_insert`; slow gallery queries are logged with prompt presence/length/hash plus other filters and totals and counted in metrics; optional metrics include queue depth, running jobs, failure ratios, job-stage latencies, and slow SQLite query counters; terminal job statuses distinguish `cancelled`, `interrupted`, and `upstream_error` in addition to the generic `error`
 - upstream JSON/SSE bodies are read with a `MAX_UPSTREAM_JSON_MB` cap before parsing, JSON request bodies are capped by `MAX_JSON_BODY_MB`, and upstream image URL downloads are revalidated (SSRF-aware, no blind redirect follow), fully decoded with Pillow, pixel-limited by `MAX_IMAGE_PIXELS`, and bounded by `MAX_FILE_SIZE_MB`
 - `/api/import` enforces ZIP safety/size/count/compression checks; `/api/download-all` keeps the low-memory streaming path, while tracked export jobs write temp ZIP files so UI progress can cover both packing and transfer
-- gallery stores byte-size metadata and thumbnails (`THUMBNAILS_DIR`), with lazy thumbnail and opt-in byte-size backfill for older images
+- gallery stores byte-size metadata and thumbnails (`THUMBNAILS_DIR`), with lazy thumbnail and opt-in byte-size backfill for older images; with Compose, nginx serves immutable frontend assets directly and serves image/thumb/download file bytes only after FastAPI returns an authorized `X-Accel-Redirect`
 - startup reconciliation removes gallery rows for missing files and marks previously running/queued jobs as interrupted
 
 ## Testing
@@ -739,6 +748,8 @@ data/
 
 ### Docker
 
+直接 `docker run` 暴露的是 FastAPI/Granian 进程，不经过 nginx。这个路径仍由后端 `FileResponse` 返回图片，适合简单本地部署。
+
 ```bash
 docker build -t gpt-image-panel .
 docker run -d --name gpt-image-panel \
@@ -759,6 +770,8 @@ docker build \
 
 ### Docker Compose
 
+Compose 会在后端前面放 nginx。浏览器入口仍是 `http://127.0.0.1:9090`；宿主端口由 nginx 暴露，API/index 回源 FastAPI，SvelteKit immutable assets 由 nginx 直接返回，Gallery 图片/缩略图/下载会先由后端完成访问校验和 Gallery 引用校验，再通过 nginx internal redirect 发送文件字节。
+
 ```bash
 cp .env.example .env
 # 按需修改 .env
@@ -772,6 +785,8 @@ docker-compose up -d --build --force-recreate
 PYTHON_BASE_IMAGE=docker.m.daocloud.io/library/python:3.11-slim
 NODE_BASE_IMAGE=docker.m.daocloud.io/library/node:24-alpine
 ```
+
+`GRANIAN_RUNTIME_THREADS` 默认是 `2`。CPU 资源更充足时，可以先试 `GRANIAN_RUNTIME_THREADS=4`。除非把队列、SSE 和取消状态移出进程内存，否则保持 `GRANIAN_WORKERS=1`。
 
 ### 本地开发
 
@@ -944,6 +959,8 @@ curl http://localhost:9090/health
 | `DEFAULT_API_PATH` | `/v1/images/generations` | 默认上游路径；支持 `/v1/images/generations`、`/v1/responses` 和 `/v1/chat/completions` |
 | `DEFAULT_RESPONSES_MODEL` | `gpt-5.4` | 当请求/预设没有提供模型时，`/v1/responses` 使用的兜底顶层模型 |
 | `DEFAULT_UPSTREAM_SOCKS5_PROXY` | 空 | 可选的全局 SOCKS5 代理默认值，仅用于生成/编辑的上游 API 请求 |
+| `AIOHTTP_CONNECTION_LIMIT` | `100` | 上游/探测/下载 aiohttp connector 总连接数限制 |
+| `AIOHTTP_CONNECTION_LIMIT_PER_HOST` | `20` | aiohttp connector 单 host 连接数限制；`0` 表示不限制单 host |
 | `PROMPT_OPTIMIZER_ENABLED` | `false` | 是否启用服务端提示词优化器 |
 | `PROMPT_OPTIMIZER_API_URL` | 空 | 提示词优化器使用的完整 Chat Completions 兼容 endpoint URL |
 | `PROMPT_OPTIMIZER_API_KEY` | 空 | 提示词优化器 API Key；优先使用 `${OPENAI_API_KEY}` 这类环境变量引用，直接填写的 key 会以明文保存到 SQLite |
@@ -967,6 +984,7 @@ curl http://localhost:9090/health
 | `VERSION_CHECK_BRANCH` | `main` | latest release 失败后，用于回退读取 raw `VERSION` 文件的分支 |
 | `ENABLE_METRICS` | `false` | 启用 `/api/metrics` JSON counters/gauges/rates/延迟摘要和 Prometheus 文本输出 |
 | `SLOW_GALLERY_QUERY_MS` | `200` | `/api/gallery` 达到该阈值时记录筛选条件、页码、total 和 DB 查询耗时 |
+| `ENABLE_NGINX_ACCEL_REDIRECT` | `false` | nginx internal alias 在前置时，为已授权的图片/缩略图/下载响应返回 `X-Accel-Redirect`；Compose 默认启用 |
 | `ACCESS_KEY` | 空 | 默认要求设置；设置后每个非健康路由均需解锁 |
 | `ALLOW_UNAUTHENTICATED` | `false` | 设置为 `true` 可显式允许在未设置 `ACCESS_KEY` 时启动；启动时会输出 warning，因为非健康检查 API 不需要鉴权 |
 | `ACCESS_KEY_COOKIE_NAME` | `gpt_image_access` | 访问会话使用的浏览器 cookie 名称 |
@@ -1076,7 +1094,7 @@ curl http://localhost:9090/health
 - 任务终态历史包含 `stage_timings`：`upstream_wait`、`download_decode`、`validate`、`thumbnail`、`db_insert`；慢 Gallery 查询日志只记录提示词是否存在/长度/hash，以及其他筛选条件与 total，并计入 metrics；可选 metrics 包含队列深度、运行中任务数、失败率、任务分段耗时和慢 SQLite 查询数；终态状态区分 `cancelled`、`interrupted` 和 `upstream_error`，同时保留通用 `error`
 - 上游 JSON/SSE 响应会在解析前受 `MAX_UPSTREAM_JSON_MB` 限制，JSON 请求体受 `MAX_JSON_BODY_MB` 限制；上游图片 URL 下载会做 SSRF/重定向目标复核，并会经过 Pillow 完整解码、`MAX_IMAGE_PIXELS` 像素限制和 `MAX_FILE_SIZE_MB` 体积限制
 - `/api/import` 做 ZIP 安全与体积校验；`/api/download-all` 保留低内存流式导出，带进度的导出任务会写入临时 ZIP，让 UI 同时展示打包和传输进度
-- Gallery 持久化图片字节数和缩略图（`THUMBNAILS_DIR`），旧图按需懒补缩略图
+- Gallery 持久化图片字节数和缩略图（`THUMBNAILS_DIR`），旧图按需懒补缩略图；使用 Compose 时，nginx 会直接返回 immutable 前端资源，并且只在 FastAPI 返回已授权的 `X-Accel-Redirect` 后发送图片/缩略图/下载文件字节
 - 启动时会清理缺失文件对应的 Gallery 记录，并把上次进程遗留的 running/queued 任务标记为 interrupted
 
 ## 测试

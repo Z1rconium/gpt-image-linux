@@ -7,9 +7,10 @@ import uuid
 from collections.abc import Iterable
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import APIRouter, Body, File, HTTPException, Query, Request, UploadFile
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from starlette.background import BackgroundTask
 
 from ..app_state import app
@@ -85,6 +86,24 @@ def _resolve_gallery_thumbnail_path(filename: str) -> Path | None:
     if not path or not path.exists():
         return None
     return path
+
+
+def _x_accel_response(
+    path: Path,
+    *,
+    internal_prefix: str,
+    media_type: str,
+    download: bool = False,
+) -> Response:
+    headers = {
+        "X-Accel-Redirect": f"{internal_prefix}{quote(path.name, safe='')}",
+        "Cache-Control": "public, max-age=31536000",
+    }
+    if download:
+        extension = path.suffix.lstrip(".") or "png"
+        filename = f"gpt-image-{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.{extension}"
+        headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+    return Response(status_code=200, media_type=media_type, headers=headers)
 
 
 def _resolve_batch_download_entries(
@@ -1101,6 +1120,14 @@ async def _image_file_response(filename: str, *, download: bool = False):
         raise HTTPException(status_code=404, detail="Image not found")
 
     media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    if config.ENABLE_NGINX_ACCEL_REDIRECT:
+        return _x_accel_response(
+            path,
+            internal_prefix="/_protected/images/",
+            media_type=media_type,
+            download=download,
+        )
+
     if download:
         extension = path.suffix.lstrip(".") or "png"
         return FileResponse(
@@ -1129,6 +1156,13 @@ async def serve_thumbnail(filename: str):
     )
     if not path:
         raise HTTPException(status_code=404, detail="Thumbnail not found")
+
+    if config.ENABLE_NGINX_ACCEL_REDIRECT:
+        return _x_accel_response(
+            path,
+            internal_prefix="/_protected/thumbs/",
+            media_type=storage.THUMBNAIL_CONTENT_TYPE,
+        )
 
     return FileResponse(
         path,

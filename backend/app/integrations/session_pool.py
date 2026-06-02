@@ -59,7 +59,11 @@ def _build_socks5_connector(socks5_proxy: str | None):
             "SOCKS5 proxy support requires aiohttp-socks. "
             "Install backend requirements and restart the server."
         ) from e
-    return ProxyConnector.from_url(proxy_url)
+    return ProxyConnector.from_url(
+        proxy_url,
+        limit=config.AIOHTTP_CONNECTION_LIMIT,
+        limit_per_host=config.AIOHTTP_CONNECTION_LIMIT_PER_HOST,
+    )
 
 
 class SessionPool:
@@ -108,7 +112,10 @@ class SessionPool:
         timeout = _timeout_for_kind(timeout_kind)
         connector = _build_socks5_connector(proxy_key or None)
         if connector is None:
-            connector = create_safe_connector()
+            connector = create_safe_connector(
+                limit=config.AIOHTTP_CONNECTION_LIMIT,
+                limit_per_host=config.AIOHTTP_CONNECTION_LIMIT_PER_HOST,
+            )
         session = aiohttp.ClientSession(timeout=timeout, connector=connector)
         self._sessions[key] = session
         return session

@@ -2,12 +2,13 @@ services:
   gpt-image-panel:
     build:
       context: .
+      target: runtime
       args:
         PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-python:3.11-slim}
         NODE_BASE_IMAGE: ${NODE_BASE_IMAGE:-node:24-alpine}
     container_name: gpt-image-panel
-    ports:
-      - "127.0.0.1:9090:9090"
+    expose:
+      - "9090"
     volumes:
       - ./images:/app/images
       - ./data:/app/data
@@ -17,6 +18,8 @@ services:
       - DEFAULT_API_PATH=${DEFAULT_API_PATH:-/v1/images/generations}
       - DEFAULT_RESPONSES_MODEL=${DEFAULT_RESPONSES_MODEL:-gpt-5.4}
       - DEFAULT_UPSTREAM_SOCKS5_PROXY=${DEFAULT_UPSTREAM_SOCKS5_PROXY:-}
+      - AIOHTTP_CONNECTION_LIMIT=${AIOHTTP_CONNECTION_LIMIT:-100}
+      - AIOHTTP_CONNECTION_LIMIT_PER_HOST=${AIOHTTP_CONNECTION_LIMIT_PER_HOST:-20}
       - APP_VERSION=${APP_VERSION:-}
       - GITHUB_REPO=${GITHUB_REPO:-Z1rconium/gpt-image-linux}
       - ENABLE_VERSION_CHECK=${ENABLE_VERSION_CHECK:-true}
@@ -24,6 +27,9 @@ services:
       - VERSION_CHECK_BRANCH=${VERSION_CHECK_BRANCH:-main}
       - ENABLE_METRICS=${ENABLE_METRICS:-false}
       - SLOW_GALLERY_QUERY_MS=${SLOW_GALLERY_QUERY_MS:-200}
+      - ENABLE_NGINX_ACCEL_REDIRECT=${ENABLE_NGINX_ACCEL_REDIRECT:-true}
+      - GRANIAN_RUNTIME_THREADS=${GRANIAN_RUNTIME_THREADS:-2}
+      - GRANIAN_LOOP=${GRANIAN_LOOP:-uvloop}
       - ALLOW_PLAINTEXT_SECRETS=${ALLOW_PLAINTEXT_SECRETS:-false}
       - PROMPT_OPTIMIZER_ENABLED=${PROMPT_OPTIMIZER_ENABLED:-false}
       - PROMPT_OPTIMIZER_API_URL=${PROMPT_OPTIMIZER_API_URL:-}
@@ -85,3 +91,18 @@ services:
       timeout: 10s
       retries: 3
       start_period: 10s
+
+  gpt-image-panel-nginx:
+    build:
+      context: .
+      target: nginx
+      args:
+        NODE_BASE_IMAGE: ${NODE_BASE_IMAGE:-node:24-alpine}
+    container_name: gpt-image-panel-nginx
+    ports:
+      - "127.0.0.1:9090:80"
+    volumes:
+      - ./images:/app/images:ro
+    depends_on:
+      - gpt-image-panel
+    restart: unless-stopped

@@ -1,5 +1,5 @@
 fastapi>=0.115.0
-granian[reload]>=1.7.0
+granian[reload,uvloop]>=1.7.0
 aiohttp>=3.10.0
 aiohttp-socks>=0.9.0
 python-multipart>=0.0.12

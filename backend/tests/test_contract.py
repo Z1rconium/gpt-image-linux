@@ -7,8 +7,10 @@ import os
 import re
 import sqlite3
 import stat
+import sys
 import threading
 import time
+import types
 import zipfile
 from contextlib import contextmanager
 from pathlib import Path
@@ -117,6 +119,8 @@ def _configure_runtime(tmp_path: Path, *, access_key: str = "", allow_unauthenti
     config.DEFAULT_API_PATH = "/v1/images/generations"
     config.DEFAULT_RESPONSES_MODEL = "gpt-5.4"
     config.DEFAULT_UPSTREAM_SOCKS5_PROXY = ""
+    config.AIOHTTP_CONNECTION_LIMIT = 100
+    config.AIOHTTP_CONNECTION_LIMIT_PER_HOST = 20
     config.ALLOW_PLAINTEXT_SECRETS = False
     config.ACCESS_KEY = access_key
     config.ALLOW_UNAUTHENTICATED = allow_unauthenticated
@@ -150,6 +154,7 @@ def _configure_runtime(tmp_path: Path, *, access_key: str = "", allow_unauthenti
     config.MAX_QUEUED_GENERATE_JOBS = 20
     config.ENABLE_METRICS = False
     config.SLOW_GALLERY_QUERY_MS = 200
+    config.ENABLE_NGINX_ACCEL_REDIRECT = False
     config.THUMBNAILS_DIR = str(images_dir / "thumbs")
     config.THUMBNAIL_MAX_SIDE = 512
     config.PROMPT_OPTIMIZER_ENABLED = False
@@ -787,6 +792,58 @@ def test_session_pool_close_all_closes_retired_sessions(monkeypatch):
     assert second.closed is True
     assert first.close_calls == 1
     assert second.close_calls == 1
+
+
+def test_session_pool_passes_connector_limits(monkeypatch):
+    created_sessions = []
+    safe_connector_kwargs = {}
+    socks_connector_kwargs = {}
+    config.AIOHTTP_CONNECTION_LIMIT = 77
+    config.AIOHTTP_CONNECTION_LIMIT_PER_HOST = 9
+
+    class FakeSession:
+        def __init__(self, timeout=None, connector=None):
+            self.timeout = timeout
+            self.connector = connector
+            self.closed = False
+            created_sessions.append(self)
+
+        async def close(self):
+            self.closed = True
+
+    class FakeProxyConnector:
+        @classmethod
+        def from_url(cls, proxy_url, **kwargs):
+            socks_connector_kwargs["proxy_url"] = proxy_url
+            socks_connector_kwargs.update(kwargs)
+            return "socks-connector"
+
+    monkeypatch.setattr(session_pool.aiohttp, "ClientSession", FakeSession)
+    monkeypatch.setattr(
+        session_pool,
+        "create_safe_connector",
+        lambda **kwargs: safe_connector_kwargs.update(kwargs) or "safe-connector",
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "aiohttp_socks",
+        types.SimpleNamespace(ProxyConnector=FakeProxyConnector),
+    )
+
+    pool = session_pool.SessionPool()
+    safe_session = pool.get()
+    socks_session = pool.get(socks5_proxy="socks5://proxy")
+
+    assert safe_session.connector == "safe-connector"
+    assert safe_connector_kwargs == {"limit": 77, "limit_per_host": 9}
+    assert socks_session.connector == "socks-connector"
+    assert socks_connector_kwargs == {
+        "proxy_url": "socks5://proxy",
+        "limit": 77,
+        "limit_per_host": 9,
+    }
+
+    asyncio.run(pool.close_all())
 
 
 def test_ip_allowlist_blocks_api_but_not_health(tmp_path):
@@ -3193,6 +3250,36 @@ def test_gallery_image_download_and_zip(client):
         assert "thumbnail_filename" not in metadata["images"][0]
         assert "thumbnail_url" not in metadata["images"][0]
         assert metadata["images"][0]["sha256"]
+
+
+def test_gallery_image_responses_use_x_accel_redirect_when_enabled(client):
+    config.ENABLE_NGINX_ACCEL_REDIRECT = True
+    entry = _fake_gallery_entry("gallery-accel", "accel", "1024x1024", "gallery accel.png")
+    assert entry.thumbnail_filename
+
+    image = client.get("/api/image/gallery%20accel.png")
+    assert image.status_code == 200
+    assert image.headers["x-accel-redirect"] == "/_protected/images/gallery%20accel.png"
+    assert image.headers["cache-control"].startswith("public")
+    assert image.headers["content-type"].startswith("image/png")
+    assert image.content == b""
+
+    thumbnail_path = storage.safe_thumbnail_path(entry.thumbnail_filename)
+    assert thumbnail_path is not None
+    thumbnail_path.unlink()
+
+    thumb = client.get("/api/thumb/gallery%20accel.png")
+    assert thumb.status_code == 200
+    assert thumb.headers["x-accel-redirect"] == f"/_protected/thumbs/{entry.thumbnail_filename}"
+    assert thumb.headers["cache-control"].startswith("public")
+    assert thumb.headers["content-type"].startswith("image/webp")
+    assert thumbnail_path.exists()
+
+    download = client.get("/api/download/gallery%20accel.png")
+    assert download.status_code == 200
+    assert download.headers["x-accel-redirect"] == "/_protected/images/gallery%20accel.png"
+    assert "attachment" in download.headers["content-disposition"]
+    assert download.headers["content-type"].startswith("image/png")
 
 
 def test_orphan_gallery_files_are_not_directly_served(client):
