@@ -117,7 +117,7 @@ Runtime persistent storage is minimal:
 
 - Python 3.11+
 - FastAPI
-- Uvicorn
+- Granian
 - aiohttp
 - SQLite
 - Pydantic v2
@@ -229,11 +229,11 @@ npm run frontend:dev
 Then open `http://localhost:5173`. The Vite dev server proxies `/api` and `/health` to FastAPI at `127.0.0.1:9090`, so browser requests stay same-origin in development.
 It binds to `127.0.0.1` by default; for LAN/external debugging, run `npm run frontend:dev -- --host 0.0.0.0`.
 
-For a single-process local smoke test, build the frontend first and run FastAPI:
+For a single-process local smoke test, build the frontend first and run FastAPI through Granian:
 
 ```bash
 npm run frontend:build
-uvicorn backend.app.main:app --host 0.0.0.0 --port 9090 --reload
+granian --interface asgi backend.app.main:app --host 0.0.0.0 --port 9090 --reload
 ```
 
 Then open `http://localhost:9090`.
@@ -678,7 +678,7 @@ npm --prefix frontend run build
 
 - Python 3.11+
 - FastAPI
-- Uvicorn
+- Granian
 - aiohttp
 - SQLite
 - Pydantic v2
@@ -790,11 +790,11 @@ npm run frontend:dev
 然后打开 `http://localhost:5173`。Vite dev server 会把 `/api` 和 `/health` 代理到 `127.0.0.1:9090`，浏览器侧仍然是同源路径。
 默认只监听 `127.0.0.1`；如果要做局域网/外网调试，使用 `npm run frontend:dev -- --host 0.0.0.0`。
 
-如果要单进程 smoke test：
+如果要单进程 smoke test，先构建前端，再通过 Granian 运行 FastAPI：
 
 ```bash
 npm run frontend:build
-uvicorn backend.app.main:app --host 0.0.0.0 --port 9090 --reload
+granian --interface asgi backend.app.main:app --host 0.0.0.0 --port 9090 --reload
 ```
 
 然后打开 `http://localhost:9090`。
