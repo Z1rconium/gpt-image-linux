@@ -1,4 +1,5 @@
 import asyncio
+import json
 import time
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -6,12 +7,7 @@ from fastapi.responses import StreamingResponse
 
 from ..app_state import app
 from ..jobs import (
-    get_generate_job_tasks,
     get_generate_job_webhooks,
-    get_job_subscribers,
-    get_jobs_subscribers,
-    list_active_generate_jobs,
-    publish_queue,
     queue_image_job,
     run_generate_job,
     serialize_sse_event,
@@ -34,6 +30,10 @@ from ...schemas.models import (
 
 
 router = APIRouter()
+
+
+def json_payload_key(payload: dict | list) -> str:
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 @router.post("/api/generate", response_model=GenerateJobResponse, status_code=202)
@@ -78,7 +78,10 @@ async def list_generate_jobs(
         statuses = ERROR_GENERATE_JOB_STATUSES if failed_only else None
         jobs = await asyncio.to_thread(storage.list_generate_jobs, statuses=statuses, limit=limit, offset=offset)
     else:
-        jobs = list_active_generate_jobs()
+        jobs = await asyncio.to_thread(
+            storage.list_generate_jobs,
+            statuses=ACTIVE_GENERATE_JOB_STATUSES,
+        )
     return [GenerateJobStatus(**job) for job in jobs]
 
 
@@ -88,31 +91,31 @@ async def stream_generate_jobs(request: Request):
     if not await sse_limiter.acquire(client_ip):
         raise HTTPException(status_code=429, detail="Too many SSE connections")
 
-    queue: asyncio.Queue = asyncio.Queue(maxsize=20)
-    subscribers = get_jobs_subscribers()
-    subscribers.add(queue)
-    active_jobs = list_active_generate_jobs(reconcile=True)
-    publish_queue(
-        queue,
-        {"event": "jobs", "data": active_jobs},
-    )
-
     async def event_stream():
         start = time.monotonic()
+        last_payload = None
+        last_sent = 0.0
         try:
             while True:
                 if await request.is_disconnected():
                     break
                 if time.monotonic() - start > config.SSE_CONNECTION_TTL_SECONDS:
                     break
-                try:
-                    item = await asyncio.wait_for(queue.get(), timeout=15)
-                except asyncio.TimeoutError:
+                jobs = await asyncio.to_thread(
+                    storage.list_generate_jobs,
+                    statuses=ACTIVE_GENERATE_JOB_STATUSES,
+                )
+                payload = json_payload_key(jobs)
+                now = time.monotonic()
+                if payload != last_payload:
+                    last_payload = payload
+                    last_sent = now
+                    yield serialize_sse_event("jobs", jobs)
+                elif now - last_sent >= 15:
+                    last_sent = now
                     yield ": keep-alive\n\n"
-                    continue
-                yield serialize_sse_event(item["event"], item["data"])
+                await asyncio.sleep(config.IMAGE_JOB_UNIT_POLL_INTERVAL_SECONDS)
         finally:
-            subscribers.discard(queue)
             await sse_limiter.release(client_ip)
 
     return StreamingResponse(
@@ -152,34 +155,32 @@ async def stream_generate_job(job_id: str, request: Request):
     if not await sse_limiter.acquire(client_ip):
         raise HTTPException(status_code=429, detail="Too many SSE connections")
 
-    queue: asyncio.Queue = asyncio.Queue(maxsize=20)
-    subscribers_by_job = get_job_subscribers()
-    subscribers = subscribers_by_job.setdefault(job_id, set())
-    subscribers.add(queue)
-    publish_queue(queue, {"event": "job", "data": job})
-
     async def event_stream():
         start = time.monotonic()
+        last_payload = None
+        last_sent = 0.0
         try:
             while True:
                 if await request.is_disconnected():
                     break
                 if time.monotonic() - start > config.SSE_CONNECTION_TTL_SECONDS:
                     break
-                try:
-                    item = await asyncio.wait_for(queue.get(), timeout=15)
-                except asyncio.TimeoutError:
-                    yield ": keep-alive\n\n"
-                    continue
-
-                data = item["data"]
-                yield serialize_sse_event(item["event"], data)
-                if data.get("status") not in ACTIVE_GENERATE_JOB_STATUSES:
+                current = await asyncio.to_thread(storage.get_generate_job, job_id)
+                if not current:
                     break
+                payload = json_payload_key(current)
+                now = time.monotonic()
+                if payload != last_payload:
+                    last_payload = payload
+                    last_sent = now
+                    yield serialize_sse_event("job", current)
+                    if current.get("status") not in ACTIVE_GENERATE_JOB_STATUSES:
+                        break
+                elif now - last_sent >= 15:
+                    last_sent = now
+                    yield ": keep-alive\n\n"
+                await asyncio.sleep(config.IMAGE_JOB_UNIT_POLL_INTERVAL_SECONDS)
         finally:
-            subscribers.discard(queue)
-            if not subscribers:
-                subscribers_by_job.pop(job_id, None)
             await sse_limiter.release(client_ip)
 
     return StreamingResponse(
@@ -216,11 +217,9 @@ async def cancel_generate_job(job_id: str):
             "error": cancel_message,
         },
     )
+    await asyncio.to_thread(storage.cancel_image_job_units, job_id)
     await asyncio.to_thread(trim_generate_jobs)
 
     get_generate_job_webhooks().pop(job_id, None)
-    task = get_generate_job_tasks().pop(job_id, None)
-    if task and not task.done():
-        task.cancel()
 
     return MessageResponse(status="success", message="Generation job cancelled")

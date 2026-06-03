@@ -18,6 +18,7 @@ from .app_state import (
 )
 from .presets import (
     get_active_preset,
+    get_api_presets,
     get_effective_preset_api_key,
     get_exception_message,
     get_upstream_socks5_proxy,
@@ -268,7 +269,11 @@ def get_generate_job_tasks() -> dict[str, asyncio.Task]:
 
 
 def get_generate_job_semaphore() -> asyncio.Semaphore:
-    return app.state.generate_job_semaphore
+    semaphore = getattr(app.state, "generate_job_semaphore", None)
+    if semaphore is None:
+        semaphore = asyncio.Semaphore(config.MAX_ACTIVE_GENERATE_JOBS)
+        app.state.generate_job_semaphore = semaphore
+    return semaphore
 
 
 def get_upstream_request_semaphore() -> asyncio.Semaphore:
@@ -326,21 +331,17 @@ def job_image_units(job: dict) -> int:
 
 
 def count_active_job_units() -> int:
-    jobs = app.state.generate_jobs or {}
-    return sum(
-        job_image_units(job)
-        for job in jobs.values()
-        if job.get("status") in ACTIVE_GENERATE_JOB_STATUSES
-    )
+    return storage.count_active_image_job_units()
 
 
 def snapshot_queue_metrics() -> dict[str, int]:
     jobs = app.state.generate_jobs or {}
+    running_units, queued_units = storage.count_pending_image_job_units()
     counts: dict[str, int] = {
         "image_jobs.active": 0,
-        "image_jobs.active_units": 0,
-        "image_jobs.queued": 0,
-        "image_jobs.running": 0,
+        "image_jobs.active_units": running_units + queued_units,
+        "image_jobs.queued": queued_units,
+        "image_jobs.running": running_units,
         "image_jobs.capacity": config.MAX_ACTIVE_GENERATE_JOBS + config.MAX_QUEUED_GENERATE_JOBS,
         "image_jobs.running_capacity": config.MAX_ACTIVE_GENERATE_JOBS,
         "image_jobs.queued_capacity": config.MAX_QUEUED_GENERATE_JOBS,
@@ -364,8 +365,6 @@ def snapshot_queue_metrics() -> dict[str, int]:
             continue
         operation = str(job.get("operation") or "generation")
         counts["image_jobs.active"] += 1
-        counts["image_jobs.active_units"] += job_image_units(job)
-        counts[f"image_jobs.{status}"] += 1
         if operation in {"generation", "edit"}:
             counts[f"image_jobs.{operation}.{status}.current"] += 1
 
@@ -378,7 +377,8 @@ def ensure_job_queue_capacity(
 ):
     capacity = config.MAX_ACTIVE_GENERATE_JOBS + config.MAX_QUEUED_GENERATE_JOBS
     requested_units = max(1, int(image_units or 1))
-    if count_active_job_units() + requested_units > capacity:
+    running_units, queued_units = storage.count_pending_image_job_units()
+    if running_units + queued_units + requested_units > capacity:
         metrics.increment("image_jobs.rejected.queue_full")
         raise HTTPException(status_code=429, detail="Generation job queue is full")
     max_pending_edit_source_bytes = get_max_pending_edit_source_bytes()
@@ -445,6 +445,217 @@ def gallery_entry_job_image(entry: GalleryEntry) -> dict:
     }
 
 
+def gallery_entry_job_result(entry: GalleryEntry) -> dict:
+    image = gallery_entry_job_image(entry)
+    image["prompt"] = entry.prompt
+    image["size"] = entry.size
+    image["model"] = entry.model
+    image["quality"] = entry.quality
+    image["output_format"] = entry.output_format
+    image["output_compression"] = entry.output_compression
+    image["response_format"] = entry.response_format
+    image["api_path"] = entry.api_path
+    image["api_preset_name"] = entry.api_preset_name
+    image["completed_at"] = entry.completed_at
+    return image
+
+
+def edit_source_to_payload(source: EditImageSource) -> dict:
+    return {
+        "temp_path": str(source.temp_path),
+        "byte_size": source.byte_size,
+        "filename": source.filename,
+        "content_type": source.content_type,
+    }
+
+
+def edit_source_from_payload(payload: dict) -> EditImageSource:
+    return EditImageSource(
+        temp_path=Path(str(payload.get("temp_path") or "")),
+        byte_size=int(payload.get("byte_size") or 0),
+        filename=str(payload.get("filename") or "image.png"),
+        content_type=str(payload.get("content_type") or "application/octet-stream"),
+    )
+
+
+def build_request_payload(req: GenerateRequest | EditRequest) -> dict:
+    data = req.model_dump(mode="json")
+    data.pop("webhook_url", None)
+    return data
+
+
+def rebuild_request(operation: str, payload: dict) -> GenerateRequest | EditRequest:
+    request_data = {**payload, "n": 1}
+    if operation == "edit":
+        return EditRequest(**request_data)
+    return GenerateRequest(**request_data)
+
+
+def get_preset_for_unit(unit: dict) -> dict | None:
+    preset_id = str(unit.get("api_preset_id") or "")
+    preset_name = str(unit.get("api_preset_name") or "")
+    for preset in get_api_presets():
+        if preset_id and preset.get("id") == preset_id:
+            return preset
+    for preset in get_api_presets():
+        if preset_name and preset.get("name") == preset_name:
+            return preset
+    return get_active_preset()
+
+
+def cleanup_parent_edit_sources(parent_job_id: str):
+    aggregate = storage.aggregate_image_job_units(parent_job_id)
+    paths: set[str] = set()
+    total_bytes = 0
+    for unit in aggregate.get("units", []):
+        for source in unit.get("edit_sources") or []:
+            path = str(source.get("temp_path") or "")
+            if path:
+                paths.add(path)
+            try:
+                total_bytes += int(source.get("byte_size") or 0)
+            except (TypeError, ValueError):
+                pass
+    for path in paths:
+        Path(path).unlink(missing_ok=True)
+    release_pending_edit_source_bytes(total_bytes)
+
+
+def summarize_unit_failures(failures: list[dict], total: int, operation: str) -> str:
+    if total == 1 and failures:
+        return str(failures[0].get("error") or failures[0].get("message") or "failed")
+    sample_messages = []
+    for unit in failures[:3]:
+        index = int(unit.get("unit_index") or 0)
+        message = str(unit.get("error") or unit.get("message") or "failed")
+        sample_messages.append(f"#{index + 1}: {message}")
+    if len(failures) > len(sample_messages):
+        sample_messages.append(f"... and {len(failures) - len(sample_messages)} more")
+    suffix = "; ".join(sample_messages) if sample_messages else "no image data"
+    noun = "image generation requests" if operation == "generation" else "image edit requests"
+    return f"{len(failures)} of {total} {noun} failed: {suffix}"
+
+
+def aggregate_parent_image_job(parent_job_id: str, *, force_publish: bool = False) -> dict | None:
+    parent = storage.get_generate_job(parent_job_id)
+    if not parent:
+        return None
+    aggregate = storage.aggregate_image_job_units(parent_job_id)
+    total = int(aggregate.get("total") or parent.get("n") or 1)
+    completed = int(aggregate.get("completed") or 0)
+    success_count = int(aggregate.get("success_count") or 0)
+    running_count = int(aggregate.get("running_count") or 0)
+    queued_count = int(aggregate.get("queued_count") or 0)
+    operation = str(parent.get("operation") or "generation")
+
+    if aggregate.get("all_terminal"):
+        images = aggregate.get("images") or []
+        failures = aggregate.get("failures") or []
+        first_image = images[0] if images else {}
+        completed_at = str(first_image.get("completed_at") or beijing_now())
+        if images:
+            message = (
+                "Image edit completed"
+                if operation == "edit"
+                else "Image generation completed"
+            )
+            if failures:
+                message = f"Generated {len(images)} of {total} requested images; {len(failures)} failed"
+            update = {
+                "status": "success",
+                "stage": "completed",
+                "message": message,
+                "operation": operation,
+                "image_id": first_image.get("image_id"),
+                "image_url": first_image.get("image_url"),
+                "images": images,
+                "prompt": parent.get("prompt"),
+                "size": parent.get("size"),
+                "image_width": first_image.get("image_width"),
+                "image_height": first_image.get("image_height"),
+                "model": parent.get("model"),
+                "quality": parent.get("quality"),
+                "output_format": parent.get("output_format"),
+                "output_compression": parent.get("output_compression"),
+                "response_format": parent.get("response_format"),
+                "n": parent.get("n"),
+                "api_path": parent.get("api_path"),
+                "api_preset_name": parent.get("api_preset_name"),
+                "stage_timings": aggregate.get("stage_timings") or {},
+                "completed_at": completed_at,
+            }
+            if failures:
+                update["error"] = summarize_unit_failures(failures, total, operation)
+        elif aggregate.get("all_cancelled"):
+            cancel_message = (
+                "Image edit job cancelled"
+                if operation == "edit"
+                else "Generation job cancelled"
+            )
+            update = {
+                "status": "cancelled",
+                "stage": "cancelled",
+                "message": cancel_message,
+                "operation": operation,
+                "completed_at": completed_at,
+                "error": cancel_message,
+            }
+        else:
+            failures = failures or aggregate.get("units") or []
+            status = (
+                "upstream_error"
+                if failures and all(unit.get("status") == "upstream_error" for unit in failures)
+                else "error"
+            )
+            error_message = summarize_unit_failures(failures, total, operation)
+            update = {
+                "status": status,
+                "stage": "generation_failed" if operation == "generation" else "edit_failed",
+                "message": error_message,
+                "operation": operation,
+                "completed_at": completed_at,
+                "error": error_message,
+                "stage_timings": aggregate.get("stage_timings") or {},
+            }
+        job = store_generate_job(parent_job_id, update)
+        trim_generate_jobs()
+        if operation == "edit":
+            cleanup_parent_edit_sources(parent_job_id)
+        return job
+
+    if running_count > 0 or success_count > 0:
+        stage = "waiting_for_api"
+        message = (
+            f"Editing images ({success_count}/{total} completed)"
+            if operation == "edit"
+            else f"Generating images ({success_count}/{total} completed)"
+        )
+        return store_generate_job(
+            parent_job_id,
+            {
+                "status": "running",
+                "stage": stage,
+                "message": message,
+                "operation": operation,
+                "started_at": parent.get("started_at") or utc_now(),
+            },
+            persist=force_publish,
+        )
+
+    if queued_count > 0:
+        return store_generate_job(
+            parent_job_id,
+            {
+                "status": "queued",
+                "stage": "queued",
+                "message": parent.get("message") or "Queued image generation",
+                "operation": operation,
+            },
+            persist=force_publish,
+        )
+    return parent
+
+
 def set_generate_job_progress(
     job_id: str,
     stage: str,
@@ -502,8 +713,10 @@ def queue_image_job(
     queued_message: str,
     task_factory: Callable[[str, str, str, str, str, str], Awaitable[None]],
     pending_edit_source_bytes: int = 0,
+    edit_sources_payload: list[dict] | None = None,
 ) -> GenerateJobResponse:
     active_preset = get_active_preset()
+    active_preset_id = str(active_preset.get("id") or "default")
     api_url = str(active_preset.get("api_url") or "").rstrip("/")
     api_preset_name = active_preset.get("name") or "Untitled preset"
     resolved_api_path = api_path(active_preset) if callable(api_path) else api_path
@@ -537,7 +750,6 @@ def queue_image_job(
     )
     job_id = str(uuid.uuid4())
     reserved_edit_source_bytes = 0
-    task: asyncio.Task | None = None
     try:
         if pending_edit_source_bytes > 0:
             reserve_pending_edit_source_bytes(pending_edit_source_bytes)
@@ -554,21 +766,19 @@ def queue_image_job(
             image_units=image_units,
         )
         store_generate_job(job_id, pending_job)
-        metrics.increment(f"image_jobs.{operation}.queued")
-        task = asyncio.create_task(
-            task_factory(
-                job_id,
-                api_url,
-                api_key,
-                resolved_api_path,
-                api_preset_name,
-                socks5_proxy,
-            )
+        storage.create_image_job_units(
+            parent_job_id=job_id,
+            operation=operation,
+            request=build_request_payload(req),
+            image_units=image_units,
+            api_preset_id=active_preset_id,
+            api_preset_name=api_preset_name,
+            api_path=resolved_api_path,
+            edit_sources=edit_sources_payload,
         )
-        track_generate_job_task(job_id, task)
+        metrics.increment(f"image_jobs.{operation}.queued")
+        publish_generate_jobs(debounce=False, reconcile=True)
     except BaseException:
-        if task and not task.done():
-            task.cancel()
         release_pending_edit_source_bytes(reserved_edit_source_bytes)
         get_generate_job_webhooks().pop(job_id, None)
         app.state.generate_jobs.pop(job_id, None)
@@ -616,6 +826,7 @@ def queue_edit_job(
         queued_message="Queued image edit",
         task_factory=start_edit_job,
         pending_edit_source_bytes=image_source_bytes,
+        edit_sources_payload=[edit_source_to_payload(source) for source in image_sources],
     )
 
 
@@ -998,3 +1209,209 @@ async def run_edit_job(
         for source in image_sources:
             source.temp_path.unlink(missing_ok=True)
         release_pending_edit_source_bytes(image_source_bytes)
+
+
+def image_unit_lease_expires_at() -> str:
+    return datetime_from_monotonic_delta(config.IMAGE_JOB_UNIT_LEASE_SECONDS)
+
+
+def datetime_from_monotonic_delta(seconds: float) -> str:
+    from datetime import datetime, timedelta, timezone
+
+    return (datetime.now(timezone.utc) + timedelta(seconds=max(1.0, seconds))).isoformat()
+
+
+async def run_claimed_image_unit(unit: dict, worker_id: str):
+    unit_id = str(unit["unit_id"])
+    parent_job_id = str(unit["parent_job_id"])
+    operation = str(unit.get("operation") or "generation")
+    stage_timer = JobStageTimer()
+    started_at = time.monotonic()
+    parent = storage.get_generate_job(parent_job_id) or {}
+    req = rebuild_request(operation, unit.get("request") or {})
+    api_path = str(unit.get("api_path") or parent.get("api_path") or "/v1/images/generations")
+    api_preset_name = str(unit.get("api_preset_name") or parent.get("api_preset_name") or "")
+    preset = get_preset_for_unit(unit)
+    if not preset:
+        raise RuntimeError("API preset not found for image unit")
+    api_url = ssrf.normalize_upstream_base_url(str(preset.get("api_url") or "").rstrip("/"))
+    api_key = get_effective_preset_api_key(preset)
+    socks5_proxy = get_upstream_socks5_proxy()
+
+    def progress(stage: str, message: str):
+        storage.update_image_job_unit_progress(
+            unit_id,
+            stage=stage,
+            message=message,
+            claim_expires_at=image_unit_lease_expires_at(),
+        )
+        aggregate_parent_image_job(parent_job_id)
+
+    try:
+        if (storage.get_generate_job(parent_job_id) or {}).get("status") == "cancelled":
+            raise asyncio.CancelledError()
+        start_stage = "starting_edit" if operation == "edit" else "starting_generation"
+        start_message = "Starting image edit" if operation == "edit" else "Starting image generation"
+        storage.update_image_job_unit_progress(
+            unit_id,
+            stage=start_stage,
+            message=start_message,
+            claim_expires_at=image_unit_lease_expires_at(),
+        )
+        store_generate_job(
+            parent_job_id,
+            {
+                "status": "running",
+                "stage": start_stage,
+                "message": start_message,
+                "operation": operation,
+                "started_at": parent.get("started_at") or utc_now(),
+            },
+        )
+        if int(parent.get("n") or 1) > 1:
+            aggregate_parent_image_job(parent_job_id, force_publish=True)
+        metrics.increment(f"image_jobs.{operation}.started")
+        with use_job_stage_timer(stage_timer):
+            if operation == "edit":
+                image_sources = [
+                    edit_source_from_payload(source)
+                    for source in unit.get("edit_sources") or []
+                ]
+                if not image_sources:
+                    raise proxy.UpstreamApiError("At least one edit source image is required")
+                entries = await proxy.call_image_edit_api(
+                    api_url,
+                    api_key,
+                    req,  # type: ignore[arg-type]
+                    image_sources,
+                    api_preset_name,
+                    progress,
+                    socks5_proxy=socks5_proxy,
+                )
+            else:
+                entries = await proxy.call_image_generation_api(
+                    api_url,
+                    api_key,
+                    api_path,
+                    req,  # type: ignore[arg-type]
+                    api_preset_name,
+                    progress,
+                    socks5_proxy=socks5_proxy,
+                )
+            if not entries:
+                raise proxy.UpstreamApiError("No image data in upstream response")
+        duration_seconds = time.monotonic() - started_at
+        duration = f"{duration_seconds:.2f}s"
+        completed_at = beijing_now()
+        updated_entries = [
+            storage.update_gallery_entry(
+                entry.id,
+                {"duration": duration, "completed_at": completed_at, "n": parent.get("n") or req.n},
+            )
+            or entry
+            for entry in entries
+        ]
+        result_images = [gallery_entry_job_result(entry) for entry in updated_entries]
+        stage_timings = stage_timer.snapshot()
+        metrics.increment(f"image_jobs.{operation}.succeeded")
+        metrics.observe_ms("image_job.duration", duration_seconds * 1000)
+        metrics.observe_job_stage_timings(stage_timings)
+        if (storage.get_generate_job(parent_job_id) or {}).get("status") == "cancelled":
+            storage.fail_image_job_unit(
+                unit_id,
+                status="cancelled",
+                stage="cancelled",
+                message="Generation job cancelled",
+                error="Generation job cancelled",
+                stage_timings=stage_timings,
+                duration=duration,
+                completed_at=utc_now(),
+            )
+            return
+        storage.complete_image_job_unit(
+            unit_id,
+            result={"images": result_images},
+            stage_timings=stage_timings,
+            duration=duration,
+            completed_at=completed_at,
+        )
+    except asyncio.CancelledError:
+        duration_seconds = time.monotonic() - started_at
+        stage_timings = stage_timer.snapshot()
+        metrics.increment(f"image_jobs.{operation}.cancelled")
+        storage.fail_image_job_unit(
+            unit_id,
+            status="cancelled",
+            stage="cancelled",
+            message="Generation job cancelled",
+            error="Generation job cancelled",
+            stage_timings=stage_timings,
+            duration=f"{duration_seconds:.2f}s",
+            completed_at=utc_now(),
+        )
+    except Exception as e:
+        error_message = get_exception_message(e)
+        status = "upstream_error" if isinstance(e, proxy.UpstreamApiError) else "error"
+        duration_seconds = time.monotonic() - started_at
+        stage_timings = stage_timer.snapshot()
+        if (storage.get_generate_job(parent_job_id) or {}).get("status") == "cancelled":
+            storage.fail_image_job_unit(
+                unit_id,
+                status="cancelled",
+                stage="cancelled",
+                message="Generation job cancelled",
+                error="Generation job cancelled",
+                stage_timings=stage_timings,
+                duration=f"{duration_seconds:.2f}s",
+                completed_at=utc_now(),
+            )
+            return
+        metrics.increment(f"image_jobs.{operation}.failed")
+        metrics.observe_ms("image_job.duration", duration_seconds * 1000)
+        metrics.observe_job_stage_timings(stage_timings)
+        logger.exception(
+            "Image unit failed: unit_id=%s parent_job_id=%s worker_id=%s error_type=%s",
+            unit_id,
+            parent_job_id,
+            worker_id,
+            e.__class__.__name__,
+        )
+        storage.fail_image_job_unit(
+            unit_id,
+            status=status,
+            stage="generation_failed" if operation == "generation" else "edit_failed",
+            message=error_message,
+            error=error_message,
+            stage_timings=stage_timings,
+            duration=f"{duration_seconds:.2f}s",
+            completed_at=utc_now(),
+        )
+    finally:
+        aggregate_parent_image_job(parent_job_id, force_publish=True)
+
+
+async def run_image_unit_dispatcher(worker_id: str):
+    logger.info("Image unit dispatcher started: worker_id=%s", worker_id)
+    active_tasks: set[asyncio.Task] = set()
+    try:
+        while True:
+            active_tasks = {task for task in active_tasks if not task.done()}
+            storage.mark_worker_heartbeat(worker_id, len(active_tasks))
+            while len(active_tasks) < config.MAX_ACTIVE_GENERATE_JOBS:
+                unit = storage.claim_next_image_job_unit(
+                    worker_id=worker_id,
+                    lease_expires_at=image_unit_lease_expires_at(),
+                    now=utc_now(),
+                    running_limit=config.MAX_ACTIVE_GENERATE_JOBS,
+                )
+                if not unit:
+                    break
+                task = asyncio.create_task(run_claimed_image_unit(unit, worker_id))
+                active_tasks.add(task)
+            await asyncio.sleep(config.IMAGE_JOB_UNIT_POLL_INTERVAL_SECONDS)
+    except asyncio.CancelledError:
+        for task in active_tasks:
+            task.cancel()
+        if active_tasks:
+            await asyncio.gather(*active_tasks, return_exceptions=True)
+        raise

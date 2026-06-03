@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import logging
 import mimetypes
+import os
 import time
 import uuid
 from collections.abc import Iterable
@@ -45,6 +46,25 @@ from ...schemas.models import (
 
 
 router = APIRouter()
+
+
+def granian_worker_count() -> int:
+    try:
+        return max(1, int(os.getenv("GRANIAN_WORKERS", "1")))
+    except (TypeError, ValueError):
+        return 1
+
+
+def reject_memory_scoped_gallery_job_in_multi_worker():
+    if granian_worker_count() > 1:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Gallery export and R2 sync jobs are memory-scoped and are disabled "
+                "when GRANIAN_WORKERS > 1. Use direct download/export endpoints or run "
+                "with GRANIAN_WORKERS=1 for tracked gallery background jobs."
+            ),
+        )
 logger = logging.getLogger(__name__)
 GALLERY_EXPORT_TERMINAL_STATUSES = {"success", "error"}
 GALLERY_SYNC_TERMINAL_STATUSES = {"success", "error"}
@@ -671,6 +691,9 @@ async def _run_scheduled_gallery_r2_sync_once() -> dict[str, object]:
 
 async def run_gallery_r2_scheduled_sync() -> None:
     while True:
+        if granian_worker_count() > 1:
+            await asyncio.sleep(3600)
+            continue
         delay_seconds = await _scheduled_gallery_r2_sync_delay_seconds()
         await asyncio.sleep(delay_seconds)
         try:
@@ -886,6 +909,7 @@ async def download_gallery_batch(req: GalleryBatchRequest):
 
 @router.post("/api/gallery/export-jobs", response_model=GalleryExportJobStatus, status_code=202)
 async def create_gallery_export_job(req: GalleryExportRequest | None = Body(default=None)):
+    reject_memory_scoped_gallery_job_in_multi_worker()
     ids = req.ids if req else None
     if ids:
         entries = await asyncio.to_thread(storage.get_gallery_entries_by_ids, ids)
@@ -1010,6 +1034,7 @@ async def download_gallery_export_job(job_id: str):
 
 @router.post("/api/gallery/sync-jobs", response_model=GallerySyncJobStatus, status_code=202)
 async def create_gallery_sync_job():
+    reject_memory_scoped_gallery_job_in_multi_worker()
     gallery_count = await asyncio.to_thread(storage.get_gallery_count)
     if gallery_count == 0:
         raise HTTPException(status_code=404, detail="No images in gallery")

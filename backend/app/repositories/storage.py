@@ -7,6 +7,7 @@ import secrets
 import sqlite3
 import threading
 import time
+import uuid
 from collections import OrderedDict
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -90,6 +91,15 @@ __all__ = [
     "get_gallery_page",
     "get_gallery_total_bytes",
     "get_generate_job",
+    "aggregate_image_job_units",
+    "cancel_image_job_units",
+    "claim_next_image_job_unit",
+    "complete_image_job_unit",
+    "create_image_job_units",
+    "count_active_image_job_units",
+    "count_pending_image_job_units",
+    "fail_image_job_unit",
+    "get_image_job_unit",
     "get_image_dimensions",
     "import_gallery_entries",
     "iter_gallery_export_rows",
@@ -100,6 +110,7 @@ __all__ = [
     "load_settings",
     "list_prompt_snippets",
     "mark_active_generate_jobs_interrupted",
+    "mark_worker_heartbeat",
     "create_prompt_snippet",
     "delete_prompt_snippet",
     "safe_image_path",
@@ -186,6 +197,30 @@ GENERATE_JOB_COLUMNS = (
     "image_width",
     "image_height",
     "error",
+)
+IMAGE_JOB_UNIT_COLUMNS = (
+    "unit_id",
+    "parent_job_id",
+    "operation",
+    "unit_index",
+    "status",
+    "claimed_by",
+    "claim_expires_at",
+    "stage",
+    "message",
+    "error",
+    "result_json",
+    "stage_timings_json",
+    "duration",
+    "created_at",
+    "started_at",
+    "completed_at",
+    "updated_at",
+    "request_json",
+    "edit_sources_json",
+    "api_preset_id",
+    "api_preset_name",
+    "api_path",
 )
 PROMPT_SNIPPET_COLUMNS = (
     "id",
@@ -838,6 +873,45 @@ def _ensure_database():
                     ON generate_jobs(status, updated_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_generate_jobs_updated_at
                     ON generate_jobs(updated_at DESC);
+
+                CREATE TABLE IF NOT EXISTS image_job_units (
+                    unit_id TEXT PRIMARY KEY,
+                    parent_job_id TEXT NOT NULL,
+                    operation TEXT NOT NULL,
+                    unit_index INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    claimed_by TEXT,
+                    claim_expires_at TEXT,
+                    stage TEXT,
+                    message TEXT,
+                    error TEXT,
+                    result_json TEXT,
+                    stage_timings_json TEXT,
+                    duration TEXT,
+                    created_at TEXT NOT NULL,
+                    started_at TEXT,
+                    completed_at TEXT,
+                    updated_at TEXT NOT NULL,
+                    request_json TEXT NOT NULL,
+                    edit_sources_json TEXT,
+                    api_preset_id TEXT,
+                    api_preset_name TEXT,
+                    api_path TEXT,
+                    UNIQUE(parent_job_id, unit_index)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_image_job_units_claim
+                    ON image_job_units(status, claim_expires_at, created_at, unit_index);
+                CREATE INDEX IF NOT EXISTS idx_image_job_units_parent
+                    ON image_job_units(parent_job_id, unit_index);
+                CREATE INDEX IF NOT EXISTS idx_image_job_units_worker
+                    ON image_job_units(claimed_by, status);
+
+                CREATE TABLE IF NOT EXISTS worker_heartbeats (
+                    worker_id TEXT PRIMARY KEY,
+                    last_seen_at TEXT NOT NULL,
+                    active_units INTEGER NOT NULL DEFAULT 0
+                );
 
                 CREATE TABLE IF NOT EXISTS prompt_snippets (
                     id TEXT PRIMARY KEY,
@@ -1549,6 +1623,56 @@ def _generate_job_from_row(row: sqlite3.Row) -> dict[str, Any]:
             image["image_height"] = job["image_height"]
         job["images"] = [image]
     return job
+
+
+def _json_loads_dict(value: str | None) -> dict[str, Any]:
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _json_loads_list(value: str | None) -> list[Any]:
+    if not value:
+        return []
+    try:
+        parsed = json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
+def _image_job_unit_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    unit = {
+        column: row[column]
+        for column in IMAGE_JOB_UNIT_COLUMNS
+        if row[column] is not None
+    }
+    unit["request"] = _json_loads_dict(unit.pop("request_json", None))
+    unit["edit_sources"] = _json_loads_list(unit.pop("edit_sources_json", None))
+    unit["result"] = _json_loads_dict(unit.pop("result_json", None))
+    unit["stage_timings"] = _json_loads_dict(unit.pop("stage_timings_json", None))
+    return unit
+
+
+def _image_job_unit_values(unit: dict[str, Any]) -> tuple[Any, ...]:
+    normalized = dict(unit)
+    for source_key, json_key in (
+        ("request", "request_json"),
+        ("edit_sources", "edit_sources_json"),
+        ("result", "result_json"),
+        ("stage_timings", "stage_timings_json"),
+    ):
+        if json_key not in normalized and source_key in normalized:
+            normalized[json_key] = json.dumps(
+                normalized[source_key],
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+    return tuple(normalized.get(column) for column in IMAGE_JOB_UNIT_COLUMNS)
 
 
 def _normalize_prompt_snippet_favorite(value: Any) -> int:
@@ -2717,6 +2841,370 @@ def get_generate_job(job_id: str) -> dict[str, Any] | None:
     return _generate_job_from_row(row)
 
 
+def count_active_image_job_units() -> int:
+    _ensure_database()
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM image_job_units WHERE status IN ('queued', 'running')"
+        ).fetchone()
+    return int(row[0] or 0) if row else 0
+
+
+def count_pending_image_job_units() -> tuple[int, int]:
+    _ensure_database()
+    with _connect() as conn:
+        row = conn.execute(
+            """
+            SELECT
+                SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) AS running_count,
+                SUM(CASE WHEN status = 'queued' THEN 1 ELSE 0 END) AS queued_count
+            FROM image_job_units
+            WHERE status IN ('queued', 'running')
+            """
+        ).fetchone()
+    if not row:
+        return 0, 0
+    return int(row["running_count"] or 0), int(row["queued_count"] or 0)
+
+
+def mark_worker_heartbeat(worker_id: str, active_units: int = 0) -> None:
+    _ensure_database()
+    now = utc_now()
+    with _connect() as conn:
+        with _transaction(conn):
+            conn.execute(
+                """
+                INSERT INTO worker_heartbeats (worker_id, last_seen_at, active_units)
+                VALUES (?, ?, ?)
+                ON CONFLICT(worker_id) DO UPDATE SET
+                    last_seen_at = excluded.last_seen_at,
+                    active_units = excluded.active_units
+                """,
+                (worker_id, now, max(0, int(active_units or 0))),
+            )
+
+
+def create_image_job_units(
+    *,
+    parent_job_id: str,
+    operation: str,
+    request: dict[str, Any],
+    image_units: int,
+    api_preset_id: str,
+    api_preset_name: str,
+    api_path: str,
+    edit_sources: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    _ensure_database()
+    now = utc_now()
+    units = [
+        {
+            "unit_id": str(uuid.uuid4()),
+            "parent_job_id": parent_job_id,
+            "operation": operation,
+            "unit_index": index,
+            "status": "queued",
+            "stage": "queued",
+            "message": "Queued image unit",
+            "created_at": now,
+            "updated_at": now,
+            "request": {**request, "n": 1},
+            "edit_sources": edit_sources or [],
+            "api_preset_id": api_preset_id,
+            "api_preset_name": api_preset_name,
+            "api_path": api_path,
+        }
+        for index in range(max(1, int(image_units or 1)))
+    ]
+    columns_sql = ", ".join(IMAGE_JOB_UNIT_COLUMNS)
+    placeholders_sql = ", ".join("?" for _ in IMAGE_JOB_UNIT_COLUMNS)
+    with _connect() as conn:
+        with _transaction(conn):
+            conn.executemany(
+                f"INSERT INTO image_job_units ({columns_sql}) VALUES ({placeholders_sql})",
+                [_image_job_unit_values(unit) for unit in units],
+            )
+    return units
+
+
+def get_image_job_unit(unit_id: str) -> dict[str, Any] | None:
+    _ensure_database()
+    with _connect() as conn:
+        row = conn.execute(
+            f"""
+            SELECT {", ".join(IMAGE_JOB_UNIT_COLUMNS)}
+            FROM image_job_units
+            WHERE unit_id = ?
+            """,
+            (unit_id,),
+        ).fetchone()
+    return _image_job_unit_from_row(row) if row else None
+
+
+def claim_next_image_job_unit(
+    *,
+    worker_id: str,
+    lease_expires_at: str,
+    now: str,
+    running_limit: int,
+) -> dict[str, Any] | None:
+    _ensure_database()
+    with _connect() as conn:
+        with _transaction(conn):
+            running_row = conn.execute(
+                "SELECT COUNT(*) FROM image_job_units WHERE status = 'running'"
+            ).fetchone()
+            if int(running_row[0] or 0) >= max(1, int(running_limit or 1)):
+                return None
+
+            row = conn.execute(
+                f"""
+                SELECT {", ".join(IMAGE_JOB_UNIT_COLUMNS)}
+                FROM image_job_units
+                WHERE status = 'queued'
+                    OR (status = 'running' AND claim_expires_at IS NOT NULL AND claim_expires_at <= ?)
+                ORDER BY
+                    CASE WHEN status = 'running' THEN 0 ELSE 1 END,
+                    created_at ASC,
+                    unit_index ASC
+                LIMIT 1
+                """,
+                (now,),
+            ).fetchone()
+            if not row:
+                return None
+
+            started_at = row["started_at"] or now
+            conn.execute(
+                """
+                UPDATE image_job_units
+                SET status = 'running',
+                    claimed_by = ?,
+                    claim_expires_at = ?,
+                    stage = COALESCE(NULLIF(stage, 'queued'), stage),
+                    message = COALESCE(message, 'Running image unit'),
+                    started_at = ?,
+                    updated_at = ?
+                WHERE unit_id = ?
+                """,
+                (worker_id, lease_expires_at, started_at, now, row["unit_id"]),
+            )
+            claimed = conn.execute(
+                f"""
+                SELECT {", ".join(IMAGE_JOB_UNIT_COLUMNS)}
+                FROM image_job_units
+                WHERE unit_id = ?
+                """,
+                (row["unit_id"],),
+            ).fetchone()
+    return _image_job_unit_from_row(claimed) if claimed else None
+
+
+def update_image_job_unit_progress(
+    unit_id: str,
+    *,
+    stage: str,
+    message: str,
+    claim_expires_at: str | None = None,
+) -> dict[str, Any] | None:
+    _ensure_database()
+    now = utc_now()
+    with _connect() as conn:
+        with _transaction(conn):
+            conn.execute(
+                """
+                UPDATE image_job_units
+                SET stage = ?,
+                    message = ?,
+                    claim_expires_at = COALESCE(?, claim_expires_at),
+                    updated_at = ?
+                WHERE unit_id = ? AND status = 'running'
+                """,
+                (stage, message, claim_expires_at, now, unit_id),
+            )
+            row = conn.execute(
+                f"""
+                SELECT {", ".join(IMAGE_JOB_UNIT_COLUMNS)}
+                FROM image_job_units
+                WHERE unit_id = ?
+                """,
+                (unit_id,),
+            ).fetchone()
+    return _image_job_unit_from_row(row) if row else None
+
+
+def complete_image_job_unit(
+    unit_id: str,
+    *,
+    result: dict[str, Any],
+    stage_timings: dict[str, float],
+    duration: str,
+    completed_at: str,
+) -> dict[str, Any] | None:
+    _ensure_database()
+    now = utc_now()
+    with _connect() as conn:
+        with _transaction(conn):
+            conn.execute(
+                """
+                UPDATE image_job_units
+                SET status = 'success',
+                    stage = 'completed',
+                    message = 'Image unit completed',
+                    result_json = ?,
+                    stage_timings_json = ?,
+                    duration = ?,
+                    completed_at = ?,
+                    updated_at = ?,
+                    claim_expires_at = NULL
+                WHERE unit_id = ?
+                """,
+                (
+                    json.dumps(result, ensure_ascii=False, sort_keys=True),
+                    json.dumps(stage_timings, ensure_ascii=False, sort_keys=True),
+                    duration,
+                    completed_at,
+                    now,
+                    unit_id,
+                ),
+            )
+            row = conn.execute(
+                f"""
+                SELECT {", ".join(IMAGE_JOB_UNIT_COLUMNS)}
+                FROM image_job_units
+                WHERE unit_id = ?
+                """,
+                (unit_id,),
+            ).fetchone()
+    return _image_job_unit_from_row(row) if row else None
+
+
+def fail_image_job_unit(
+    unit_id: str,
+    *,
+    status: str,
+    stage: str,
+    message: str,
+    error: str,
+    stage_timings: dict[str, float] | None = None,
+    duration: str | None = None,
+    completed_at: str | None = None,
+) -> dict[str, Any] | None:
+    _ensure_database()
+    now = utc_now()
+    with _connect() as conn:
+        with _transaction(conn):
+            conn.execute(
+                """
+                UPDATE image_job_units
+                SET status = ?,
+                    stage = ?,
+                    message = ?,
+                    error = ?,
+                    stage_timings_json = ?,
+                    duration = ?,
+                    completed_at = ?,
+                    updated_at = ?,
+                    claim_expires_at = NULL
+                WHERE unit_id = ?
+                """,
+                (
+                    status,
+                    stage,
+                    message,
+                    error,
+                    json.dumps(stage_timings or {}, ensure_ascii=False, sort_keys=True),
+                    duration,
+                    completed_at or now,
+                    now,
+                    unit_id,
+                ),
+            )
+            row = conn.execute(
+                f"""
+                SELECT {", ".join(IMAGE_JOB_UNIT_COLUMNS)}
+                FROM image_job_units
+                WHERE unit_id = ?
+                """,
+                (unit_id,),
+            ).fetchone()
+    return _image_job_unit_from_row(row) if row else None
+
+
+def cancel_image_job_units(parent_job_id: str) -> int:
+    _ensure_database()
+    now = utc_now()
+    with _connect() as conn:
+        with _transaction(conn):
+            cursor = conn.execute(
+                """
+                UPDATE image_job_units
+                SET status = 'cancelled',
+                    stage = 'cancelled',
+                    message = 'Generation job cancelled',
+                    error = 'Generation job cancelled',
+                    completed_at = ?,
+                    updated_at = ?,
+                    claim_expires_at = NULL
+                WHERE parent_job_id = ? AND status IN ('queued', 'running')
+                """,
+                (now, now, parent_job_id),
+            )
+            return cursor.rowcount
+
+
+def aggregate_image_job_units(parent_job_id: str) -> dict[str, Any]:
+    _ensure_database()
+    with _connect() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT {", ".join(IMAGE_JOB_UNIT_COLUMNS)}
+            FROM image_job_units
+            WHERE parent_job_id = ?
+            ORDER BY unit_index ASC
+            """,
+            (parent_job_id,),
+        ).fetchall()
+    units = [_image_job_unit_from_row(row) for row in rows]
+    total = len(units)
+    terminal_statuses = {"success", "error", "upstream_error", "cancelled", "interrupted"}
+    completed = sum(1 for unit in units if unit.get("status") in terminal_statuses)
+    successes = [unit for unit in units if unit.get("status") == "success"]
+    failures = [unit for unit in units if unit.get("status") in {"error", "upstream_error"}]
+    cancelled = [unit for unit in units if unit.get("status") == "cancelled"]
+    running = [unit for unit in units if unit.get("status") == "running"]
+    queued = [unit for unit in units if unit.get("status") == "queued"]
+    images: list[dict[str, Any]] = []
+    stage_timings: dict[str, float] = {}
+    for unit in successes:
+        result = unit.get("result") or {}
+        unit_images = result.get("images") if isinstance(result, dict) else None
+        if isinstance(unit_images, list):
+            images.extend(image for image in unit_images if isinstance(image, dict))
+        for key, value in (unit.get("stage_timings") or {}).items():
+            try:
+                stage_timings[key] = stage_timings.get(key, 0.0) + float(value)
+            except (TypeError, ValueError):
+                continue
+
+    return {
+        "total": total,
+        "completed": completed,
+        "success_count": len(successes),
+        "failure_count": len(failures),
+        "cancelled_count": len(cancelled),
+        "running_count": len(running),
+        "queued_count": len(queued),
+        "all_terminal": total > 0 and completed == total,
+        "all_failed": total > 0 and len(failures) == total,
+        "all_cancelled": total > 0 and len(cancelled) == total,
+        "images": images,
+        "failures": failures,
+        "stage_timings": stage_timings,
+        "units": units,
+    }
+
+
 def list_generate_jobs(
     statuses: set[str] | None = None,
     limit: int | None = None,
@@ -2752,6 +3240,20 @@ def clear_generate_job_history() -> int:
     with _connect() as conn:
         with _transaction(conn):
             placeholders = ", ".join("?" for _ in ACTIVE_GENERATE_JOB_STATUSES)
+            rows = conn.execute(
+                f"""
+                SELECT job_id
+                FROM generate_jobs
+                WHERE status NOT IN ({placeholders})
+                """,
+                tuple(sorted(ACTIVE_GENERATE_JOB_STATUSES)),
+            ).fetchall()
+            if not rows:
+                return 0
+            conn.executemany(
+                "DELETE FROM image_job_units WHERE parent_job_id = ?",
+                [(row["job_id"],) for row in rows],
+            )
             cursor = conn.execute(
                 f"""
                 DELETE FROM generate_jobs
@@ -2778,6 +3280,11 @@ def mark_active_generate_jobs_interrupted() -> int:
             ).fetchall()
             if not rows:
                 return 0
+            job_ids = [row["job_id"] for row in rows]
+            conn.executemany(
+                "DELETE FROM image_job_units WHERE parent_job_id = ?",
+                [(job_id,) for job_id in job_ids],
+            )
 
             conn.execute(
                 f"""
@@ -2817,6 +3324,10 @@ def trim_generate_jobs(max_jobs: int):
             ).fetchall()
             if not rows:
                 return
+            conn.executemany(
+                "DELETE FROM image_job_units WHERE parent_job_id = ?",
+                [(row["job_id"],) for row in rows],
+            )
             conn.executemany(
                 "DELETE FROM generate_jobs WHERE job_id = ?",
                 [(row["job_id"],) for row in rows],

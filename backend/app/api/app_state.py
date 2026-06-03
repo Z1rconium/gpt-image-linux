@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 from collections import OrderedDict
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -85,9 +86,7 @@ async def lifespan(app: FastAPI):
     cleanup_stale_edit_source_files()
     cleanup_stale_gallery_export_files()
     storage.verify_storage_writable()
-    interrupted_jobs = storage.mark_active_generate_jobs_interrupted()
-    if interrupted_jobs:
-        logger.info("Marked %s interrupted generation job(s)", interrupted_jobs)
+    logger.info("Image jobs resume through SQLite unit leases")
     removed_gallery_entries = storage.sync_gallery_with_image_files()
     if removed_gallery_entries:
         logger.info(
@@ -112,7 +111,6 @@ async def lifespan(app: FastAPI):
     presets.load_api_settings()
     app.state.generate_jobs = {}
     app.state.generate_job_tasks = {}
-    app.state.generate_job_semaphore = asyncio.Semaphore(config.MAX_ACTIVE_GENERATE_JOBS)
     app.state.upstream_request_semaphore = asyncio.Semaphore(config.MAX_ACTIVE_GENERATE_JOBS)
     app.state.generate_job_subscribers = {}
     app.state.generate_jobs_subscribers = set()
@@ -120,6 +118,10 @@ async def lifespan(app: FastAPI):
     app.state.generate_jobs_broadcast_reconcile = False
     app.state.generate_job_webhooks = {}
     app.state.generate_job_last_persist_at = {}
+    app.state.worker_id = f"{os.getpid()}-{id(app)}"
+    app.state.image_unit_dispatcher_task = asyncio.create_task(
+        jobs.run_image_unit_dispatcher(app.state.worker_id)
+    )
     app.state.gallery_export_jobs = {}
     app.state.gallery_export_tasks = {}
     app.state.gallery_export_subscribers = {}
@@ -146,6 +148,9 @@ async def lifespan(app: FastAPI):
         broadcast_task = app.state.generate_jobs_broadcast_task
         if broadcast_task and not broadcast_task.done():
             broadcast_task.cancel()
+        dispatcher_task = getattr(app.state, "image_unit_dispatcher_task", None)
+        if dispatcher_task and not dispatcher_task.done():
+            dispatcher_task.cancel()
         gc_task = getattr(app.state, "gallery_export_gc_task", None)
         if gc_task and not gc_task.done():
             gc_task.cancel()
@@ -166,6 +171,7 @@ async def lifespan(app: FastAPI):
             for task in (
                 backfill_task,
                 broadcast_task,
+                dispatcher_task,
                 gc_task,
                 scheduled_sync_task,
                 *tasks,
