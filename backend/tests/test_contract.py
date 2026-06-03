@@ -3349,6 +3349,54 @@ def test_gallery_export_job_reports_progress_and_downloads_zip(client):
         assert "images/export-job-2.png" in zf.namelist()
 
 
+def test_gallery_export_job_persists_across_cleared_app_state(client):
+    _fake_gallery_entry("export-persist-1", "one", "1024x1024", "export-persist-1.png")
+
+    created = client.post("/api/gallery/export-jobs")
+    assert created.status_code == 202
+    finished = _wait_for_gallery_export_job(client, created.json()["job_id"])
+    assert finished["status"] == "success"
+
+    backend_main.app.state._state.clear()
+
+    status = client.get(f"/api/gallery/export-jobs/{finished['job_id']}")
+    assert status.status_code == 200
+    assert status.json()["status"] == "success"
+
+    archive = client.get(finished["download_url"])
+    assert archive.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(archive.content)) as zf:
+        assert "images/export-persist-1.png" in zf.namelist()
+
+
+def test_gallery_tracked_jobs_allow_granian_multi_worker(client, monkeypatch):
+    _fake_gallery_entry("multi-export", "one", "1024x1024", "multi-export.png")
+    storage.save_r2_backup_settings(
+        {
+            "enabled": True,
+            "endpoint_url": "https://account.r2.cloudflarestorage.com",
+            "bucket_name": "image-backups",
+            "region": "auto",
+            "key_prefix": "gallery-test/",
+            "access_key_id": "${TEST_R2_ACCESS_KEY_ID}",
+            "secret_access_key": "${TEST_R2_SECRET_ACCESS_KEY}",
+        }
+    )
+
+    def fake_sync(settings, entries, *, total_count, progress_cb=None, client_factory=None):
+        return r2_sync.R2SyncResult(total_count=total_count, compared_count=1)
+
+    monkeypatch.setenv("GRANIAN_WORKERS", "2")
+    monkeypatch.setattr(r2_sync, "sync_gallery_to_r2", fake_sync)
+
+    export_created = client.post("/api/gallery/export-jobs")
+    assert export_created.status_code == 202
+    sync_created = client.post("/api/gallery/sync-jobs")
+    assert sync_created.status_code == 202
+    assert _wait_for_gallery_export_job(client, export_created.json()["job_id"])["status"] == "success"
+    assert _wait_for_gallery_sync_job(client, sync_created.json()["job_id"])["status"] == "success"
+
+
 def test_gallery_sync_job_reports_progress_and_terminal_sse(client, monkeypatch):
     _fake_gallery_entry("sync-job-1", "one", "1024x1024", "sync-job-1.png")
     _fake_gallery_entry("sync-job-2", "two", "1024x1024", "sync-job-2.png")
@@ -3476,12 +3524,15 @@ def test_scheduled_gallery_sync_creates_regular_sync_job(client, monkeypatch):
     monkeypatch.setattr(r2_sync, "sync_gallery_to_r2", fake_sync)
 
     async def run_once():
-        backend_main.app.state.gallery_sync_lock = asyncio.Lock()
         outcome = await gallery_router._run_scheduled_gallery_r2_sync_once()
         assert outcome["started"] is True
-        task = gallery_router._gallery_sync_tasks()[outcome["job_id"]]
-        await task
-        return gallery_router._gallery_sync_jobs()[outcome["job_id"]]
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            job = storage.get_gallery_job("sync", outcome["job_id"])
+            if job and job["status"] in {"success", "error"}:
+                return job
+            await asyncio.sleep(0.05)
+        raise AssertionError("scheduled gallery sync job did not finish")
 
     job = asyncio.run(run_once())
     assert job["status"] == "success"
@@ -3506,12 +3557,21 @@ def test_scheduled_gallery_sync_skips_active_sync(client):
     )
 
     async def run_once():
-        backend_main.app.state.gallery_sync_lock = asyncio.Lock()
-        gallery_router._gallery_sync_jobs()["active-sync"] = {
-            "job_id": "active-sync",
-            "status": "running",
-            "updated_at": "2026-05-18T12:00:00Z",
-        }
+        now = "2026-05-18T12:00:00Z"
+        storage.create_gallery_job(
+            job_id="active-sync",
+            kind="sync",
+            status="running",
+            stage="listing_remote",
+            message="Running",
+            progress=1,
+            total_count=1,
+            created_at=now,
+            updated_at=now,
+            lease_owner="test-worker",
+            lease_expires_at="2099-01-01T00:00:00Z",
+            payload={},
+        )
         return await gallery_router._run_scheduled_gallery_r2_sync_once()
 
     outcome = asyncio.run(run_once())

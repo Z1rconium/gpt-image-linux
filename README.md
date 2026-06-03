@@ -216,7 +216,7 @@ PYTHON_BASE_IMAGE=docker.m.daocloud.io/library/python:3.11-slim
 NODE_BASE_IMAGE=docker.m.daocloud.io/library/node:24-alpine
 ```
 
-`GRANIAN_RUNTIME_THREADS` defaults to `2`. On machines with more available CPU, `GRANIAN_RUNTIME_THREADS=4` is a reasonable first bump. `GRANIAN_WORKERS>1` is supported for generation/edit fan-out: workers claim SQLite image units, SSE polls SQLite state, and cancellation marks pending/running units without forcibly killing another process.
+`GRANIAN_RUNTIME_THREADS` defaults to `2`. On machines with more available CPU, `GRANIAN_RUNTIME_THREADS=4` is a reasonable first bump. `GRANIAN_WORKERS>1` is supported for generation/edit fan-out plus tracked Gallery export/R2 sync jobs: workers claim SQLite-backed work, SSE polls SQLite state, and cancellation marks pending/running generation units without forcibly killing another process.
 
 ### Local development
 
@@ -524,7 +524,7 @@ All variables listed in `.env.example` are also tracked in SQLite for Overall Co
 - SQLite repository operations use short-lived connections with WAL enabled at startup; `DATA_DIR` is chmodded to `0700`, the SQLite DB/sidecars are chmodded to `0600`, and app shutdown/tests call the storage close hook so connection lifecycle stays explicit
 - generation and edit share one SQLite queue measured in image units (`MAX_ACTIVE_GENERATE_JOBS` + `MAX_QUEUED_GENERATE_JOBS`), all edit source images are staged under `DATA_DIR/edit-sources` and additionally capped by `MAX_PENDING_EDIT_SOURCE_MB`, support cancellation, and persist terminal history including `completed_at`
 - batch generation/edit (`n > 1`) consumes `n` queue units; the parent job aggregates successful unit results into `images[]`, Gallery metadata keeps the user-requested `n`, and units can be claimed by different Granian workers
-- tracked Gallery export jobs and manual/scheduled R2 sync jobs remain memory-scoped; when `GRANIAN_WORKERS>1`, tracked export/sync job creation is disabled with `409` while direct gallery download/export endpoints still work
+- tracked Gallery export jobs and manual/scheduled R2 sync jobs persist in SQLite, so create/query/SSE/download work across `GRANIAN_WORKERS>1`; workers claim queued or expired running jobs with SQLite leases while export ZIP files live under shared `DATA_DIR/exports`
 - Prompt Optimizer uses its own server-side Chat Completions-compatible endpoint config and user-configurable request timeout/response-size cap, resolves API key env refs on the backend, stores its editable system prompt in `DATA_DIR/prompt_optimizer_system_prompt.md`, and does not consume generation/edit queue capacity.
 - R2 Backup uses boto3 against a Cloudflare R2 S3-compatible endpoint under `asyncio.to_thread`; sync jobs list only the configured prefix, upload missing local gallery filenames, and never serve, overwrite, or delete gallery images from R2.
 - SSE is the primary progress channel; `/api/generate/jobs` provides list/history (`include_finished=true`, optional `limit`/`offset`, optional `failed_only=true`), `/api/generate/jobs/history` clears terminal history, and `/api/generate/jobs/events` streams SQLite-backed live job-list changes with sub-second polling
@@ -790,7 +790,7 @@ PYTHON_BASE_IMAGE=docker.m.daocloud.io/library/python:3.11-slim
 NODE_BASE_IMAGE=docker.m.daocloud.io/library/node:24-alpine
 ```
 
-`GRANIAN_RUNTIME_THREADS` 默认是 `2`。CPU 资源更充足时，可以先试 `GRANIAN_RUNTIME_THREADS=4`。生成/编辑已支持 `GRANIAN_WORKERS>1`：worker 通过 SQLite claim image unit，SSE 轮询 SQLite 状态，取消会标记未完成 unit，但不会跨进程强杀正在等待上游的调用。
+`GRANIAN_RUNTIME_THREADS` 默认是 `2`。CPU 资源更充足时，可以先试 `GRANIAN_RUNTIME_THREADS=4`。`GRANIAN_WORKERS>1` 已支持生成/编辑 fan-out，以及可跟踪 Gallery export/R2 sync job：worker 通过 SQLite 认领任务，SSE 轮询 SQLite 状态，取消会标记未完成的生成 unit，但不会跨进程强杀正在等待上游的调用。
 
 ### 本地开发
 
@@ -1095,7 +1095,7 @@ curl http://localhost:9090/health
 - SQLite 仓储操作使用短连接，并在启动时启用 WAL；`DATA_DIR` 会 chmod 为 `0700`，SQLite 数据库和 sidecar 文件会 chmod 为 `0600`；应用 shutdown 和测试 reset 会调用 storage close hook，连接生命周期保持显式
 - 生成与编辑共用按 image units 计量的 SQLite 队列（`MAX_ACTIVE_GENERATE_JOBS` + `MAX_QUEUED_GENERATE_JOBS`）；所有编辑源图先落到 `DATA_DIR/edit-sources` 并额外受 `MAX_PENDING_EDIT_SOURCE_MB` 总量限制；支持取消，并持久化终态历史（含 `completed_at`）
 - 批量生成/编辑（`n > 1`）会占用 `n` 个队列单位；父任务会把成功 unit 结果聚合到 `images[]`，Gallery 元数据保留用户请求的 `n`，不同 unit 可被不同 Granian worker 认领执行
-- 可跟踪 Gallery export job 和手动/定时 R2 sync job 仍是进程内任务；`GRANIAN_WORKERS>1` 时创建这类 tracked export/sync job 会返回 `409`，直接 Gallery 下载/导出 endpoint 仍可用
+- 可跟踪 Gallery export job 和手动/定时 R2 sync job 持久化在 SQLite；`GRANIAN_WORKERS>1` 下创建、查询、SSE、下载都可跨进程工作；worker 通过 SQLite lease 认领 queued 或 lease 过期的 running job，导出 ZIP 存在共享 `DATA_DIR/exports`
 - 提示词优化器使用独立的服务端 Chat Completions 兼容 endpoint 配置和用户可配置请求超时/响应体积上限，在后端解析 API Key 环境变量引用，不占用生成/编辑任务队列容量。
 - R2 Backup 通过 boto3 访问 Cloudflare R2 S3 兼容 endpoint，并用 `asyncio.to_thread` 隔离阻塞调用；同步任务只列出配置的 prefix，只上传缺失的本地 Gallery filename，不会从 R2 服务、覆盖或删除 Gallery 图片。
 - SSE 是主进度通道；`/api/generate/jobs` 提供列表/历史（`include_finished=true`，可选 `limit`/`offset`，可选 `failed_only=true`），`/api/generate/jobs/history` 清空终态历史，`/api/generate/jobs/events` 通过 SQLite 亚秒级轮询推送实时任务列表变化

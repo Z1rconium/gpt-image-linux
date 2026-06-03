@@ -90,6 +90,14 @@ __all__ = [
     "is_gallery_filename_referenced",
     "get_gallery_page",
     "get_gallery_total_bytes",
+    "create_gallery_job",
+    "get_gallery_job",
+    "update_gallery_job",
+    "count_active_gallery_jobs",
+    "claim_next_gallery_job",
+    "cleanup_stale_gallery_jobs",
+    "delete_gallery_job",
+    "list_gallery_job_ids_with_files",
     "get_generate_job",
     "aggregate_image_job_units",
     "cancel_image_job_units",
@@ -221,6 +229,38 @@ IMAGE_JOB_UNIT_COLUMNS = (
     "api_preset_id",
     "api_preset_name",
     "api_path",
+)
+GALLERY_JOB_COLUMNS = (
+    "job_id",
+    "kind",
+    "status",
+    "stage",
+    "message",
+    "progress",
+    "filename",
+    "download_url",
+    "path",
+    "requested_count",
+    "processed_count",
+    "exported_count",
+    "missing_count",
+    "total_count",
+    "compared_count",
+    "uploaded_count",
+    "skipped_existing_count",
+    "missing_local_count",
+    "failed_count",
+    "bytes_total",
+    "bytes_written",
+    "bytes_uploaded",
+    "created_at",
+    "started_at",
+    "completed_at",
+    "updated_at",
+    "error",
+    "lease_owner",
+    "lease_expires_at",
+    "payload_json",
 )
 PROMPT_SNIPPET_COLUMNS = (
     "id",
@@ -906,6 +946,44 @@ def _ensure_database():
                     ON image_job_units(parent_job_id, unit_index);
                 CREATE INDEX IF NOT EXISTS idx_image_job_units_worker
                     ON image_job_units(claimed_by, status);
+
+                CREATE TABLE IF NOT EXISTS gallery_jobs (
+                    job_id TEXT PRIMARY KEY,
+                    kind TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    stage TEXT,
+                    message TEXT,
+                    progress INTEGER NOT NULL DEFAULT 0,
+                    filename TEXT,
+                    download_url TEXT,
+                    path TEXT,
+                    requested_count INTEGER NOT NULL DEFAULT 0,
+                    processed_count INTEGER NOT NULL DEFAULT 0,
+                    exported_count INTEGER NOT NULL DEFAULT 0,
+                    missing_count INTEGER NOT NULL DEFAULT 0,
+                    total_count INTEGER NOT NULL DEFAULT 0,
+                    compared_count INTEGER NOT NULL DEFAULT 0,
+                    uploaded_count INTEGER NOT NULL DEFAULT 0,
+                    skipped_existing_count INTEGER NOT NULL DEFAULT 0,
+                    missing_local_count INTEGER NOT NULL DEFAULT 0,
+                    failed_count INTEGER NOT NULL DEFAULT 0,
+                    bytes_total INTEGER NOT NULL DEFAULT 0,
+                    bytes_written INTEGER NOT NULL DEFAULT 0,
+                    bytes_uploaded INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    started_at TEXT,
+                    completed_at TEXT,
+                    updated_at TEXT NOT NULL,
+                    error TEXT,
+                    lease_owner TEXT,
+                    lease_expires_at TEXT,
+                    payload_json TEXT
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_gallery_jobs_claim
+                    ON gallery_jobs(kind, status, lease_expires_at, created_at);
+                CREATE INDEX IF NOT EXISTS idx_gallery_jobs_kind_updated
+                    ON gallery_jobs(kind, updated_at DESC);
 
                 CREATE TABLE IF NOT EXISTS worker_heartbeats (
                     worker_id TEXT PRIMARY KEY,
@@ -1645,6 +1723,13 @@ def _json_loads_list(value: str | None) -> list[Any]:
     return parsed if isinstance(parsed, list) else []
 
 
+def _coerce_nonnegative_int(value: Any, default: int = 0) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return default
+
+
 def _image_job_unit_from_row(row: sqlite3.Row) -> dict[str, Any]:
     unit = {
         column: row[column]
@@ -1673,6 +1758,77 @@ def _image_job_unit_values(unit: dict[str, Any]) -> tuple[Any, ...]:
                 sort_keys=True,
             )
     return tuple(normalized.get(column) for column in IMAGE_JOB_UNIT_COLUMNS)
+
+
+def _normalize_gallery_job(job: dict[str, Any]) -> dict[str, Any]:
+    now = utc_now()
+    normalized: dict[str, Any] = {
+        "job_id": str(job["job_id"]),
+        "kind": str(job["kind"]),
+        "status": str(job.get("status") or "queued"),
+        "progress": _coerce_nonnegative_int(job.get("progress"), 0),
+        "created_at": str(job.get("created_at") or now),
+        "updated_at": str(job.get("updated_at") or now),
+    }
+    integer_columns = {
+        "requested_count",
+        "processed_count",
+        "exported_count",
+        "missing_count",
+        "total_count",
+        "compared_count",
+        "uploaded_count",
+        "skipped_existing_count",
+        "missing_local_count",
+        "failed_count",
+        "bytes_total",
+        "bytes_written",
+        "bytes_uploaded",
+    }
+    for column in GALLERY_JOB_COLUMNS:
+        if column in normalized:
+            continue
+        if column == "payload_json":
+            value = job.get("payload_json")
+            if value is None:
+                value = job.get("payload")
+            if value is None:
+                continue
+            if isinstance(value, str):
+                try:
+                    json.loads(value)
+                except json.JSONDecodeError:
+                    continue
+                normalized[column] = value
+            else:
+                try:
+                    normalized[column] = json.dumps(value, ensure_ascii=False, sort_keys=True)
+                except TypeError:
+                    continue
+            continue
+        if column in integer_columns:
+            value = job.get(column, 0)
+            normalized[column] = _coerce_nonnegative_int(value, 0)
+        else:
+            value = job.get(column)
+            if value is None:
+                continue
+            normalized[column] = str(value)
+    return normalized
+
+
+def _gallery_job_values(job: dict[str, Any]) -> tuple[Any, ...]:
+    return tuple(job.get(column) for column in GALLERY_JOB_COLUMNS)
+
+
+def _gallery_job_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    job = {
+        column: row[column]
+        for column in GALLERY_JOB_COLUMNS
+        if row[column] is not None
+    }
+    job["payload"] = _json_loads_dict(job.pop("payload_json", None))
+    return job
 
 
 def _normalize_prompt_snippet_favorite(value: Any) -> int:
@@ -2839,6 +2995,242 @@ def get_generate_job(job_id: str) -> dict[str, Any] | None:
     if not row:
         return None
     return _generate_job_from_row(row)
+
+
+def create_gallery_job(**job: Any) -> dict[str, Any]:
+    _ensure_database()
+    normalized = _normalize_gallery_job(job)
+    columns_sql = ", ".join(GALLERY_JOB_COLUMNS)
+    placeholders_sql = ", ".join("?" for _ in GALLERY_JOB_COLUMNS)
+    with _connect() as conn:
+        with _transaction(conn):
+            conn.execute(
+                f"INSERT INTO gallery_jobs ({columns_sql}) VALUES ({placeholders_sql})",
+                _gallery_job_values(normalized),
+            )
+    return normalized | {"payload": _json_loads_dict(normalized.get("payload_json"))}
+
+
+def get_gallery_job(kind: str, job_id: str) -> dict[str, Any] | None:
+    _ensure_database()
+    with _connect() as conn:
+        row = conn.execute(
+            f"""
+            SELECT {", ".join(GALLERY_JOB_COLUMNS)}
+            FROM gallery_jobs
+            WHERE kind = ? AND job_id = ?
+            """,
+            (kind, job_id),
+        ).fetchone()
+    return _gallery_job_from_row(row) if row else None
+
+
+def update_gallery_job(job_id: str, updates: dict[str, Any]) -> dict[str, Any] | None:
+    _ensure_database()
+    if not updates:
+        with _connect() as conn:
+            row = conn.execute(
+                f"SELECT {', '.join(GALLERY_JOB_COLUMNS)} FROM gallery_jobs WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+        return _gallery_job_from_row(row) if row else None
+
+    allowed = set(GALLERY_JOB_COLUMNS) - {"job_id", "kind", "created_at", "payload_json"}
+    normalized: dict[str, Any] = {}
+    integer_columns = {
+        "progress",
+        "requested_count",
+        "processed_count",
+        "exported_count",
+        "missing_count",
+        "total_count",
+        "compared_count",
+        "uploaded_count",
+        "skipped_existing_count",
+        "missing_local_count",
+        "failed_count",
+        "bytes_total",
+        "bytes_written",
+        "bytes_uploaded",
+    }
+    for key, value in updates.items():
+        if key == "payload":
+            key = "payload_json"
+        if key not in allowed and key != "payload_json":
+            continue
+        if key == "payload_json":
+            try:
+                normalized[key] = (
+                    value
+                    if isinstance(value, str)
+                    else json.dumps(value or {}, ensure_ascii=False, sort_keys=True)
+                )
+            except TypeError:
+                continue
+            continue
+        if key in integer_columns:
+            normalized[key] = _coerce_nonnegative_int(value, 0)
+        else:
+            normalized[key] = None if value is None else str(value)
+    normalized["updated_at"] = str(updates.get("updated_at") or utc_now())
+
+    assignments = ", ".join(f"{key} = ?" for key in normalized)
+    with _connect() as conn:
+        with _transaction(conn):
+            conn.execute(
+                f"UPDATE gallery_jobs SET {assignments} WHERE job_id = ?",
+                (*normalized.values(), job_id),
+            )
+            row = conn.execute(
+                f"SELECT {', '.join(GALLERY_JOB_COLUMNS)} FROM gallery_jobs WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+    return _gallery_job_from_row(row) if row else None
+
+
+def count_active_gallery_jobs(kind: str) -> int:
+    _ensure_database()
+    now = utc_now()
+    with _connect() as conn:
+        row = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM gallery_jobs
+            WHERE kind = ?
+                AND (
+                    status = 'queued'
+                    OR (
+                        status = 'running'
+                        AND (lease_expires_at IS NULL OR lease_expires_at > ?)
+                    )
+                )
+            """,
+            (kind, now),
+        ).fetchone()
+    return int(row[0] or 0) if row else 0
+
+
+def claim_next_gallery_job(
+    *,
+    kind: str,
+    worker_id: str,
+    lease_expires_at: str,
+    now: str,
+    running_limit: int,
+) -> dict[str, Any] | None:
+    _ensure_database()
+    with _connect() as conn:
+        with _transaction(conn):
+            running_row = conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM gallery_jobs
+                WHERE kind = ? AND status = 'running'
+                    AND (lease_expires_at IS NULL OR lease_expires_at > ?)
+                """,
+                (kind, now),
+            ).fetchone()
+            if int(running_row[0] or 0) >= max(1, int(running_limit or 1)):
+                return None
+
+            row = conn.execute(
+                f"""
+                SELECT {", ".join(GALLERY_JOB_COLUMNS)}
+                FROM gallery_jobs
+                WHERE kind = ?
+                    AND (
+                        status = 'queued'
+                        OR (status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?)
+                    )
+                ORDER BY
+                    CASE WHEN status = 'running' THEN 0 ELSE 1 END,
+                    created_at ASC
+                LIMIT 1
+                """,
+                (kind, now),
+            ).fetchone()
+            if not row:
+                return None
+
+            started_at = row["started_at"] or now
+            conn.execute(
+                """
+                UPDATE gallery_jobs
+                SET status = 'running',
+                    lease_owner = ?,
+                    lease_expires_at = ?,
+                    started_at = ?,
+                    updated_at = ?
+                WHERE job_id = ?
+                """,
+                (worker_id, lease_expires_at, started_at, now, row["job_id"]),
+            )
+            claimed = conn.execute(
+                f"SELECT {', '.join(GALLERY_JOB_COLUMNS)} FROM gallery_jobs WHERE job_id = ?",
+                (row["job_id"],),
+            ).fetchone()
+    return _gallery_job_from_row(claimed) if claimed else None
+
+
+def cleanup_stale_gallery_jobs(kind: str, ttl_seconds: int) -> list[dict[str, Any]]:
+    _ensure_database()
+    cutoff = time.time() - max(0, int(ttl_seconds or 0))
+    with _connect() as conn:
+        with _transaction(conn):
+            rows = conn.execute(
+                f"""
+                SELECT {", ".join(GALLERY_JOB_COLUMNS)}
+                FROM gallery_jobs
+                WHERE kind = ? AND status IN ('success', 'error')
+                """,
+                (kind,),
+            ).fetchall()
+            stale = []
+            for row in rows:
+                updated_at = row["updated_at"] or ""
+                try:
+                    updated_ts = datetime.fromisoformat(str(updated_at).replace("Z", "+00:00")).timestamp()
+                except (ValueError, AttributeError):
+                    updated_ts = 0
+                if updated_ts <= cutoff:
+                    stale.append(row)
+            if stale:
+                conn.executemany(
+                    "DELETE FROM gallery_jobs WHERE job_id = ?",
+                    [(row["job_id"],) for row in stale],
+                )
+    return [_gallery_job_from_row(row) for row in stale]
+
+
+def delete_gallery_job(kind: str, job_id: str) -> dict[str, Any] | None:
+    _ensure_database()
+    with _connect() as conn:
+        with _transaction(conn):
+            row = conn.execute(
+                f"""
+                SELECT {", ".join(GALLERY_JOB_COLUMNS)}
+                FROM gallery_jobs
+                WHERE kind = ? AND job_id = ?
+                """,
+                (kind, job_id),
+            ).fetchone()
+            if row:
+                conn.execute("DELETE FROM gallery_jobs WHERE job_id = ?", (job_id,))
+    return _gallery_job_from_row(row) if row else None
+
+
+def list_gallery_job_ids_with_files(kind: str) -> set[str]:
+    _ensure_database()
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT job_id
+            FROM gallery_jobs
+            WHERE kind = ? AND path IS NOT NULL
+            """,
+            (kind,),
+        ).fetchall()
+    return {str(row["job_id"]) for row in rows}
 
 
 def count_active_image_job_units() -> int:

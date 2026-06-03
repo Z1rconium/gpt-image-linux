@@ -122,16 +122,15 @@ async def lifespan(app: FastAPI):
     app.state.image_unit_dispatcher_task = asyncio.create_task(
         jobs.run_image_unit_dispatcher(app.state.worker_id)
     )
-    app.state.gallery_export_jobs = {}
-    app.state.gallery_export_tasks = {}
-    app.state.gallery_export_subscribers = {}
     app.state.gallery_export_lock = asyncio.Lock()
     app.state.gallery_export_direct_downloads = 0
-    app.state.gallery_sync_jobs = {}
-    app.state.gallery_sync_tasks = {}
-    app.state.gallery_sync_subscribers = {}
-    app.state.gallery_sync_lock = asyncio.Lock()
     from .routers import gallery as gallery_router
+    app.state.gallery_export_dispatcher_task = asyncio.create_task(
+        gallery_router.run_gallery_export_dispatcher(app.state.worker_id)
+    )
+    app.state.gallery_sync_dispatcher_task = asyncio.create_task(
+        gallery_router.run_gallery_sync_dispatcher(app.state.worker_id)
+    )
     app.state.gallery_export_gc_task = asyncio.create_task(gallery_router.gc_gallery_export_jobs())
     app.state.gallery_r2_scheduled_sync_task = asyncio.create_task(
         gallery_router.run_gallery_r2_scheduled_sync()
@@ -145,25 +144,25 @@ async def lifespan(app: FastAPI):
         backfill_task = getattr(app.state, "_backfill_task", None)
         if backfill_task and not backfill_task.done():
             backfill_task.cancel()
-        broadcast_task = app.state.generate_jobs_broadcast_task
+        broadcast_task = getattr(app.state, "generate_jobs_broadcast_task", None)
         if broadcast_task and not broadcast_task.done():
             broadcast_task.cancel()
         dispatcher_task = getattr(app.state, "image_unit_dispatcher_task", None)
         if dispatcher_task and not dispatcher_task.done():
             dispatcher_task.cancel()
+        gallery_export_dispatcher_task = getattr(app.state, "gallery_export_dispatcher_task", None)
+        if gallery_export_dispatcher_task and not gallery_export_dispatcher_task.done():
+            gallery_export_dispatcher_task.cancel()
+        gallery_sync_dispatcher_task = getattr(app.state, "gallery_sync_dispatcher_task", None)
+        if gallery_sync_dispatcher_task and not gallery_sync_dispatcher_task.done():
+            gallery_sync_dispatcher_task.cancel()
         gc_task = getattr(app.state, "gallery_export_gc_task", None)
         if gc_task and not gc_task.done():
             gc_task.cancel()
         scheduled_sync_task = getattr(app.state, "gallery_r2_scheduled_sync_task", None)
         if scheduled_sync_task and not scheduled_sync_task.done():
             scheduled_sync_task.cancel()
-        tasks = list(jobs.get_generate_job_tasks().values())
-        gallery_export_tasks = list(getattr(app.state, "gallery_export_tasks", {}).values())
-        gallery_sync_tasks = list(getattr(app.state, "gallery_sync_tasks", {}).values())
-        for task in gallery_export_tasks:
-            task.cancel()
-        for task in gallery_sync_tasks:
-            task.cancel()
+        tasks = list(getattr(app.state, "generate_job_tasks", {}).values())
         for task in tasks:
             task.cancel()
         awaitables = [
@@ -172,20 +171,16 @@ async def lifespan(app: FastAPI):
                 backfill_task,
                 broadcast_task,
                 dispatcher_task,
+                gallery_export_dispatcher_task,
+                gallery_sync_dispatcher_task,
                 gc_task,
                 scheduled_sync_task,
                 *tasks,
-                *gallery_export_tasks,
-                *gallery_sync_tasks,
             )
             if task
         ]
         if awaitables:
             await asyncio.gather(*awaitables, return_exceptions=True)
-        for job in getattr(app.state, "gallery_export_jobs", {}).values():
-            path = job.get("path")
-            if path:
-                Path(path).unlink(missing_ok=True)
         from ..integrations.session_pool import close_pool
         await close_pool()
         storage.close_database_connections()
