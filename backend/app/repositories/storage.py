@@ -11,6 +11,7 @@ import uuid
 from collections import OrderedDict
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Sequence
 
@@ -93,8 +94,11 @@ __all__ = [
     "create_gallery_job",
     "get_gallery_job",
     "update_gallery_job",
+    "update_gallery_job_progress",
     "count_active_gallery_jobs",
+    "reserve_gallery_job_capacity",
     "claim_next_gallery_job",
+    "cleanup_expired_gallery_jobs",
     "cleanup_stale_gallery_jobs",
     "delete_gallery_job",
     "list_gallery_job_ids_with_files",
@@ -982,6 +986,10 @@ def _ensure_database():
 
                 CREATE INDEX IF NOT EXISTS idx_gallery_jobs_claim
                     ON gallery_jobs(kind, status, lease_expires_at, created_at);
+                CREATE INDEX IF NOT EXISTS idx_gallery_jobs_active_count
+                    ON gallery_jobs(kind, status, lease_expires_at);
+                CREATE INDEX IF NOT EXISTS idx_gallery_jobs_terminal_gc
+                    ON gallery_jobs(kind, status, updated_at);
                 CREATE INDEX IF NOT EXISTS idx_gallery_jobs_kind_updated
                     ON gallery_jobs(kind, updated_at DESC);
 
@@ -3088,6 +3096,68 @@ def update_gallery_job(job_id: str, updates: dict[str, Any]) -> dict[str, Any] |
     return _gallery_job_from_row(row) if row else None
 
 
+def _normalize_gallery_job_updates(updates: dict[str, Any]) -> dict[str, Any]:
+    allowed = set(GALLERY_JOB_COLUMNS) - {"job_id", "kind", "created_at", "payload_json"}
+    normalized: dict[str, Any] = {}
+    integer_columns = {
+        "progress",
+        "requested_count",
+        "processed_count",
+        "exported_count",
+        "missing_count",
+        "total_count",
+        "compared_count",
+        "uploaded_count",
+        "skipped_existing_count",
+        "missing_local_count",
+        "failed_count",
+        "bytes_total",
+        "bytes_written",
+        "bytes_uploaded",
+    }
+    for key, value in updates.items():
+        if key == "payload":
+            key = "payload_json"
+        if key not in allowed and key != "payload_json":
+            continue
+        if key == "payload_json":
+            try:
+                normalized[key] = (
+                    value
+                    if isinstance(value, str)
+                    else json.dumps(value or {}, ensure_ascii=False, sort_keys=True)
+                )
+            except TypeError:
+                continue
+            continue
+        if key in integer_columns:
+            normalized[key] = _coerce_nonnegative_int(value, 0)
+        else:
+            normalized[key] = None if value is None else str(value)
+    normalized["updated_at"] = str(updates.get("updated_at") or utc_now())
+    return normalized
+
+
+def update_gallery_job_progress(job_id: str, updates: dict[str, Any]) -> bool:
+    """Update a gallery job without fetching the row back.
+
+    Used for high-frequency export/sync progress writes where SSE only needs the
+    updated_at edge and will read the full row on its own poll.
+    """
+    _ensure_database()
+    normalized = _normalize_gallery_job_updates(updates)
+    if not normalized:
+        return False
+    assignments = ", ".join(f"{key} = ?" for key in normalized)
+    with _connect() as conn:
+        with _transaction(conn):
+            cursor = conn.execute(
+                f"UPDATE gallery_jobs SET {assignments} WHERE job_id = ?",
+                (*normalized.values(), job_id),
+            )
+    return cursor.rowcount > 0
+
+
 def count_active_gallery_jobs(kind: str) -> int:
     _ensure_database()
     now = utc_now()
@@ -3110,6 +3180,48 @@ def count_active_gallery_jobs(kind: str) -> int:
     return int(row[0] or 0) if row else 0
 
 
+def reserve_gallery_job_capacity(
+    *,
+    job: dict[str, Any],
+    counted_kinds: Sequence[str],
+    max_active: int,
+) -> dict[str, Any] | None:
+    _ensure_database()
+    normalized = _normalize_gallery_job(job)
+    kinds = [str(kind) for kind in counted_kinds if str(kind)]
+    if normalized["kind"] not in kinds:
+        kinds.append(normalized["kind"])
+    placeholders = ", ".join("?" for _ in kinds)
+    now = utc_now()
+    columns_sql = ", ".join(GALLERY_JOB_COLUMNS)
+    placeholders_sql = ", ".join("?" for _ in GALLERY_JOB_COLUMNS)
+    with _connect() as conn:
+        with _transaction(conn):
+            row = conn.execute(
+                f"""
+                SELECT COUNT(*)
+                FROM gallery_jobs
+                WHERE kind IN ({placeholders})
+                    AND (
+                        status = 'queued'
+                        OR (
+                            status = 'running'
+                            AND (lease_expires_at IS NULL OR lease_expires_at > ?)
+                        )
+                    )
+                """,
+                (*kinds, now),
+            ).fetchone()
+            active_count = int(row[0] or 0) if row else 0
+            if active_count >= max(1, int(max_active or 1)):
+                return None
+            conn.execute(
+                f"INSERT INTO gallery_jobs ({columns_sql}) VALUES ({placeholders_sql})",
+                _gallery_job_values(normalized),
+            )
+    return normalized | {"payload": _json_loads_dict(normalized.get("payload_json"))}
+
+
 def claim_next_gallery_job(
     *,
     kind: str,
@@ -3117,18 +3229,23 @@ def claim_next_gallery_job(
     lease_expires_at: str,
     now: str,
     running_limit: int,
+    counted_kinds: Sequence[str] | None = None,
 ) -> dict[str, Any] | None:
     _ensure_database()
+    active_kinds = [str(value) for value in (counted_kinds or (kind,)) if str(value)]
+    if kind not in active_kinds:
+        active_kinds.append(kind)
+    active_placeholders = ", ".join("?" for _ in active_kinds)
     with _connect() as conn:
         with _transaction(conn):
             running_row = conn.execute(
-                """
+                f"""
                 SELECT COUNT(*)
                 FROM gallery_jobs
-                WHERE kind = ? AND status = 'running'
+                WHERE kind IN ({active_placeholders}) AND status = 'running'
                     AND (lease_expires_at IS NULL OR lease_expires_at > ?)
                 """,
-                (kind, now),
+                (*active_kinds, now),
             ).fetchone()
             if int(running_row[0] or 0) >= max(1, int(running_limit or 1)):
                 return None
@@ -3172,9 +3289,36 @@ def claim_next_gallery_job(
     return _gallery_job_from_row(claimed) if claimed else None
 
 
+def cleanup_expired_gallery_jobs(kind: str) -> list[dict[str, Any]]:
+    _ensure_database()
+    now = utc_now()
+    with _connect() as conn:
+        with _transaction(conn):
+            rows = conn.execute(
+                f"""
+                SELECT {", ".join(GALLERY_JOB_COLUMNS)}
+                FROM gallery_jobs
+                WHERE kind = ?
+                    AND status = 'running'
+                    AND lease_expires_at IS NOT NULL
+                    AND lease_expires_at <= ?
+                """,
+                (kind, now),
+            ).fetchall()
+            if rows:
+                conn.executemany(
+                    "DELETE FROM gallery_jobs WHERE job_id = ?",
+                    [(row["job_id"],) for row in rows],
+                )
+    return [_gallery_job_from_row(row) for row in rows]
+
+
 def cleanup_stale_gallery_jobs(kind: str, ttl_seconds: int) -> list[dict[str, Any]]:
     _ensure_database()
-    cutoff = time.time() - max(0, int(ttl_seconds or 0))
+    cutoff = datetime.fromtimestamp(
+        time.time() - max(0, int(ttl_seconds or 0)),
+        tz=timezone.utc,
+    ).isoformat()
     with _connect() as conn:
         with _transaction(conn):
             rows = conn.execute(
@@ -3182,24 +3326,16 @@ def cleanup_stale_gallery_jobs(kind: str, ttl_seconds: int) -> list[dict[str, An
                 SELECT {", ".join(GALLERY_JOB_COLUMNS)}
                 FROM gallery_jobs
                 WHERE kind = ? AND status IN ('success', 'error')
+                    AND updated_at <= ?
                 """,
-                (kind,),
+                (kind, cutoff),
             ).fetchall()
-            stale = []
-            for row in rows:
-                updated_at = row["updated_at"] or ""
-                try:
-                    updated_ts = datetime.fromisoformat(str(updated_at).replace("Z", "+00:00")).timestamp()
-                except (ValueError, AttributeError):
-                    updated_ts = 0
-                if updated_ts <= cutoff:
-                    stale.append(row)
-            if stale:
+            if rows:
                 conn.executemany(
                     "DELETE FROM gallery_jobs WHERE job_id = ?",
-                    [(row["job_id"],) for row in stale],
+                    [(row["job_id"],) for row in rows],
                 )
-    return [_gallery_job_from_row(row) for row in stale]
+    return [_gallery_job_from_row(row) for row in rows]
 
 
 def delete_gallery_job(kind: str, job_id: str) -> dict[str, Any] | None:

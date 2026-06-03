@@ -63,6 +63,41 @@ SYNC_JOB_TTL_SECONDS = 1800
 SCHEDULED_R2_SYNC_DISABLED_POLL_SECONDS = 60
 GALLERY_JOB_LEASE_SECONDS = 300
 GALLERY_JOB_DISPATCH_INTERVAL_SECONDS = 0.5
+GALLERY_PROGRESS_MIN_INTERVAL_SECONDS = 0.5
+GALLERY_PROGRESS_MIN_ITEMS = 50
+DIRECT_EXPORT_SLOT_LEASE_SECONDS = 6 * 3600
+
+
+class GalleryProgressThrottler:
+    def __init__(
+        self,
+        publish,
+        *,
+        min_interval_seconds: float = GALLERY_PROGRESS_MIN_INTERVAL_SECONDS,
+        min_items: int = GALLERY_PROGRESS_MIN_ITEMS,
+    ) -> None:
+        self.publish = publish
+        self.min_interval_seconds = min_interval_seconds
+        self.min_items = max(1, min_items)
+        self.last_emit_at = 0.0
+        self.last_item_count = 0
+        self.last_stage: str | None = None
+
+    def emit(self, updates: dict, *, force: bool = False) -> None:
+        stage = str(updates.get("stage") or "")
+        item_count = _progress_item_count(updates)
+        now = time.monotonic()
+        if not force:
+            if (
+                stage == self.last_stage
+                and item_count - self.last_item_count < self.min_items
+                and now - self.last_emit_at < self.min_interval_seconds
+            ):
+                return
+        self.last_emit_at = now
+        self.last_stage = stage
+        self.last_item_count = item_count
+        self.publish(updates)
 
 
 def _resolve_gallery_image_path(filename: str) -> Path | None:
@@ -203,8 +238,9 @@ async def _gallery_zip_response(
     extra_headers: dict[str, str] | None = None,
     reserve_export_slot: bool = False,
 ) -> StreamingResponse:
+    direct_slot_id: str | None = None
     if reserve_export_slot:
-        await _reserve_gallery_export_direct_slot()
+        direct_slot_id = await _reserve_gallery_export_direct_slot()
 
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     filename = f"{filename_prefix}-{timestamp}.zip"
@@ -221,7 +257,7 @@ async def _gallery_zip_response(
             yield from iter_gallery_zip_chunks(entries, skipped=skipped)
         finally:
             if reserve_export_slot:
-                _release_gallery_export_direct_slot()
+                _release_gallery_export_direct_slot(direct_slot_id)
 
     return StreamingResponse(
         zip_chunks(),
@@ -242,28 +278,48 @@ def _gallery_export_lock() -> asyncio.Lock:
     return app.state.gallery_export_lock
 
 
-def _gallery_export_direct_downloads() -> int:
-    return max(0, int(getattr(app.state, "gallery_export_direct_downloads", 0) or 0))
+def _create_gallery_export_direct_slot() -> dict:
+    now = utc_now()
+    return {
+        "job_id": f"direct-{os.urandom(16).hex()}",
+        "kind": "export_direct",
+        "status": "running",
+        "stage": "streaming",
+        "message": "Streaming direct gallery ZIP download",
+        "progress": 0,
+        "created_at": now,
+        "started_at": now,
+        "updated_at": now,
+        "lease_expires_at": _direct_export_slot_expires_at(),
+        "payload": {},
+    }
 
 
-def _release_gallery_export_direct_slot() -> None:
-    app.state.gallery_export_direct_downloads = max(
-        0,
-        _gallery_export_direct_downloads() - 1,
-    )
+def _release_gallery_export_direct_slot(job_id: str | None) -> None:
+    if job_id:
+        storage.delete_gallery_job("export_direct", job_id)
 
 
-async def _reserve_gallery_export_direct_slot() -> None:
+async def _reserve_gallery_export_direct_slot() -> str:
     async with _gallery_export_lock():
-        active_count = await asyncio.to_thread(storage.count_active_gallery_jobs, "export")
-        active_count += _gallery_export_direct_downloads()
-        if active_count >= MAX_ACTIVE_EXPORT_JOBS:
+        slot = await asyncio.to_thread(
+            storage.reserve_gallery_job_capacity,
+            job=_create_gallery_export_direct_slot(),
+            counted_kinds=("export", "export_direct"),
+            max_active=MAX_ACTIVE_EXPORT_JOBS,
+        )
+        if not slot:
+            active_count = await asyncio.to_thread(storage.count_active_gallery_jobs, "export")
+            active_count += await asyncio.to_thread(
+                storage.count_active_gallery_jobs,
+                "export_direct",
+            )
             raise HTTPException(
                 status_code=429,
                 detail=f"Too many active export jobs ({active_count}). "
                 "Please wait for existing exports to complete.",
             )
-        app.state.gallery_export_direct_downloads = _gallery_export_direct_downloads() + 1
+        return str(slot["job_id"])
 
 
 def _gallery_export_payload(job: dict) -> dict:
@@ -314,8 +370,33 @@ def _gallery_job_lease_expires_at() -> str:
     return (datetime.now(timezone.utc) + timedelta(seconds=GALLERY_JOB_LEASE_SECONDS)).isoformat()
 
 
+def _direct_export_slot_expires_at() -> str:
+    return (datetime.now(timezone.utc) + timedelta(seconds=DIRECT_EXPORT_SLOT_LEASE_SECONDS)).isoformat()
+
+
+def _claim_counted_gallery_kinds(kind: str) -> tuple[str, ...]:
+    if kind == "export":
+        return ("export", "export_direct")
+    return (kind,)
+
+
+def _progress_item_count(updates: dict) -> int:
+    for key in ("processed_count", "compared_count", "exported_count", "uploaded_count"):
+        if key not in updates:
+            continue
+        try:
+            return int(updates.get(key) or 0)
+        except (TypeError, ValueError):
+            return 0
+    return 0
+
+
 def _publish_gallery_job(job_id: str, updates: dict) -> dict | None:
     return storage.update_gallery_job(job_id, updates)
+
+
+def _publish_gallery_job_progress(job_id: str, updates: dict) -> bool:
+    return storage.update_gallery_job_progress(job_id, updates)
 
 
 def _build_export_job_entries(job: dict) -> tuple[Iterable[GalleryEntry | dict], int, list[dict]]:
@@ -336,33 +417,37 @@ def _build_export_job_entries(job: dict) -> tuple[Iterable[GalleryEntry | dict],
     return storage.iter_gallery_export_rows(), requested_count, []
 
 
-def _create_gallery_export_job(filename_prefix: str, requested_count: int, payload: dict) -> dict:
+def _build_gallery_export_job(
+    filename_prefix: str,
+    requested_count: int,
+    payload: dict,
+) -> dict:
     job_id = payload.get("job_id") or os.urandom(16).hex()
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     filename = f"{filename_prefix}-{timestamp}.zip"
     path = Path(config.DATA_DIR) / "exports" / f"{job_id}.zip"
     now = utc_now()
-    return storage.create_gallery_job(
-        job_id=job_id,
-        kind="export",
-        status="queued",
-        stage="queued",
-        message="Queued gallery ZIP export",
-        progress=0,
-        filename=filename,
-        download_url=None,
-        requested_count=requested_count,
-        processed_count=0,
-        exported_count=0,
-        missing_count=0,
-        bytes_total=0,
-        bytes_written=0,
-        created_at=now,
-        updated_at=now,
-        error=None,
-        path=str(path),
-        payload=payload,
-    )
+    return {
+        "job_id": job_id,
+        "kind": "export",
+        "status": "queued",
+        "stage": "queued",
+        "message": "Queued gallery ZIP export",
+        "progress": 0,
+        "filename": filename,
+        "download_url": None,
+        "requested_count": requested_count,
+        "processed_count": 0,
+        "exported_count": 0,
+        "missing_count": 0,
+        "bytes_total": 0,
+        "bytes_written": 0,
+        "created_at": now,
+        "updated_at": now,
+        "error": None,
+        "path": str(path),
+        "payload": payload,
+    }
 
 
 def _create_gallery_sync_job(total_count: int) -> dict:
@@ -396,20 +481,24 @@ async def _create_reserved_gallery_export_job(
     payload: dict,
 ) -> dict:
     async with _gallery_export_lock():
-        active_count = await asyncio.to_thread(storage.count_active_gallery_jobs, "export")
-        active_count += _gallery_export_direct_downloads()
-        if active_count >= MAX_ACTIVE_EXPORT_JOBS:
+        job = await asyncio.to_thread(
+            storage.reserve_gallery_job_capacity,
+            job=_build_gallery_export_job(filename_prefix, requested_count, payload),
+            counted_kinds=("export", "export_direct"),
+            max_active=MAX_ACTIVE_EXPORT_JOBS,
+        )
+        if not job:
+            active_count = await asyncio.to_thread(storage.count_active_gallery_jobs, "export")
+            active_count += await asyncio.to_thread(
+                storage.count_active_gallery_jobs,
+                "export_direct",
+            )
             raise HTTPException(
                 status_code=429,
                 detail=f"Too many active export jobs ({active_count}). "
                 "Please wait for existing exports to complete.",
             )
-        return await asyncio.to_thread(
-            _create_gallery_export_job,
-            filename_prefix,
-            requested_count,
-            payload,
-        )
+        return job
 
 
 async def _create_reserved_gallery_sync_job(total_count: int) -> dict:
@@ -426,9 +515,18 @@ async def _run_gallery_export_job(job: dict) -> None:
     job_id = job["job_id"]
     loop = asyncio.get_running_loop()
 
-    def progress(updates: dict):
+    def publish_progress(updates: dict):
         updates = {**updates, "lease_expires_at": _gallery_job_lease_expires_at()}
-        loop.call_soon_threadsafe(_publish_gallery_job, job_id, updates)
+        loop.call_soon_threadsafe(_publish_gallery_job_progress, job_id, updates)
+
+    throttler = GalleryProgressThrottler(publish_progress)
+
+    def progress(updates: dict):
+        force = updates.get("stage") in {"preparing", "packing"} and (
+            updates.get("progress") in {0, 20, 100}
+            or updates.get("status") in GALLERY_EXPORT_TERMINAL_STATUSES
+        )
+        throttler.emit(updates, force=force)
 
     try:
         entries, requested_count, skipped = await asyncio.to_thread(_build_export_job_entries, job)
@@ -494,9 +592,15 @@ async def _run_gallery_sync_job(job: dict) -> None:
     job_id = job["job_id"]
     loop = asyncio.get_running_loop()
 
-    def progress(updates: dict):
+    def publish_progress(updates: dict):
         updates = {**updates, "lease_expires_at": _gallery_job_lease_expires_at()}
-        loop.call_soon_threadsafe(_publish_gallery_job, job_id, updates)
+        loop.call_soon_threadsafe(_publish_gallery_job_progress, job_id, updates)
+
+    throttler = GalleryProgressThrottler(publish_progress)
+
+    def progress(updates: dict):
+        force = updates.get("stage") in {"listing_remote", "completed"}
+        throttler.emit(updates, force=force)
 
     try:
         r2_settings = await asyncio.to_thread(storage.load_r2_backup_settings)
@@ -587,6 +691,7 @@ async def _run_gallery_job_dispatcher(kind: str, worker_id: str, running_limit: 
                     lease_expires_at=_gallery_job_lease_expires_at(),
                     now=now,
                     running_limit=running_limit,
+                    counted_kinds=_claim_counted_gallery_kinds(kind),
                 )
                 if not job:
                     break
@@ -703,15 +808,20 @@ async def gc_gallery_export_jobs() -> None:
                 "sync",
                 SYNC_JOB_TTL_SECONDS,
             )
+            expired_direct_slots = await asyncio.to_thread(
+                storage.cleanup_expired_gallery_jobs,
+                "export_direct",
+            )
             for job in stale_exports:
                 path = job.get("path")
                 if path:
                     Path(str(path)).unlink(missing_ok=True)
-            if stale_exports or stale_syncs:
+            if stale_exports or stale_syncs or expired_direct_slots:
                 logger.info(
-                    "GC cleaned up %d gallery export job(s) and %d sync job(s)",
+                    "GC cleaned up %d gallery export job(s), %d sync job(s), and %d direct export slot(s)",
                     len(stale_exports),
                     len(stale_syncs),
+                    len(expired_direct_slots),
                 )
             exports_dir = Path(config.DATA_DIR) / "exports"
             if exports_dir.exists():

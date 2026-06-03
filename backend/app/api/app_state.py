@@ -131,7 +131,6 @@ async def lifespan(app: FastAPI):
         jobs.run_image_unit_dispatcher(app.state.worker_id)
     )
     app.state.gallery_export_lock = asyncio.Lock()
-    app.state.gallery_export_direct_downloads = 0
     from .routers import gallery as gallery_router
     app.state.gallery_export_dispatcher_task = asyncio.create_task(
         gallery_router.run_gallery_export_dispatcher(app.state.worker_id)

@@ -92,31 +92,18 @@ def _resolve_export_metadata_for_entry(
     cached_hash = _entry_sha256(entry)
     cached_bytes = data.get("bytes")
 
-    if cached_hash and cached_bytes:
+    if cached_hash:
         data["sha256"] = cached_hash
+    if cached_bytes is not None:
         return data
 
     try:
         stat = path.stat()
     except OSError:
-        if cached_hash:
-            data["sha256"] = cached_hash
-        if cached_bytes is None:
-            data["bytes"] = None
+        data.setdefault("bytes", None)
         return data
 
-    file_size = stat.st_size
-    data["bytes"] = file_size
-    if cached_hash:
-        data["sha256"] = cached_hash
-        return data
-
-    try:
-        digest = file_sha256(path)
-    except OSError:
-        return data
-
-    data["sha256"] = digest
+    data["bytes"] = stat.st_size
     return data
 
 

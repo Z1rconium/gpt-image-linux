@@ -16,6 +16,7 @@ from ..repositories import storage
 HealthStatus = str
 ProgressCallback = Callable[[dict[str, Any]], None]
 ClientFactory = Callable[["R2EffectiveSettings"], Any]
+R2_REMOTE_LISTING_FALLBACK_THRESHOLD = 100_000
 
 
 HEALTH_STATUS_RANK = {"ok": 0, "warning": 1, "error": 2}
@@ -55,6 +56,35 @@ class R2SyncResult:
 
     def to_updates(self) -> dict[str, int]:
         return asdict(self)
+
+
+@dataclass
+class RemoteKeyLookup:
+    keys: set[str]
+    use_head_fallback: bool = False
+
+    def contains(
+        self,
+        client: Any,
+        *,
+        bucket_name: str,
+        key: str,
+    ) -> bool:
+        if key in self.keys:
+            return True
+        if not self.use_head_fallback:
+            return False
+        try:
+            client.head_object(Bucket=bucket_name, Key=key)
+            self.keys.add(key)
+            return True
+        except Exception as e:
+            error = getattr(e, "response", {}).get("Error", {})
+            code = str(error.get("Code") or "").lower()
+            status = str(getattr(e, "response", {}).get("ResponseMetadata", {}).get("HTTPStatusCode") or "")
+            if code in {"404", "nosuchkey", "notfound"} or status == "404":
+                return False
+            raise
 
 
 def _health_status(checks: list[dict[str, str]]) -> HealthStatus:
@@ -243,15 +273,56 @@ def _entry_int(entry: Any, key: str, default: int = 0) -> int:
     return max(0, value)
 
 
-def _list_remote_keys(client: Any, bucket_name: str, key_prefix: str) -> set[str]:
+def _list_remote_keys(
+    client: Any,
+    bucket_name: str,
+    key_prefix: str,
+    *,
+    candidate_keys: set[str],
+    fallback_threshold: int = R2_REMOTE_LISTING_FALLBACK_THRESHOLD,
+) -> RemoteKeyLookup:
     paginator = client.get_paginator("list_objects_v2")
     keys: set[str] = set()
+    scanned_count = 0
     for page in paginator.paginate(Bucket=bucket_name, Prefix=key_prefix):
         for item in page.get("Contents", []) or []:
             key = str(item.get("Key") or "")
-            if key:
+            if not key:
+                continue
+            scanned_count += 1
+            if key in candidate_keys:
                 keys.add(key)
-    return keys
+            if scanned_count >= fallback_threshold:
+                return RemoteKeyLookup(keys=keys, use_head_fallback=True)
+    return RemoteKeyLookup(keys=keys)
+
+
+def _local_sync_candidates(
+    effective: R2EffectiveSettings,
+    entries: Iterable[Any],
+) -> tuple[list[tuple[Any, str, Path, int, str]], R2SyncResult, set[str]]:
+    candidates: list[tuple[Any, str, Path, int, str]] = []
+    result = R2SyncResult()
+    candidate_keys: set[str] = set()
+    for entry in entries:
+        filename = str(_entry_value(entry, "filename") or "").strip()
+        if not filename:
+            result.missing_local_count += 1
+            result.compared_count += 1
+            continue
+
+        path = storage.safe_image_path(filename)
+        if not path or not path.exists() or not path.is_file():
+            result.missing_local_count += 1
+            result.compared_count += 1
+            continue
+
+        byte_size = _entry_int(entry, "bytes") or path.stat().st_size
+        key = f"{effective.key_prefix}{filename}"
+        candidates.append((entry, filename, path, byte_size, key))
+        candidate_keys.add(key)
+        result.bytes_total += byte_size
+    return candidates, result, candidate_keys
 
 
 def _content_type_for(path: Path) -> str:
@@ -281,7 +352,10 @@ def sync_gallery_to_r2(
 ) -> R2SyncResult:
     effective = resolve_r2_backup_settings(settings, require_enabled=True)
     client = _client_for(effective, client_factory)
-    result = R2SyncResult(total_count=max(0, int(total_count or 0)))
+    candidates, result, candidate_keys = _local_sync_candidates(effective, entries)
+    result.total_count = max(0, int(total_count or 0)) or (
+        len(candidates) + result.missing_local_count
+    )
     errors: list[str] = []
 
     def publish(stage: str, message: str) -> None:
@@ -300,28 +374,16 @@ def sync_gallery_to_r2(
         )
 
     publish("listing_remote", "Listing existing R2 objects")
-    remote_keys = _list_remote_keys(client, effective.bucket_name, effective.key_prefix)
+    remote_keys = _list_remote_keys(
+        client,
+        effective.bucket_name,
+        effective.key_prefix,
+        candidate_keys=candidate_keys,
+    )
     publish("comparing", "Comparing local gallery with R2 objects")
 
-    for entry in entries:
-        filename = str(_entry_value(entry, "filename") or "").strip()
-        if not filename:
-            result.missing_local_count += 1
-            result.compared_count += 1
-            publish("comparing", "Skipped a gallery row without filename")
-            continue
-
-        path = storage.safe_image_path(filename)
-        if not path or not path.exists() or not path.is_file():
-            result.missing_local_count += 1
-            result.compared_count += 1
-            publish("comparing", f"Skipped missing local file {filename}")
-            continue
-
-        byte_size = _entry_int(entry, "bytes") or path.stat().st_size
-        result.bytes_total += byte_size
-        key = f"{effective.key_prefix}{filename}"
-        if key in remote_keys:
+    for entry, filename, path, byte_size, key in candidates:
+        if remote_keys.contains(client, bucket_name=effective.bucket_name, key=key):
             result.skipped_existing_count += 1
             result.compared_count += 1
             publish("comparing", f"Skipped existing object {key}")
@@ -338,7 +400,7 @@ def sync_gallery_to_r2(
                 key,
                 ExtraArgs=extra_args,
             )
-            remote_keys.add(key)
+            remote_keys.keys.add(key)
             result.uploaded_count += 1
             result.bytes_uploaded += byte_size
         except Exception as e:
