@@ -5,9 +5,9 @@ import logging
 import os
 import secrets
 import sqlite3
-_original_sqlite_connect = sqlite3.connect
 import threading
 import time
+from collections import OrderedDict
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,6 +18,13 @@ from ..core.api_paths import default_model_for_api_path, normalize_api_preset
 from ..core.constants import ACTIVE_GENERATE_JOB_STATUSES
 from ..core.observability import observe_job_stage
 from ..core.utils import utc_now
+from ..core.validators import (
+    get_env_var_ref_name,
+    normalize_secret_env_ref_or_plaintext,
+    normalize_r2_endpoint_url,
+    normalize_socks5_proxy_url,
+    normalize_webhook_url,
+)
 from ..schemas.models import GalleryEntry, GalleryFilterOptions, PromptSnippet
 from .image_files import (
     IMAGE_CONTENT_TYPE_FORMATS,
@@ -36,6 +43,8 @@ from .image_files import (
     safe_thumbnail_path,
     save_image_to_temp as _save_image_temp_unlocked,
     scan_image_files as _scan_image_files,
+    validate_image_file,
+    validate_image_header_bytes,
     validate_image_bytes,
 )
 from .thumbnails import (
@@ -63,6 +72,7 @@ __all__ = [
     "add_to_gallery_sync",
     "backfill_missing_gallery_bytes",
     "close_database_connections",
+    "clear_generate_job_history",
     "delete_all_gallery_images",
     "delete_gallery_image",
     "delete_gallery_images",
@@ -76,6 +86,7 @@ __all__ = [
     "get_gallery_entry",
     "get_gallery_entries_by_ids",
     "get_gallery_filter_options",
+    "is_gallery_filename_referenced",
     "get_gallery_page",
     "get_gallery_total_bytes",
     "get_generate_job",
@@ -84,6 +95,8 @@ __all__ = [
     "iter_gallery_export_rows",
     "list_generate_jobs",
     "load_prompt_optimizer_settings",
+    "list_overall_config_values",
+    "load_r2_backup_settings",
     "load_settings",
     "list_prompt_snippets",
     "mark_active_generate_jobs_interrupted",
@@ -92,7 +105,10 @@ __all__ = [
     "safe_image_path",
     "safe_thumbnail_path",
     "save_prompt_optimizer_settings",
+    "save_overall_config_overrides",
+    "save_r2_backup_settings",
     "save_settings",
+    "sync_overall_config_env_values",
     "invalidate_thumbnail_cache",
     "sync_gallery_with_image_files",
     "trim_generate_jobs",
@@ -101,6 +117,8 @@ __all__ = [
     "update_gallery_entry_hash",
     "update_prompt_snippet",
     "upsert_generate_job",
+    "validate_image_file",
+    "validate_image_header_bytes",
     "validate_image_bytes",
     "verify_storage_writable",
 ]
@@ -127,8 +145,10 @@ GALLERY_COLUMNS = (
     "favorite",
     "bytes",
     "sha256",
+    "sort_seq",
 )
 REQUIRED_GALLERY_COLUMNS = {"id", "prompt", "size", "filename", "created_at"}
+_GALLERY_INTERNAL_COLUMNS = {"sort_seq"}
 INTEGER_GALLERY_COLUMNS = {
     "image_width",
     "image_height",
@@ -136,6 +156,7 @@ INTEGER_GALLERY_COLUMNS = {
     "n",
     "favorite",
     "bytes",
+    "sort_seq",
 }
 GENERATE_JOB_COLUMNS = (
     "job_id",
@@ -184,20 +205,33 @@ SETTINGS_ACTIVE_PRESET_KEY = "active_preset_id"
 UPSTREAM_SOCKS5_PROXY_KEY = "upstream_socks5_proxy"
 WEBHOOK_URL_KEY = "webhook_url"
 PROMPT_OPTIMIZER_SETTINGS_KEY = "prompt_optimizer_settings"
+R2_BACKUP_SETTINGS_KEY = "r2_backup_settings"
 SQLITE_TIMEOUT_SECONDS = 30.0
+DATA_DIR_MODE = 0o700
+DATA_FILE_MODE = 0o600
+DATA_PERMISSION_CHECK_INTERVAL_SECONDS = 60.0
+GALLERY_SYNC_BATCH_SIZE = 500
 GALLERY_FTS_VERSION_KEY = "gallery_fts_version"
 GALLERY_FTS_VERSION = "trigram-v1"
 GALLERY_FTS_MIN_QUERY_LENGTH = 3
 GALLERY_TOTAL_BYTES_CACHE_SECONDS = 2.0
+_GALLERY_BYTES_CACHE_MAX_SIZE = 512
 
 _db_initialized = False
 _db_init_lock = threading.RLock()
 _storage_lock = threading.RLock()
+_gallery_file_write_lock = threading.RLock()
+_thread_local = threading.local()
 _dirs_initialized = False
+_last_permissions_check = -DATA_PERMISSION_CHECK_INTERVAL_SECONDS
+_permissions_check_lock = threading.RLock()
 
 _filter_options_cache: "GalleryFilterOptions | None" = None
 _filter_options_cache_lock = threading.RLock()
-_gallery_total_bytes_cache: dict[tuple[str, str, tuple[Any, ...]], tuple[float, int]] = {}
+_gallery_total_bytes_cache: OrderedDict[
+    tuple[str, str, tuple[Any, ...]],
+    tuple[float, int],
+] = OrderedDict()
 _gallery_total_bytes_cache_lock = threading.RLock()
 _gallery_fts_available: bool | None = None
 
@@ -218,6 +252,74 @@ def _remove_verified_thumbnail(filename: str):
 def _clear_verified_thumbnails():
     with _verified_thumbnails_lock:
         _verified_thumbnails.clear()
+
+
+def _normalize_stored_api_key(value: str | None) -> str:
+    return normalize_secret_env_ref_or_plaintext(
+        value,
+        field_name="API key",
+    )
+
+
+def _normalize_stored_socks5_proxy(value: str | None) -> str:
+    return normalize_secret_env_ref_or_plaintext(
+        value,
+        field_name="SOCKS5 proxy URL",
+        normalizer=normalize_socks5_proxy_url,
+    )
+
+
+def _normalize_stored_webhook_url(value: str | None) -> str:
+    return normalize_secret_env_ref_or_plaintext(
+        value,
+        field_name="Webhook URL",
+        normalizer=normalize_webhook_url,
+    )
+
+
+def _normalize_stored_r2_access_key_id(value: str | None) -> str:
+    return normalize_secret_env_ref_or_plaintext(
+        value,
+        field_name="R2 access key ID",
+    )
+
+
+def _normalize_stored_r2_secret_access_key(value: str | None) -> str:
+    return normalize_secret_env_ref_or_plaintext(
+        value,
+        field_name="R2 secret access key",
+    )
+
+
+def _chmod_path(path: Path, mode: int) -> None:
+    if os.name == "nt" or not path.exists():
+        return
+    try:
+        os.chmod(path, mode)
+    except OSError as e:
+        logger.warning("Failed to chmod %s to %#o: %s", path, mode, e)
+
+
+def _secure_data_storage_permissions(*, force: bool = False) -> None:
+    global _last_permissions_check
+    if os.name == "nt":
+        return
+
+    now = time.monotonic()
+    with _permissions_check_lock:
+        if (
+            not force
+            and now - _last_permissions_check < DATA_PERMISSION_CHECK_INTERVAL_SECONDS
+        ):
+            return
+        _last_permissions_check = now
+
+    data_dir = Path(config.DATA_DIR)
+    database_path = Path(config.DATABASE_FILE)
+    for directory in {data_dir, database_path.parent}:
+        _chmod_path(directory, DATA_DIR_MODE)
+    for suffix in ("", "-wal", "-shm"):
+        _chmod_path(Path(f"{database_path}{suffix}"), DATA_FILE_MODE)
 
 
 
@@ -257,19 +359,23 @@ def _invalidate_gallery_total_bytes_cache():
 def _default_settings() -> dict:
     return {
         "active_preset_id": "default",
-        "upstream_socks5_proxy": config.DEFAULT_UPSTREAM_SOCKS5_PROXY,
+        "upstream_socks5_proxy": _normalize_stored_socks5_proxy(
+            config.DEFAULT_UPSTREAM_SOCKS5_PROXY
+        ),
         "webhook_url": "",
         "presets": [
             {
                 "id": "default",
                 "name": "Default",
                 "api_url": config.DEFAULT_API_URL.rstrip("/"),
-                "api_key": config.DEFAULT_API_KEY,
+                "api_key": _normalize_stored_api_key(config.DEFAULT_API_KEY),
                 "api_path": config.DEFAULT_API_PATH,
                 "default_model": default_model_for_api_path(config.DEFAULT_API_PATH),
+                "default_response_format": "url",
             }
         ],
         "prompt_optimizer": _default_prompt_optimizer_settings(),
+        "r2_backup": _default_r2_backup_settings(),
     }
 
 
@@ -285,9 +391,67 @@ def _default_prompt_optimizer_settings() -> dict:
     return {
         "enabled": config.PROMPT_OPTIMIZER_ENABLED,
         "api_url": config.PROMPT_OPTIMIZER_API_URL,
-        "api_key": config.PROMPT_OPTIMIZER_API_KEY,
+        "api_key": _normalize_stored_api_key(config.PROMPT_OPTIMIZER_API_KEY),
         "model": config.PROMPT_OPTIMIZER_MODEL,
+        "timeout_seconds": config.PROMPT_OPTIMIZER_TIMEOUT_SECONDS,
     }
+
+
+def _default_r2_secret_ref(env_var: str, value: str) -> str:
+    normalized = str(value or "").strip()
+    if not normalized:
+        return ""
+    env_ref = get_env_var_ref_name(normalized)
+    if env_ref:
+        return f"${{{env_ref}}}"
+    return f"${{{env_var}}}"
+
+
+def _normalize_r2_key_prefix(value: Any, default: str = "gallery/") -> str:
+    raw = str(value if value is not None else default).strip()
+    if not raw:
+        return ""
+    parts = [part for part in raw.strip("/").split("/") if part]
+    return f"{'/'.join(parts)}/" if parts else ""
+
+
+def _default_r2_backup_settings() -> dict:
+    return {
+        "enabled": config.R2_BACKUP_ENABLED,
+        "endpoint_url": normalize_r2_endpoint_url(config.R2_ENDPOINT_URL),
+        "bucket_name": config.R2_BUCKET_NAME,
+        "region": config.R2_REGION or "auto",
+        "key_prefix": _normalize_r2_key_prefix(config.R2_KEY_PREFIX),
+        "access_key_id": _default_r2_secret_ref(
+            "R2_ACCESS_KEY_ID",
+            config.R2_ACCESS_KEY_ID,
+        ),
+        "secret_access_key": _default_r2_secret_ref(
+            "R2_SECRET_ACCESS_KEY",
+            config.R2_SECRET_ACCESS_KEY,
+        ),
+        "sync_interval_hours": config.R2_SYNC_INTERVAL_HOURS,
+    }
+
+
+def _coerce_positive_int(value, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _coerce_non_negative_int(value, default: int) -> int:
+    if value is None:
+        return default
+    if isinstance(value, float) and not value.is_integer():
+        return 0
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return parsed if parsed >= 0 else 0
 
 
 def _normalize_prompt_optimizer_settings(settings: dict | None) -> dict:
@@ -297,10 +461,94 @@ def _normalize_prompt_optimizer_settings(settings: dict | None) -> dict:
     return {
         "enabled": _coerce_bool(settings.get("enabled"), default["enabled"]),
         "api_url": str(settings.get("api_url") or "").strip(),
-        "api_key": str(settings.get("api_key") or "").strip(),
+        "api_key": _normalize_stored_api_key(settings.get("api_key")),
         "model": str(settings.get("model") or default["model"]).strip()
         or default["model"],
+        "timeout_seconds": _coerce_positive_int(
+            settings.get("timeout_seconds"),
+            default["timeout_seconds"],
+        ),
     }
+
+
+def _normalize_r2_backup_settings(settings: dict | None) -> dict:
+    default = _default_r2_backup_settings()
+    if not isinstance(settings, dict):
+        return default
+    endpoint_url = normalize_r2_endpoint_url(settings.get("endpoint_url") or "")
+    bucket_name = str(settings.get("bucket_name") or "").strip()
+    access_key_id = _normalize_stored_r2_access_key_id(settings.get("access_key_id"))
+    secret_access_key = _normalize_stored_r2_secret_access_key(
+        settings.get("secret_access_key")
+    )
+    return {
+        "enabled": default["enabled"]
+        or _coerce_bool(settings.get("enabled"), default["enabled"]),
+        "endpoint_url": endpoint_url or default["endpoint_url"],
+        "bucket_name": bucket_name or default["bucket_name"],
+        "region": str(settings.get("region") or default["region"]).strip()
+        or default["region"],
+        "key_prefix": _normalize_r2_key_prefix(
+            settings.get("key_prefix"),
+            default["key_prefix"],
+        ),
+        "access_key_id": access_key_id or default["access_key_id"],
+        "secret_access_key": secret_access_key or default["secret_access_key"],
+        "sync_interval_hours": _coerce_non_negative_int(
+            settings.get("sync_interval_hours"),
+            default["sync_interval_hours"],
+        ),
+    }
+
+
+def _has_r2_backup_storage_values(settings: dict | None) -> bool:
+    if not isinstance(settings, dict):
+        return False
+    if _coerce_bool(settings.get("enabled"), False):
+        return True
+    if "sync_interval_hours" in settings:
+        try:
+            if int(settings.get("sync_interval_hours") or 0) > 0:
+                return True
+        except (TypeError, ValueError):
+            return True
+    return any(
+        str(settings.get(key) or "").strip()
+        for key in (
+            "endpoint_url",
+            "bucket_name",
+            "access_key_id",
+            "secret_access_key",
+        )
+    )
+
+
+def _store_r2_backup_settings_on_conn(conn: sqlite3.Connection, settings: dict):
+    _set_setting_value(conn, R2_BACKUP_SETTINGS_KEY, json.dumps(settings))
+    conn.commit()
+    _secure_data_storage_permissions()
+
+
+def _load_r2_backup_settings_from_conn(conn: sqlite3.Connection) -> dict:
+    raw = _get_setting_value(conn, R2_BACKUP_SETTINGS_KEY)
+    if raw:
+        try:
+            parsed = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return _default_r2_backup_settings()
+
+        settings = _normalize_r2_backup_settings(parsed)
+        if (
+            not _has_r2_backup_storage_values(parsed)
+            and _has_r2_backup_storage_values(settings)
+        ):
+            _store_r2_backup_settings_on_conn(conn, settings)
+        return settings
+
+    settings = _default_r2_backup_settings()
+    if _has_r2_backup_storage_values(settings):
+        _store_r2_backup_settings_on_conn(conn, settings)
+    return settings
 
 
 def _ensure_directories():
@@ -311,6 +559,7 @@ def _ensure_directories():
     Path(config.THUMBNAILS_DIR).mkdir(parents=True, exist_ok=True)
     Path(config.DATA_DIR).mkdir(parents=True, exist_ok=True)
     Path(config.DATABASE_FILE).parent.mkdir(parents=True, exist_ok=True)
+    _secure_data_storage_permissions(force=True)
     _dirs_initialized = True
 
 
@@ -344,62 +593,66 @@ def _open_connection() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA busy_timeout = 30000")
+    conn.execute("PRAGMA synchronous = NORMAL")
     return conn
-
-
-_local = threading.local()
-_all_connections: list[sqlite3.Connection] = []
-_connections_lock = threading.RLock()
-
-
-def _get_thread_connection() -> sqlite3.Connection:
-    if not hasattr(_local, "connection"):
-        conn = _open_connection()
-        _local.connection = conn
-        with _connections_lock:
-            _all_connections.append(conn)
-    return _local.connection
 
 
 @contextmanager
 def _connect() -> Iterator[sqlite3.Connection]:
-    if sqlite3.connect is not _original_sqlite_connect:
-        conn = _open_connection()
-        try:
-            yield conn
-        finally:
-            conn.close()
-        return
-
     conn = _get_thread_connection()
+    depth = int(getattr(_thread_local, "connection_depth", 0))
+    _thread_local.connection_depth = depth + 1
     try:
         yield conn
-    except BaseException:
-        # 任何异常（含普通 Exception）都应废弃此连接，避免连接处于未知事务状态
-        if hasattr(_local, "connection"):
-            try:
-                _local.connection.close()
-            except Exception:
-                pass
-            with _connections_lock:
-                if conn in _all_connections:
-                    _all_connections.remove(conn)
-            delattr(_local, "connection")
+    except Exception:
+        if depth == 0 and conn.in_transaction:
+            conn.rollback()
         raise
+    finally:
+        _thread_local.connection_depth = depth
+        if depth == 0 and conn.in_transaction:
+            conn.rollback()
+
+
+def _get_thread_connection() -> sqlite3.Connection:
+    database_file = str(config.DATABASE_FILE)
+    conn = getattr(_thread_local, "conn", None)
+    conn_database_file = getattr(_thread_local, "database_file", None)
+    if (
+        conn is not None
+        and conn_database_file == database_file
+        and Path(database_file).exists()
+    ):
+        return conn
+
+    _close_thread_connection()
+    conn = _open_connection()
+    _thread_local.conn = conn
+    _thread_local.database_file = database_file
+    _thread_local.connection_depth = 0
+    return conn
+
+
+def _close_thread_connection():
+    conn = getattr(_thread_local, "conn", None)
+    if conn is None:
+        return
+    try:
+        if conn.in_transaction:
+            conn.rollback()
+        conn.close()
+    finally:
+        _thread_local.conn = None
+        _thread_local.database_file = None
+        _thread_local.connection_depth = 0
 
 
 def close_database_connections():
-    """Close repository-owned SQLite handles."""
-    with _connections_lock:
-        for conn in _all_connections:
-            try:
-                conn.close()
-            except Exception:
-                pass
-        _all_connections.clear()
-    if hasattr(_local, "connection"):
-        delattr(_local, "connection")
+    """Close this thread's cached SQLite connection and clear storage caches."""
+    _close_thread_connection()
     _clear_verified_thumbnails()
+    _invalidate_filter_options_cache()
+    _invalidate_gallery_total_bytes_cache()
 
 
 
@@ -516,6 +769,7 @@ def _ensure_database():
                     api_key TEXT NOT NULL,
                     api_path TEXT NOT NULL,
                     default_model TEXT NOT NULL,
+                    default_response_format TEXT NOT NULL DEFAULT 'url',
                     position INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
@@ -542,11 +796,10 @@ def _ensure_database():
                     duration TEXT,
                     favorite INTEGER NOT NULL DEFAULT 0,
                     bytes INTEGER,
-                    sha256 TEXT
+                    sha256 TEXT,
+                    sort_seq INTEGER
                 );
 
-                CREATE INDEX IF NOT EXISTS idx_gallery_entries_created_at
-                    ON gallery_entries(created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_gallery_entries_filename
                     ON gallery_entries(filename);
 
@@ -581,6 +834,11 @@ def _ensure_database():
                     error TEXT
                 );
 
+                CREATE INDEX IF NOT EXISTS idx_generate_jobs_status_updated_at
+                    ON generate_jobs(status, updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_generate_jobs_updated_at
+                    ON generate_jobs(updated_at DESC);
+
                 CREATE TABLE IF NOT EXISTS prompt_snippets (
                     id TEXT PRIMARY KEY,
                     title TEXT NOT NULL,
@@ -590,8 +848,15 @@ def _ensure_database():
                     updated_at TEXT NOT NULL
                 );
 
-                CREATE INDEX IF NOT EXISTS idx_prompt_snippets_favorite_updated_at
-                    ON prompt_snippets(favorite DESC, updated_at DESC);
+                CREATE TABLE IF NOT EXISTS overall_config_values (
+                    name TEXT PRIMARY KEY,
+                    env_value TEXT NOT NULL DEFAULT '',
+                    override_value TEXT,
+                    is_env_set INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL,
+                    override_updated_at TEXT
+                );
+
                 """
             )
             _migrate_api_presets_schema(conn)
@@ -602,6 +867,7 @@ def _ensure_database():
             conn.commit()
 
         _db_initialized = True
+        _secure_data_storage_permissions(force=True)
 
 
 def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -611,55 +877,67 @@ def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
 
 def _migrate_gallery_schema(conn: sqlite3.Connection):
     columns = _table_columns(conn, "gallery_entries")
-    optional_columns = {
-        "image_width": "INTEGER",
-        "image_height": "INTEGER",
-        "model": "TEXT",
-        "quality": "TEXT",
-        "output_format": "TEXT",
-        "output_compression": "INTEGER",
-        "response_format": "TEXT",
-        "n": "INTEGER",
-        "api_path": "TEXT",
-        "api_preset_name": "TEXT",
-        "duration": "TEXT",
-        "thumbnail_filename": "TEXT",
-        "completed_at": "TEXT",
-        "bytes": "INTEGER",
-        "sha256": "TEXT",
-    }
-    for column, column_type in optional_columns.items():
-        if column not in columns:
-            conn.execute(f"ALTER TABLE gallery_entries ADD COLUMN {column} {column_type}")
-            columns.add(column)
     if "favorite" not in columns:
         conn.execute(
             "ALTER TABLE gallery_entries ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0"
         )
-        columns.add("favorite")
+    if "bytes" not in columns:
+        conn.execute("ALTER TABLE gallery_entries ADD COLUMN bytes INTEGER")
+    if "thumbnail_filename" not in columns:
+        conn.execute("ALTER TABLE gallery_entries ADD COLUMN thumbnail_filename TEXT")
+    if "completed_at" not in columns:
+        conn.execute("ALTER TABLE gallery_entries ADD COLUMN completed_at TEXT")
+    if "sha256" not in columns:
+        conn.execute("ALTER TABLE gallery_entries ADD COLUMN sha256 TEXT")
+    if "sort_seq" not in columns:
+        conn.execute("ALTER TABLE gallery_entries ADD COLUMN sort_seq INTEGER")
+        conn.execute(
+            """
+            UPDATE gallery_entries
+            SET sort_seq = rowid
+            WHERE sort_seq IS NULL
+            """
+        )
+        conn.execute("DROP INDEX IF EXISTS idx_gallery_entries_created_at")
+        conn.execute("DROP INDEX IF EXISTS idx_gallery_entries_model_created_at")
+        conn.execute("DROP INDEX IF EXISTS idx_gallery_entries_preset_created_at")
+        conn.execute("DROP INDEX IF EXISTS idx_gallery_entries_size_created_at")
+        conn.execute("DROP INDEX IF EXISTS idx_gallery_entries_favorite_created_at")
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_gallery_entries_sort_seq
+            ON gallery_entries(sort_seq DESC)
+        """
+    )
     if "favorite" in _table_columns(conn, "gallery_entries"):
         conn.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_gallery_entries_favorite_created_at
-                ON gallery_entries(favorite, created_at DESC)
+                ON gallery_entries(favorite, created_at DESC, sort_seq DESC)
             """
         )
     conn.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_gallery_entries_model_created_at
-            ON gallery_entries(model, created_at DESC)
+            ON gallery_entries(model, created_at DESC, sort_seq DESC)
         """
     )
     conn.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_gallery_entries_preset_created_at
-            ON gallery_entries(api_preset_name, created_at DESC)
+            ON gallery_entries(api_preset_name, created_at DESC, sort_seq DESC)
         """
     )
     conn.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_gallery_entries_size_created_at
-            ON gallery_entries(size, created_at DESC)
+            ON gallery_entries(size, created_at DESC, sort_seq DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_gallery_entries_created_at
+            ON gallery_entries(created_at DESC, sort_seq DESC)
         """
     )
     conn.execute(
@@ -681,6 +959,10 @@ def _migrate_api_presets_schema(conn: sqlite3.Connection):
     columns = _table_columns(conn, "api_presets")
     if "default_model" not in columns:
         conn.execute("ALTER TABLE api_presets ADD COLUMN default_model TEXT")
+    if "default_response_format" not in columns:
+        conn.execute(
+            "ALTER TABLE api_presets ADD COLUMN default_response_format TEXT NOT NULL DEFAULT 'url'"
+        )
     conn.execute(
         """
         UPDATE api_presets
@@ -697,30 +979,23 @@ def _migrate_api_presets_schema(conn: sqlite3.Connection):
             default_model_for_api_path("/v1/images/generations"),
         ),
     )
+    conn.execute(
+        """
+        UPDATE api_presets
+        SET default_response_format = ?
+        WHERE default_response_format IS NULL
+            OR trim(default_response_format) NOT IN ('', 'url', 'b64_json')
+        """,
+        ("url",),
+    )
 
 
 def _migrate_generate_jobs_schema(conn: sqlite3.Connection):
     columns = _table_columns(conn, "generate_jobs")
     if "stage_timings_json" not in columns:
         conn.execute("ALTER TABLE generate_jobs ADD COLUMN stage_timings_json TEXT")
-        columns.add("stage_timings_json")
     if "images_json" not in columns:
         conn.execute("ALTER TABLE generate_jobs ADD COLUMN images_json TEXT")
-        columns.add("images_json")
-    if {"status", "updated_at"}.issubset(columns):
-        conn.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_generate_jobs_status_updated_at
-                ON generate_jobs(status, updated_at DESC)
-            """
-        )
-    if "updated_at" in columns:
-        conn.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_generate_jobs_updated_at
-                ON generate_jobs(updated_at DESC)
-            """
-        )
 
 
 def _migrate_prompt_snippets_schema(conn: sqlite3.Connection):
@@ -756,19 +1031,114 @@ def _set_setting_value(conn: sqlite3.Connection, key: str, value: str):
     )
 
 
+def _overall_config_rows(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT name, env_value, override_value, is_env_set, updated_at, override_updated_at
+        FROM overall_config_values
+        """
+    ).fetchall()
+    return {
+        row["name"]: {
+            "name": row["name"],
+            "env_value": row["env_value"],
+            "override_value": row["override_value"],
+            "is_env_set": bool(row["is_env_set"]),
+            "updated_at": row["updated_at"],
+            "override_updated_at": row["override_updated_at"],
+        }
+        for row in rows
+    }
+
+
+def sync_overall_config_env_values(env_values: dict[str, tuple[str, bool]]) -> dict[str, dict[str, Any]]:
+    _ensure_database()
+    now = utc_now()
+    with _connect() as conn:
+        with _transaction(conn):
+            for name, (env_value, is_env_set) in env_values.items():
+                conn.execute(
+                    """
+                    INSERT INTO overall_config_values (
+                        name,
+                        env_value,
+                        override_value,
+                        is_env_set,
+                        updated_at,
+                        override_updated_at
+                    )
+                    VALUES (?, ?, NULL, ?, ?, NULL)
+                    ON CONFLICT(name) DO UPDATE SET
+                        env_value = excluded.env_value,
+                        is_env_set = excluded.is_env_set,
+                        updated_at = excluded.updated_at
+                    """,
+                    (name, str(env_value or ""), 1 if is_env_set else 0, now),
+                )
+            rows = _overall_config_rows(conn)
+    _secure_data_storage_permissions()
+    return rows
+
+
+def list_overall_config_values() -> dict[str, dict[str, Any]]:
+    _ensure_database()
+    with _connect() as conn:
+        return _overall_config_rows(conn)
+
+
+def save_overall_config_overrides(
+    updates: dict[str, str | None],
+) -> dict[str, dict[str, Any]]:
+    _ensure_database()
+    now = utc_now()
+    with _connect() as conn:
+        with _transaction(conn):
+            for name, value in updates.items():
+                conn.execute(
+                    """
+                    INSERT INTO overall_config_values (
+                        name,
+                        env_value,
+                        override_value,
+                        is_env_set,
+                        updated_at,
+                        override_updated_at
+                    )
+                    VALUES (?, '', ?, 0, ?, ?)
+                    ON CONFLICT(name) DO UPDATE SET
+                        override_value = excluded.override_value,
+                        override_updated_at = excluded.override_updated_at
+                    """,
+                    (
+                        name,
+                        value,
+                        now,
+                        now if value is not None else None,
+                    ),
+                )
+            rows = _overall_config_rows(conn)
+    _secure_data_storage_permissions()
+    return rows
+
+
 def _normalize_settings(settings: dict | None) -> dict:
     if not isinstance(settings, dict):
         return _default_settings()
 
     upstream_socks5_proxy = (
-        str(settings.get("upstream_socks5_proxy")).strip()
+        _normalize_stored_socks5_proxy(settings.get("upstream_socks5_proxy"))
         if settings.get("upstream_socks5_proxy") is not None
-        else config.DEFAULT_UPSTREAM_SOCKS5_PROXY
+        else _normalize_stored_socks5_proxy(config.DEFAULT_UPSTREAM_SOCKS5_PROXY)
     )
     webhook_url = (
-        str(settings.get("webhook_url")).strip()
+        _normalize_stored_webhook_url(settings.get("webhook_url"))
         if settings.get("webhook_url") is not None
         else ""
+    )
+    r2_backup = (
+        _normalize_r2_backup_settings(settings.get("r2_backup"))
+        if "r2_backup" in settings
+        else _default_r2_backup_settings()
     )
 
     raw_presets = settings.get("presets")
@@ -776,6 +1146,7 @@ def _normalize_settings(settings: dict | None) -> dict:
         default_settings = _default_settings()
         default_settings["upstream_socks5_proxy"] = upstream_socks5_proxy
         default_settings["webhook_url"] = webhook_url
+        default_settings["r2_backup"] = r2_backup
         return default_settings
 
     presets: list[dict] = []
@@ -785,6 +1156,9 @@ def _normalize_settings(settings: dict | None) -> dict:
             continue
 
         normalized_preset = normalize_api_preset(preset, f"preset-{index + 1}")
+        normalized_preset["api_key"] = _normalize_stored_api_key(
+            normalized_preset.get("api_key")
+        )
         preset_id = normalized_preset["id"]
         if preset_id in seen_ids:
             continue
@@ -795,6 +1169,7 @@ def _normalize_settings(settings: dict | None) -> dict:
         default_settings = _default_settings()
         default_settings["upstream_socks5_proxy"] = upstream_socks5_proxy
         default_settings["webhook_url"] = webhook_url
+        default_settings["r2_backup"] = r2_backup
         return default_settings
 
     active_preset_id = str(settings.get("active_preset_id") or presets[0]["id"])
@@ -811,6 +1186,7 @@ def _normalize_settings(settings: dict | None) -> dict:
             if "prompt_optimizer" in settings
             else None
         ),
+        "r2_backup": r2_backup,
     }
 
 
@@ -829,11 +1205,12 @@ def _replace_settings_on_conn(conn: sqlite3.Connection, settings: dict):
                 api_key,
                 api_path,
                 default_model,
+                default_response_format,
                 position,
                 created_at,
                 updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 preset["id"],
@@ -842,6 +1219,7 @@ def _replace_settings_on_conn(conn: sqlite3.Connection, settings: dict):
                 preset["api_key"],
                 preset["api_path"],
                 preset["default_model"],
+                preset["default_response_format"],
                 position,
                 now,
                 now,
@@ -866,12 +1244,15 @@ def _replace_settings_on_conn(conn: sqlite3.Connection, settings: dict):
     optimizer = normalized.get("prompt_optimizer")
     if optimizer is not None:
         _set_setting_value(conn, PROMPT_OPTIMIZER_SETTINGS_KEY, json.dumps(optimizer))
+    r2_backup = normalized.get("r2_backup")
+    if r2_backup is not None:
+        _set_setting_value(conn, R2_BACKUP_SETTINGS_KEY, json.dumps(r2_backup))
 
 
 def _load_settings_from_conn(conn: sqlite3.Connection) -> dict | None:
     rows = conn.execute(
         """
-        SELECT id, name, api_url, api_key, api_path, default_model
+        SELECT id, name, api_url, api_key, api_path, default_model, default_response_format
         FROM api_presets
         ORDER BY position ASC, id ASC
         """
@@ -887,6 +1268,7 @@ def _load_settings_from_conn(conn: sqlite3.Connection) -> dict | None:
             "api_key": row["api_key"],
             "api_path": row["api_path"],
             "default_model": row["default_model"],
+            "default_response_format": row["default_response_format"],
         }
         for row in rows
     ]
@@ -908,13 +1290,18 @@ def _load_settings_from_conn(conn: sqlite3.Connection) -> dict | None:
     else:
         optimizer = _default_prompt_optimizer_settings()
 
-    return {
-        "active_preset_id": active_preset_id,
-        "upstream_socks5_proxy": upstream_socks5_proxy,
-        "webhook_url": webhook_url,
-        "presets": presets,
-        "prompt_optimizer": optimizer,
-    }
+    r2_backup = _load_r2_backup_settings_from_conn(conn)
+
+    return _normalize_settings(
+        {
+            "active_preset_id": active_preset_id,
+            "upstream_socks5_proxy": upstream_socks5_proxy,
+            "webhook_url": webhook_url,
+            "presets": presets,
+            "prompt_optimizer": optimizer,
+            "r2_backup": r2_backup,
+        }
+    )
 
 
 def _normalize_gallery_entry(entry: dict[str, Any]) -> dict[str, Any] | None:
@@ -973,7 +1360,8 @@ def _gallery_entry_from_row(row: sqlite3.Row) -> dict[str, Any]:
     entry = {
         column: row[column]
         for column in GALLERY_COLUMNS
-        if column in REQUIRED_GALLERY_COLUMNS or row[column] is not None
+        if column not in _GALLERY_INTERNAL_COLUMNS
+        and (column in REQUIRED_GALLERY_COLUMNS or row[column] is not None)
     }
     entry["favorite"] = bool(entry.get("favorite"))
     if entry.get("thumbnail_filename") and not safe_thumbnail_path(
@@ -1204,6 +1592,15 @@ def _insert_gallery_entries_on_conn(
     if not normalized_entries:
         return
 
+    row = conn.execute(
+        "SELECT COALESCE(MAX(sort_seq), 0) FROM gallery_entries"
+    ).fetchone()
+    next_seq = int(row[0]) + 1 if row else 1
+    for entry in normalized_entries:
+        if entry.get("sort_seq") is None:
+            entry["sort_seq"] = next_seq
+            next_seq += 1
+
     columns_sql = ", ".join(GALLERY_COLUMNS)
     placeholders_sql = ", ".join("?" for _ in GALLERY_COLUMNS)
     updates_sql = ", ".join(
@@ -1233,6 +1630,7 @@ def load_settings() -> dict:
         settings = _default_settings()
         with _transaction(conn):
             _replace_settings_on_conn(conn, settings)
+        _secure_data_storage_permissions()
         return settings
 
 
@@ -1241,6 +1639,7 @@ def save_settings(settings: dict):
     with _connect() as conn:
         with _transaction(conn):
             _replace_settings_on_conn(conn, settings)
+    _secure_data_storage_permissions()
 
 
 def load_prompt_optimizer_settings() -> dict:
@@ -1261,6 +1660,22 @@ def save_prompt_optimizer_settings(settings: dict):
     with _connect() as conn:
         _set_setting_value(conn, PROMPT_OPTIMIZER_SETTINGS_KEY, json.dumps(normalized))
         conn.commit()
+    _secure_data_storage_permissions()
+
+
+def load_r2_backup_settings() -> dict:
+    _ensure_database()
+    with _connect() as conn:
+        return _load_r2_backup_settings_from_conn(conn)
+
+
+def save_r2_backup_settings(settings: dict):
+    _ensure_database()
+    normalized = _normalize_r2_backup_settings(settings)
+    with _connect() as conn:
+        _set_setting_value(conn, R2_BACKUP_SETTINGS_KEY, json.dumps(normalized))
+        conn.commit()
+    _secure_data_storage_permissions()
 
 
 def list_prompt_snippets(query: str = "") -> list[PromptSnippet]:
@@ -1469,25 +1884,43 @@ def _dedupe_import_entries_on_conn(
     entries: list[dict[str, Any]],
     prepared_files: list[_PreparedGalleryFile],
 ):
-    used_filenames = set(_get_all_filenames_on_conn(conn))
-    used_ids = {
-        row["id"]
-        for row in conn.execute("SELECT id FROM gallery_entries").fetchall()
-        if row["id"]
-    }
+    used_filenames: set[str] = set()
+    used_ids: set[str] = set()
+    conflicts_possible = conn.execute(
+        "SELECT COUNT(*) FROM gallery_entries LIMIT 1"
+    ).fetchone()[0] > 0
+
+    if conflicts_possible:
+        incoming_filenames = {str(e["filename"]) for e in entries}
+        incoming_ids = {str(e["id"]) for e in entries}
+        placeholders_fn = ", ".join("?" for _ in incoming_filenames)
+        rows = conn.execute(
+            f"SELECT DISTINCT filename FROM gallery_entries WHERE filename IN ({placeholders_fn})",
+            tuple(incoming_filenames),
+        ).fetchall()
+        used_filenames = {row["filename"] for row in rows if row["filename"]}
+        placeholders_id = ", ".join("?" for _ in incoming_ids)
+        rows = conn.execute(
+            f"SELECT id FROM gallery_entries WHERE id IN ({placeholders_id})",
+            tuple(incoming_ids),
+        ).fetchall()
+        used_ids = {row["id"] for row in rows if row["id"]}
+
+    seen_filenames: set[str] = set()
+    seen_ids: set[str] = set()
 
     for entry, prepared in zip(entries, prepared_files):
         image_id = str(entry["id"])
-        while image_id in used_ids:
+        while image_id in used_ids or image_id in seen_ids:
             image_id = generate_image_id()
         entry["id"] = image_id
-        used_ids.add(image_id)
+        seen_ids.add(image_id)
 
         filename = str(entry["filename"])
-        deduped_filename = _dedupe_gallery_filename(filename, used_filenames)
+        deduped_filename = _dedupe_gallery_filename(filename, used_filenames | seen_filenames)
         entry["filename"] = deduped_filename
         prepared.filename = deduped_filename
-        used_filenames.add(deduped_filename)
+        seen_filenames.add(deduped_filename)
 
         if deduped_filename != filename:
             entry.pop("thumbnail_filename", None)
@@ -1623,13 +2056,14 @@ def _save_images_and_insert_gallery_entries(
                     prepared.thumbnail_filename
                 )
 
-        with _storage_lock:
-            _promote_prepared_images(prepared_files)
-            with _connect() as conn:
-                with _transaction(conn):
-                    with observe_job_stage("db_insert"):
-                        _insert_gallery_entries_on_conn(conn, gallery_entries)
-            _promote_prepared_thumbnails(prepared_files)
+        with _gallery_file_write_lock:
+            with _storage_lock:
+                _promote_prepared_images(prepared_files)
+                with _connect() as conn:
+                    with _transaction(conn):
+                        with observe_job_stage("db_insert"):
+                            _insert_gallery_entries_on_conn(conn, gallery_entries)
+                _promote_prepared_thumbnails(prepared_files)
     except BaseException:
         _cleanup_prepared_gallery_files(prepared_files)
         raise
@@ -1659,13 +2093,18 @@ def import_gallery_entries(
         if not normalized_entries:
             return 0
 
-        with _storage_lock:
+        with _gallery_file_write_lock:
             with _connect() as conn:
                 _dedupe_import_entries_on_conn(conn, normalized_entries, prepared_files)
-                _promote_prepared_images(prepared_files)
-                with _transaction(conn):
-                    with observe_job_stage("db_insert"):
-                        _insert_gallery_entries_on_conn(conn, normalized_entries)
+
+            _promote_prepared_images(prepared_files)
+
+            with _storage_lock:
+                with _connect() as conn:
+                    with _transaction(conn):
+                        with observe_job_stage("db_insert"):
+                            _insert_gallery_entries_on_conn(conn, normalized_entries)
+
             _promote_prepared_thumbnails(prepared_files)
         return len(normalized_entries)
     except BaseException:
@@ -1732,47 +2171,59 @@ def _backfill_gallery_bytes_from_known_rows_on_conn(conn: sqlite3.Connection) ->
     return conn.total_changes - before_changes
 
 
-def _backfill_gallery_bytes_from_filenames_on_conn(
-    conn: sqlite3.Connection,
-) -> int:
-    rows = conn.execute(
-        """
-        SELECT filename
-        FROM gallery_entries
-        WHERE filename IS NOT NULL
-          AND TRIM(filename) != ''
-          AND bytes IS NULL
-        GROUP BY filename
-        ORDER BY filename ASC
-        """
-    ).fetchall()
-    if not rows:
-        return 0
+def _backfill_gallery_bytes_from_filenames() -> int:
+    total_updated = 0
+    batch_size = 200
+    last_filename = ""
+    while True:
+        with _connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT filename
+                FROM gallery_entries
+                WHERE filename IS NOT NULL
+                  AND TRIM(filename) != ''
+                  AND bytes IS NULL
+                  AND filename > ?
+                GROUP BY filename
+                ORDER BY filename ASC
+                LIMIT ?
+                """,
+                (last_filename, batch_size),
+            ).fetchall()
+        if not rows:
+            break
 
-    backfills: list[tuple[int, str]] = []
-    for row in rows:
-        filename = str(row["filename"] or "").strip()
-        if not filename:
-            continue
-        size = _stat_image_bytes(filename)
-        if size is None:
-            continue
-        backfills.append((size, filename))
+        backfills: list[tuple[int, str]] = []
+        for row in rows:
+            stored_filename = str(row["filename"] or "")
+            filename = stored_filename.strip()
+            if not filename:
+                continue
+            last_filename = stored_filename
+            size = _stat_image_bytes(filename)
+            if size is None:
+                continue
+            backfills.append((size, stored_filename))
 
-    if not backfills:
-        return 0
+        if backfills:
+            with _connect() as conn:
+                before_changes = conn.total_changes
+                with _transaction(conn):
+                    conn.executemany(
+                        """
+                        UPDATE gallery_entries
+                        SET bytes = ?
+                        WHERE filename = ? AND bytes IS NULL
+                        """,
+                        backfills,
+                    )
+                total_updated += conn.total_changes - before_changes
 
-    before_changes = conn.total_changes
-    with _transaction(conn):
-        conn.executemany(
-            """
-            UPDATE gallery_entries
-            SET bytes = ?
-            WHERE filename = ? AND bytes IS NULL
-            """,
-            backfills,
-        )
-    return conn.total_changes - before_changes
+        if len(rows) < batch_size:
+            break
+
+    return total_updated
 
 
 def backfill_missing_gallery_bytes() -> int:
@@ -1784,7 +2235,7 @@ def backfill_missing_gallery_bytes() -> int:
     _ensure_database()
     with _connect() as conn:
         updated = _backfill_gallery_bytes_from_known_rows_on_conn(conn)
-        updated += _backfill_gallery_bytes_from_filenames_on_conn(conn)
+    updated += _backfill_gallery_bytes_from_filenames()
     if updated:
         _invalidate_gallery_total_bytes_cache()
     return updated
@@ -1819,7 +2270,10 @@ def _get_gallery_total_bytes_on_conn(
     with _gallery_total_bytes_cache_lock:
         cached = _gallery_total_bytes_cache.get(cache_key)
         if cached and (now - cached[0]) < GALLERY_TOTAL_BYTES_CACHE_SECONDS:
+            _gallery_total_bytes_cache.move_to_end(cache_key)
             return cached[1]
+        if cached:
+            _gallery_total_bytes_cache.pop(cache_key, None)
 
     row = conn.execute(
         f"""
@@ -1838,6 +2292,9 @@ def _get_gallery_total_bytes_on_conn(
 
     with _gallery_total_bytes_cache_lock:
         _gallery_total_bytes_cache[cache_key] = (now, total_bytes)
+        _gallery_total_bytes_cache.move_to_end(cache_key)
+        while len(_gallery_total_bytes_cache) > _GALLERY_BYTES_CACHE_MAX_SIZE:
+            _gallery_total_bytes_cache.popitem(last=False)
 
     return total_bytes
 
@@ -1861,7 +2318,7 @@ def _get_gallery_rows_on_conn(
         SELECT {", ".join(GALLERY_COLUMNS)}
         FROM gallery_entries
         {where_sql}
-        ORDER BY created_at DESC, rowid DESC
+        ORDER BY created_at DESC, sort_seq DESC
     """
     query_params: list[Any] = list(params)
     if limit is not None:
@@ -1898,28 +2355,47 @@ def iter_gallery_export_rows(
 ) -> Iterator[dict[str, Any]]:
     """Yield gallery entries as plain dicts for export use cases.
 
-    Reads in pages so a huge gallery doesn't materialize all rows at once,
-    and skips Pydantic validation since the export payload doesn't need it.
+    Uses cursor-based (keyset) pagination to avoid O(n^2) OFFSET scanning.
     """
     _ensure_database()
     where_sql, params = _build_gallery_filter_where(filters)
-    offset = 0
+    last_created_at: str | None = None
+    last_sort_seq: int | None = None
     while True:
         with _connect() as conn:
-            rows = _get_gallery_rows_on_conn(
-                conn,
-                where_sql,
-                params,
-                limit=batch_size,
-                offset=offset,
-            )
+            if last_created_at is None:
+                sql = f"""
+                    SELECT {", ".join(GALLERY_COLUMNS)}
+                    FROM gallery_entries
+                    {where_sql}
+                    ORDER BY created_at DESC, sort_seq DESC
+                    LIMIT ?
+                """
+                query_params = list(params) + [batch_size]
+            else:
+                cursor_clause = "(created_at < ? OR (created_at = ? AND sort_seq < ?))"
+                if where_sql:
+                    combined_where = f"{where_sql} AND {cursor_clause}"
+                else:
+                    combined_where = f" WHERE {cursor_clause}"
+                sql = f"""
+                    SELECT {", ".join(GALLERY_COLUMNS)}
+                    FROM gallery_entries
+                    {combined_where}
+                    ORDER BY created_at DESC, sort_seq DESC
+                    LIMIT ?
+                """
+                query_params = list(params) + [last_created_at, last_created_at, last_sort_seq, batch_size]
+            rows = conn.execute(sql, query_params).fetchall()
         if not rows:
             return
         for row in rows:
             yield _gallery_entry_from_row(row)
         if len(rows) < batch_size:
             return
-        offset += batch_size
+        last_row = rows[-1]
+        last_created_at = last_row["created_at"]
+        last_sort_seq = last_row["sort_seq"]
 
 
 def update_gallery_entry_hash(filename: str, sha256: str, byte_size: int) -> None:
@@ -2001,21 +2477,25 @@ def get_gallery_page(
     query_started_at = time.perf_counter()
     with _connect() as conn:
         where_sql, params = _build_gallery_filter_where(filters)
-        total = _get_gallery_count_on_conn(conn, where_sql, params)
-
-        total_pages_check = max((total + page_size - 1) // page_size, 1)
-        page = min(requested_page, total_pages_check)
-        effective_offset = (page - 1) * page_size
 
         rows = _get_gallery_rows_on_conn(
             conn,
             where_sql,
             params,
-            limit=page_size,
-            offset=effective_offset,
+            limit=page_size + 1,
+            offset=offset,
         )
 
+        has_next = len(rows) > page_size
+        if has_next:
+            rows = rows[:page_size]
+
+        has_prev = requested_page > 1
+
+        total = _get_gallery_count_on_conn(conn, where_sql, params)
         total_pages = max((total + page_size - 1) // page_size, 1)
+        effective_page = min(requested_page, total_pages)
+
         total_bytes = (
             _get_gallery_total_bytes_on_conn(conn, where_sql, params)
             if include_total_bytes
@@ -2027,11 +2507,11 @@ def get_gallery_page(
     return GalleryPage(
         total=total,
         total_bytes=total_bytes,
-        page=page,
+        page=effective_page,
         page_size=page_size,
         total_pages=total_pages,
-        has_prev=page > 1,
-        has_next=page < total_pages,
+        has_prev=has_prev,
+        has_next=has_next,
         images=[GalleryEntry(**_gallery_entry_from_row(row)) for row in rows],
         filter_options=filter_options,
         query_elapsed_ms=round(query_elapsed_ms, 2),
@@ -2267,6 +2747,21 @@ def list_generate_jobs(
     return [_generate_job_from_row(row) for row in rows]
 
 
+def clear_generate_job_history() -> int:
+    _ensure_database()
+    with _connect() as conn:
+        with _transaction(conn):
+            placeholders = ", ".join("?" for _ in ACTIVE_GENERATE_JOB_STATUSES)
+            cursor = conn.execute(
+                f"""
+                DELETE FROM generate_jobs
+                WHERE status NOT IN ({placeholders})
+                """,
+                tuple(sorted(ACTIVE_GENERATE_JOB_STATUSES)),
+            )
+            return cursor.rowcount
+
+
 def mark_active_generate_jobs_interrupted() -> int:
     _ensure_database()
     now = utc_now()
@@ -2332,32 +2827,57 @@ def sync_gallery_with_image_files() -> int:
     _ensure_database()
     with _storage_lock:
         image_filenames = _scan_image_files()
+        removed_count = 0
         with _connect() as conn:
             with _transaction(conn):
-                rows = conn.execute("SELECT id, filename FROM gallery_entries").fetchall()
-                stale_ids = [
-                    row["id"]
-                    for row in rows
-                    if row["filename"] and row["filename"] not in image_filenames
-                ]
-                if stale_ids:
+                last_id = ""
+                while True:
+                    rows = conn.execute(
+                        """
+                        SELECT id, filename
+                        FROM gallery_entries
+                        WHERE id > ?
+                        ORDER BY id
+                        LIMIT ?
+                        """,
+                        (last_id, GALLERY_SYNC_BATCH_SIZE),
+                    ).fetchall()
+                    if not rows:
+                        break
+
+                    last_id = str(rows[-1]["id"])
+                    stale_ids = [
+                        row["id"]
+                        for row in rows
+                        if row["filename"] and row["filename"] not in image_filenames
+                    ]
+                    if not stale_ids:
+                        continue
+
                     conn.executemany(
                         "DELETE FROM gallery_entries WHERE id = ?",
                         [(entry_id,) for entry_id in stale_ids],
                     )
+                    removed_count += len(stale_ids)
+
+                if removed_count:
                     _invalidate_filter_options_cache()
                     _invalidate_gallery_total_bytes_cache()
                     _clear_verified_thumbnails()
-                return len(stale_ids)
+                return removed_count
 
 
 def _delete_gallery_entries_by_ids(
     conn: sqlite3.Connection,
     image_ids: Sequence[str],
-) -> tuple[int, int]:
+) -> tuple[list[str], set[str]]:
+    """Delete gallery entries and return (removed_ids, filenames_to_delete).
+
+    File deletion is NOT performed here — caller handles it after commit.
+    """
     unique_ids = [image_id for image_id in dict.fromkeys(image_ids) if image_id]
     if not unique_ids:
-        return 0, 0
+        return [], set()
 
     placeholders = ", ".join("?" for _ in unique_ids)
     rows = conn.execute(
@@ -2365,7 +2885,7 @@ def _delete_gallery_entries_by_ids(
         tuple(unique_ids),
     ).fetchall()
     if not rows:
-        return 0, 0
+        return [], set()
 
     removed_ids = [row["id"] for row in rows]
     removed_filenames = {row["filename"] for row in rows if row["filename"]}
@@ -2392,16 +2912,8 @@ def _delete_gallery_entries_by_ids(
             row["filename"] for row in remaining_rows if row["filename"]
         }
 
-    deleted_count = 0
-    for filename in removed_filenames - remaining_filenames:
-        if _delete_image_unlocked(filename):
-            deleted_count += 1
-        _delete_thumbnail_unlocked(filename)
-        thumbnail_filename = _thumbnail_filename_for_image(filename)
-        if thumbnail_filename:
-            _remove_verified_thumbnail(thumbnail_filename)
-
-    return len(removed_ids), deleted_count
+    filenames_to_delete = removed_filenames - remaining_filenames
+    return removed_ids, filenames_to_delete
 
 
 def delete_gallery_image(image_id: str) -> tuple[bool, int]:
@@ -2417,7 +2929,24 @@ def delete_gallery_images(image_ids: Sequence[str]) -> tuple[int, int]:
     with _storage_lock:
         with _connect() as conn:
             with _transaction(conn):
-                return _delete_gallery_entries_by_ids(conn, image_ids)
+                removed_ids, filenames_to_delete = _delete_gallery_entries_by_ids(conn, image_ids)
+
+    deleted_count = 0
+    for filename in filenames_to_delete:
+        try:
+            if _delete_image_unlocked(filename):
+                deleted_count += 1
+        except OSError as e:
+            logger.warning("Failed to delete image file %s: %s", filename, e)
+        try:
+            _delete_thumbnail_unlocked(filename)
+        except OSError as e:
+            logger.warning("Failed to delete thumbnail for %s: %s", filename, e)
+        thumbnail_filename = _thumbnail_filename_for_image(filename)
+        if thumbnail_filename:
+            _remove_verified_thumbnail(thumbnail_filename)
+
+    return len(removed_ids), deleted_count
 
 
 def _is_gallery_filename_referenced_on_conn(
@@ -2429,6 +2958,15 @@ def _is_gallery_filename_referenced_on_conn(
         (filename,),
     ).fetchone()
     return row is not None
+
+
+def is_gallery_filename_referenced(filename: str) -> bool:
+    _ensure_database()
+    normalized = str(filename or "").strip()
+    if not normalized or not safe_image_path(normalized):
+        return False
+    with _connect() as conn:
+        return _is_gallery_filename_referenced_on_conn(conn, normalized)
 
 
 def _delete_gallery_file_if_unreferenced(filename: str) -> bool:
@@ -2464,30 +3002,25 @@ def delete_all_gallery_images() -> tuple[int, int]:
     """
     _ensure_database()
     with _storage_lock:
+        disk_filenames = _scan_image_files()
         with _connect() as conn:
             with _transaction(conn):
-                # Count entries first so we can report it after deletion
                 row = conn.execute(
                     "SELECT COUNT(*) FROM gallery_entries"
                 ).fetchone()
                 total = int(row[0]) if row else 0
 
-                # Collect filenames referenced by gallery entries
                 referenced_filenames = set(_get_all_filenames_on_conn(conn))
-                disk_filenames = _scan_image_files()
 
                 conn.execute("DELETE FROM gallery_entries")
                 _invalidate_filter_options_cache()
                 _invalidate_gallery_total_bytes_cache()
 
-    # Files to delete: referenced by gallery OR on disk (union). Each file gets
-    # a short lock/recheck so newly imported entries with the same filename win.
     filenames_to_delete = referenced_filenames | disk_filenames
     deleted_count = 0
     for filename in filenames_to_delete:
         if _delete_gallery_file_if_unreferenced(filename):
             deleted_count += 1
-    # 批量删除完成后一次性清空缩略图内存缓存（逐项删除已各自 discard，此处作兜底）
     _clear_verified_thumbnails()
     return total, deleted_count
 

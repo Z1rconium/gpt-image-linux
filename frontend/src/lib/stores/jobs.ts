@@ -2,8 +2,8 @@ import { get, writable } from 'svelte/store';
 import { apiFetch } from '$lib/api/client';
 import { openJsonEventSource } from '$lib/api/events';
 import { t } from '$lib/i18n';
-import { filenameFromImageUrl } from '$lib/utils/format';
-import { isActiveJobStatus, isFailureJobStatus } from '$lib/utils/jobs';
+import { filenameFromImageUrl, jobFailureMessage } from '$lib/utils/format';
+import { isActiveJobStatus } from '$lib/utils/jobs';
 import type { GenerateJobResponse, GenerateJobStatus } from '$lib/api/types';
 import type { PreviewState } from '$lib/stores/preview';
 
@@ -13,6 +13,7 @@ export type JobsState = {
   historyLoading: boolean;
   historyLoaded: boolean;
   historyHasMore: boolean;
+  historyFailedOnly: boolean;
   selectedIds: Set<string>;
 };
 
@@ -22,6 +23,7 @@ const initialJobsState: JobsState = {
   historyLoading: false,
   historyLoaded: false,
   historyHasMore: false,
+  historyFailedOnly: false,
   selectedIds: new Set()
 };
 
@@ -55,18 +57,26 @@ function createJobsStore() {
     }
   }
 
-  async function loadJobHistory(options: { append?: boolean } = {}) {
+  async function loadJobHistory(options: { append?: boolean; failedOnly?: boolean } = {}) {
     if (state.historyLoading) return;
-    const append = Boolean(options.append);
+    const failedOnly = options.failedOnly ?? state.historyFailedOnly;
+    const append = Boolean(options.append) && state.historyFailedOnly === failedOnly;
+    const filterChanged = state.historyFailedOnly !== failedOnly;
     const offset = append ? state.historyJobs.length : 0;
     const seq = ++historyRequestSeq;
-    update((current) => ({ ...current, historyLoading: true }));
+    update((current) => ({
+      ...current,
+      historyFailedOnly: failedOnly,
+      historyLoading: true,
+      ...(filterChanged ? { historyJobs: [], historyLoaded: false, historyHasMore: false } : {})
+    }));
     try {
       const params = new URLSearchParams({
         include_finished: 'true',
         limit: String(HISTORY_PAGE_SIZE),
         offset: String(offset)
       });
+      if (failedOnly) params.set('failed_only', 'true');
       const historyJobs = await apiFetch<GenerateJobStatus[]>(`/api/generate/jobs?${params.toString()}`, {}, 'loading job history');
       if (seq !== historyRequestSeq) return;
       update((current) => {
@@ -77,6 +87,7 @@ function createJobsStore() {
           ...current,
           historyJobs: mergedJobs,
           historyLoaded: true,
+          historyFailedOnly: failedOnly,
           historyHasMore: historyJobs.length === HISTORY_PAGE_SIZE
         };
       });
@@ -86,6 +97,7 @@ function createJobsStore() {
         ...current,
         historyJobs: append ? current.historyJobs : [],
         historyLoaded: true,
+        historyFailedOnly: failedOnly,
         historyHasMore: false
       }));
     } finally {
@@ -95,12 +107,39 @@ function createJobsStore() {
 
   async function loadMoreJobHistory() {
     if (!state.historyHasMore || state.historyLoading) return;
-    await loadJobHistory({ append: true });
+    await loadJobHistory({ append: true, failedOnly: state.historyFailedOnly });
   }
 
   async function refreshHistoryIfLoaded() {
     if (!state.historyLoaded) return;
-    await loadJobHistory();
+    await loadJobHistory({ failedOnly: state.historyFailedOnly });
+  }
+
+  async function setHistoryFailedOnly(failedOnly: boolean) {
+    if (state.historyFailedOnly === failedOnly && state.historyLoaded) return;
+    await loadJobHistory({ failedOnly });
+  }
+
+  async function clearJobHistory() {
+    const seq = ++historyRequestSeq;
+    update((current) => ({
+      ...current,
+      historyLoading: true
+    }));
+    try {
+      await apiFetch('/api/generate/jobs/history', { method: 'DELETE' }, 'clearing job history');
+      if (seq !== historyRequestSeq) return;
+      update((current) => ({
+        ...current,
+        historyJobs: [],
+        historyLoaded: true,
+        historyHasMore: false,
+        historyLoading: false
+      }));
+    } catch (error) {
+      if (seq === historyRequestSeq) update((current) => ({ ...current, historyLoading: false }));
+      throw error;
+    }
   }
 
   function startJobsPolling() {
@@ -122,6 +161,9 @@ function createJobsStore() {
       onEvent: ({ data }) => {
         stopJobsPolling();
         if (Array.isArray(data)) applyActiveJobs(data);
+      },
+      onNetworkError: () => {
+        startJobsPolling();
       },
       onError: () => {
         startJobsPolling();
@@ -170,6 +212,9 @@ function createJobsStore() {
           terminal = true;
           closeActiveJobSource();
         }
+      },
+      onNetworkError: () => {
+        if (!terminal && trackedJobId === jobId) void pollJob(jobId, updatePreviewFromJob, setPreviewError);
       },
       onError: () => {
         closeActiveJobEventSource();
@@ -228,7 +273,7 @@ function createJobsStore() {
     const image = primaryImage?.image_url || job.image_url || '';
     return {
       loading: isActiveJobStatus(job.status),
-      error: isFailureJobStatus(job.status) ? job.error || job.message || get(t).messages.jobFailed : '',
+      error: jobFailureMessage(job, get(t).messages.jobFailed),
       job,
       imageUrl: image || preview.imageUrl,
       filename: primaryImage?.filename || (image ? filenameFromImageUrl(image) : preview.filename),
@@ -266,6 +311,8 @@ function createJobsStore() {
     loadJobHistory,
     loadMoreJobHistory,
     refreshHistoryIfLoaded,
+    setHistoryFailedOnly,
+    clearJobHistory,
     startJobsEvents,
     toggleSelection,
     toggleAll,

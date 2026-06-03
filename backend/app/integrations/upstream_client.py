@@ -2,11 +2,12 @@ import aiohttp
 import asyncio
 import base64
 import json
+import logging
 import re
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, Protocol
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
 from ..core import settings as config
 from ..core.api_paths import (
@@ -22,6 +23,7 @@ from ..schemas.models import EditRequest, GenerateRequest
 from .session_pool import TIMEOUT_PROBE, TIMEOUT_UPSTREAM, get_pool
 
 ProgressCallback = Callable[[str, str], None]
+logger = logging.getLogger(__name__)
 
 
 class ImageEditSource(Protocol):
@@ -65,6 +67,33 @@ HTTP_IMAGE_URL_RE = re.compile(r"https?://[^\s<>'\")]+")
 
 
 DOWNLOAD_CONCURRENCY = 3
+
+
+def _warn_if_socks5_upstream_resolves_private(
+    upstream_url: str,
+    socks5_proxy: str | None,
+) -> None:
+    if not socks5_proxy:
+        return
+
+    parsed = urlsplit(upstream_url)
+    hostname = (parsed.hostname or "").lower()
+    if not hostname:
+        return
+
+    _resolved_host, resolved_ips = ssrf.resolve_hostname(hostname)
+    private_ips = [ip for ip in resolved_ips if ssrf.is_private_ip(ip)]
+    if not private_ips:
+        return
+
+    logger.warning(
+        "SOCKS5 proxy is enabled and upstream host '%s' resolved locally to "
+        "private/internal IP(s): %s. Pre-connection SSRF validation still blocks "
+        "private local resolutions, but the SOCKS5 proxy is the trust boundary "
+        "for remote DNS and upstream network reachability.",
+        hostname,
+        ", ".join(private_ips),
+    )
 
 
 def get_output_format_info(output_format: str) -> dict[str, str]:
@@ -140,6 +169,16 @@ def parse_sse_events(response_text: str) -> list[dict[str, Any]]:
 
     flush_data_lines()
     return events
+
+
+def is_json_content_type(content_type: str) -> bool:
+    media_type = content_type.split(";", 1)[0].strip().lower()
+    return media_type == "application/json" or media_type.endswith("+json")
+
+
+def looks_like_json_body(response_text: str) -> bool:
+    stripped = response_text.lstrip()
+    return stripped.startswith("{") or stripped.startswith("[")
 
 
 def append_unique_image_result(
@@ -541,6 +580,8 @@ def classify_probe_status(method: str, status: int) -> tuple[str, str]:
         return "ok", f"{method} probe succeeded with HTTP {status}"
     if status in {401, 403}:
         return "ok", f"{method} probe reached the endpoint and got HTTP {status}"
+    if method == "OPTIONS" and status in {404, 410}:
+        return "warning", f"{method} probe returned HTTP {status}; upstream may only support POST"
     if status in {404, 410}:
         return "error", f"{method} probe returned HTTP {status}; check API URL/path"
     if status in {405, 501}:
@@ -656,7 +697,9 @@ async def parse_upstream_json_response(
         progress("received_api_response", "Received upstream API response")
 
     content_type = resp.headers.get("Content-Type", "")
-    is_json_response = "application/json" in content_type
+    is_json_response = is_json_content_type(content_type) or looks_like_json_body(
+        response_text
+    )
 
     if status >= 400:
         raise_upstream_error(status, response_text, is_json_response, api_path)
@@ -693,8 +736,12 @@ async def parse_upstream_chat_completion_response(
         progress("received_api_response", "Received upstream API response")
 
     content_type = resp.headers.get("Content-Type", "")
-    is_json_response = "application/json" in content_type
-    is_sse_response = "text/event-stream" in content_type or response_text.lstrip().startswith("data:")
+    is_json_response = is_json_content_type(content_type) or looks_like_json_body(
+        response_text
+    )
+    is_sse_response = "text/event-stream" in content_type or response_text.lstrip().startswith(
+        "data:"
+    )
 
     if status >= 400:
         raise_upstream_error(status, response_text, is_json_response, api_path)
@@ -735,6 +782,7 @@ async def call_image_generation_api(
     api_path = normalize_api_path(api_path)
     upstream_url = build_upstream_url(api_url, api_path)
 
+    _warn_if_socks5_upstream_resolves_private(upstream_url, socks5_proxy)
     ssrf.validate_upstream_url(upstream_url, config.UPSTREAM_HOST_ALLOWLIST)
 
     headers = {
@@ -840,6 +888,7 @@ async def call_image_edit_api(
     api_path = "/v1/images/edits"
     upstream_url = build_upstream_url(api_url, api_path)
 
+    _warn_if_socks5_upstream_resolves_private(upstream_url, socks5_proxy)
     ssrf.validate_upstream_url(upstream_url, config.UPSTREAM_HOST_ALLOWLIST)
 
     headers = {

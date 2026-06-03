@@ -7,7 +7,8 @@ export function imageUrl(filename: string) {
 }
 
 export function thumbnailUrl(filename: string, url?: string | null) {
-  return url || `/api/thumb/${encodeURIComponent(filename)}`;
+  const safeUrl = url && url.startsWith('/api/') ? url : null;
+  return safeUrl || `/api/thumb/${encodeURIComponent(filename)}`;
 }
 
 export function downloadUrl(filename: string) {
@@ -52,21 +53,36 @@ export function formatBeijingTime(value: string | null | undefined) {
   return `${part('year')}-${part('month')}-${part('day')} ${part('hour')}:${part('minute')}:${part('second')}`;
 }
 
-export function galleryImageSize(image: Pick<GalleryEntry, 'size' | 'image_width' | 'image_height'>) {
-  if (image.size && image.size !== 'auto') return image.size;
-  if (image.image_width && image.image_height) return `${image.image_width}x${image.image_height}`;
-  return image.size || '-';
+type ImageSizeLike = {
+  size?: string | null;
+  image_width?: number | null;
+  image_height?: number | null;
+};
+
+export function displayImageSize(image: ImageSizeLike | null | undefined) {
+  if (image?.image_width && image?.image_height) return `${image.image_width}x${image.image_height}`;
+  return image?.size || '-';
+}
+
+export function galleryImageSize(image: ImageSizeLike) {
+  return displayImageSize(image);
 }
 
 export function stageLabel(job: GenerateJobStatus | null, labels?: Record<string, string>) {
   if (!job?.stage) return '';
-  if (isFailureJobStatus(job.status) && (job.error || job.message)) return job.error || job.message || '';
+  const failureMessage = jobFailureMessage(job);
+  if (failureMessage) return failureMessage;
 
   const translated = labels?.[job.stage];
   if (!translated) return job.message || job.stage.replaceAll('_', ' ');
 
   const progressSuffix = job.message?.match(/\(\d+\/\d+\)$/)?.[0];
   return progressSuffix ? `${translated} ${progressSuffix}` : translated;
+}
+
+export function jobFailureMessage(job: GenerateJobStatus | null | undefined, fallback = '') {
+  if (!job || !isFailureJobStatus(job.status)) return '';
+  return String(job.error || job.message || fallback || '').trim();
 }
 
 export function statusLabel(status: string | null | undefined, labels?: Record<string, string>) {

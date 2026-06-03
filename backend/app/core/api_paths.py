@@ -7,6 +7,8 @@ RESPONSES_API_PATH = "/v1/responses"
 CHAT_COMPLETIONS_API_PATH = "/v1/chat/completions"
 ALLOWED_API_PATHS = {DEFAULT_API_PATH, RESPONSES_API_PATH, CHAT_COMPLETIONS_API_PATH}
 DEFAULT_IMAGE_MODEL = "gpt-image-2"
+DEFAULT_RESPONSE_FORMAT = "url"
+ALLOWED_RESPONSE_FORMATS = {"", "url", "b64_json"}
 
 
 def normalize_api_path(api_path: str | None) -> str:
@@ -26,6 +28,13 @@ def default_model_for_api_path(api_path: str | None) -> str:
 def normalize_default_model(default_model: str | None, api_path: str | None = None) -> str:
     value = str(default_model or "").strip()
     return value or default_model_for_api_path(api_path)
+
+
+def normalize_default_response_format(response_format: str | None) -> str:
+    if response_format is None:
+        return DEFAULT_RESPONSE_FORMAT
+    value = str(response_format).strip()
+    return value if value in ALLOWED_RESPONSE_FORMATS else DEFAULT_RESPONSE_FORMAT
 
 
 def build_upstream_url(api_url: str, api_path: str) -> str:
@@ -50,4 +59,7 @@ def normalize_api_preset(raw: dict[str, Any] | None, fallback_id: str = "default
         "api_key": str(preset.get("api_key") or "").strip(),
         "api_path": api_path,
         "default_model": normalize_default_model(preset.get("default_model"), api_path),
+        "default_response_format": normalize_default_response_format(
+            preset.get("default_response_format")
+        ),
     }

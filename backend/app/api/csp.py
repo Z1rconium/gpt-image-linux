@@ -22,8 +22,9 @@ def build_content_security_policy(script_nonce: str | None = None) -> str:
             "form-action 'self'",
             f"script-src {' '.join(script_sources)}",
             f"script-src-elem {' '.join(script_elem_sources)}",
-            "script-src-attr 'unsafe-inline'",
-            "style-src 'self' 'unsafe-inline'",
+            "script-src-attr 'none'",
+            "style-src 'self'",
+            "style-src-attr 'unsafe-inline'",
             "img-src 'self' data: blob:",
             "font-src 'self' data:",
             "connect-src 'self'",
@@ -54,4 +55,3 @@ def frontend_index_response(index_path: Path) -> HTMLResponse:
     )
     response.headers["Cache-Control"] = "no-cache"
     return response
-

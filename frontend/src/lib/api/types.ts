@@ -1,8 +1,12 @@
 export type ApiPath = '/v1/images/generations' | '/v1/responses' | '/v1/chat/completions';
 export type ApiKeySource = 'empty' | 'stored' | 'env';
+export type OverallConfigValueType = 'string' | 'secret' | 'bool' | 'int' | 'float';
+export type OverallConfigValueSource = 'override' | 'env' | 'default';
+export type ResponseFormatDefault = '' | 'url' | 'b64_json';
 export type PresetHealthStatus = 'ok' | 'warning' | 'error';
 export type GenerateJobStatusValue = 'queued' | 'running' | 'success' | 'error' | 'cancelled' | 'interrupted' | 'upstream_error';
 export type GalleryExportJobStatusValue = 'queued' | 'running' | 'success' | 'error';
+export type GallerySyncJobStatusValue = 'queued' | 'running' | 'success' | 'error';
 
 export type ApiPreset = {
   id: string;
@@ -10,6 +14,7 @@ export type ApiPreset = {
   api_url: string;
   api_path: ApiPath;
   default_model: string;
+  default_response_format: ResponseFormatDefault;
   api_key_masked: string;
   has_api_key: boolean;
   api_key_source: ApiKeySource;
@@ -25,18 +30,21 @@ export type SettingsResponse = {
   api_key_env_var?: string | null;
   api_path: ApiPath;
   default_model: string;
+  default_response_format: ResponseFormatDefault;
   has_upstream_socks5_proxy: boolean;
   upstream_socks5_proxy_masked: string;
   has_webhook_url: boolean;
   webhook_url_masked: string;
   presets: ApiPreset[];
   prompt_optimizer: PromptOptimizerSettings;
+  r2_backup: R2BackupSettings;
 };
 
 export type PromptOptimizerSettings = {
   enabled: boolean;
   api_url: string;
   model: string;
+  timeout_seconds: number;
   api_key_masked: string;
   has_api_key: boolean;
   api_key_source: ApiKeySource;
@@ -47,7 +55,42 @@ export type PromptOptimizerSettingsInput = {
   enabled?: boolean | null;
   api_url?: string | null;
   model?: string | null;
+  timeout_seconds?: number | null;
   api_key?: string | null;
+};
+
+export type R2BackupSettings = {
+  enabled: boolean;
+  endpoint_url: string;
+  bucket_name: string;
+  region: string;
+  key_prefix: string;
+  sync_interval_hours: number;
+  access_key_id_masked: string;
+  has_access_key_id: boolean;
+  access_key_id_source: ApiKeySource;
+  access_key_id_env_var?: string | null;
+  secret_access_key_masked: string;
+  has_secret_access_key: boolean;
+  secret_access_key_source: ApiKeySource;
+  secret_access_key_env_var?: string | null;
+};
+
+export type R2BackupSettingsInput = {
+  enabled?: boolean | null;
+  endpoint_url?: string | null;
+  bucket_name?: string | null;
+  region?: string | null;
+  key_prefix?: string | null;
+  sync_interval_hours?: number | null;
+  access_key_id?: string | null;
+  secret_access_key?: string | null;
+};
+
+export type PromptOptimizerSystemPromptResponse = {
+  system_prompt: string;
+  default_system_prompt: string;
+  customized: boolean;
 };
 
 export type SettingsInput = {
@@ -57,9 +100,11 @@ export type SettingsInput = {
   api_key?: string | null;
   api_path: ApiPath;
   default_model?: string | null;
+  default_response_format?: ResponseFormatDefault | null;
   upstream_socks5_proxy?: string | null;
   webhook_url?: string | null;
   prompt_optimizer?: PromptOptimizerSettingsInput | null;
+  r2_backup?: R2BackupSettingsInput | null;
 };
 
 export type PresetHealthCheck = {
@@ -71,6 +116,43 @@ export type PresetHealthCheck = {
 export type PresetHealthResponse = {
   status: PresetHealthStatus;
   checks: PresetHealthCheck[];
+};
+
+export type R2HealthResponse = PresetHealthResponse;
+
+export type OverallConfigItem = {
+  name: string;
+  type: OverallConfigValueType;
+  group: string;
+  description: string;
+  value: string | boolean | number;
+  value_masked: string;
+  env_value_masked: string;
+  override_value_masked?: string | null;
+  source: OverallConfigValueSource;
+  is_env_set: boolean;
+  has_override: boolean;
+  secret: boolean;
+  hot_reload: boolean;
+  restart_required: boolean;
+  build_only: boolean;
+  updated_at?: string | null;
+  override_updated_at?: string | null;
+};
+
+export type OverallConfigResponse = {
+  items: OverallConfigItem[];
+  restart_required_names: string[];
+};
+
+export type OverallConfigUpdateItem = {
+  name: string;
+  value?: string | boolean | number | null;
+  clear_override?: boolean;
+};
+
+export type OverallConfigUpdateRequest = {
+  updates: OverallConfigUpdateItem[];
 };
 
 export type AccessStatus = {
@@ -244,4 +326,23 @@ export type GalleryExportJobStatus = {
   created_at?: string | null;
   updated_at?: string | null;
   error?: string | null;
+};
+
+export type GallerySyncJobStatus = {
+  job_id: string;
+  status: GallerySyncJobStatusValue;
+  stage?: string | null;
+  message?: string | null;
+  progress: number;
+  created_at?: string | null;
+  updated_at?: string | null;
+  error?: string | null;
+  total_count: number;
+  compared_count: number;
+  uploaded_count: number;
+  skipped_existing_count: number;
+  missing_local_count: number;
+  failed_count: number;
+  bytes_total: number;
+  bytes_uploaded: number;
 };

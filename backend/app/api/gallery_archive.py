@@ -117,7 +117,6 @@ def _resolve_export_metadata_for_entry(
         return data
 
     data["sha256"] = digest
-    storage.update_gallery_entry_hash(_entry_filename(entry), digest, file_size)
     return data
 
 
@@ -468,8 +467,8 @@ def _iter_zip_import_entries(zf: zipfile.ZipFile) -> Iterator[tuple[bytes, dict]
     if not isinstance(raw_images, list):
         raise HTTPException(status_code=400, detail="metadata.json images must be a list")
 
-    used_names = set(storage.get_all_filenames())
-    used_ids = set(storage.get_all_gallery_ids())
+    used_names: set[str] = set()
+    used_ids: set[str] = set()
 
     for raw_entry in raw_images:
         if not isinstance(raw_entry, dict):

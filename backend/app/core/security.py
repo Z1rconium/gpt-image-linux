@@ -9,12 +9,15 @@ from typing import Optional
 from fastapi import Request
 
 from . import settings as config
+from .validators import resolve_env_var_ref
 
 
 def _signature_secret() -> bytes:
-    key = config.ACCESS_KEY or config.DEFAULT_API_KEY
+    key = config.ACCESS_KEY or resolve_env_var_ref(config.DEFAULT_API_KEY)
     if not key:
-        key = "gpt-image-panel-dev-secret"
+        raise RuntimeError(
+            "No signing secret available. Set ACCESS_KEY or DEFAULT_API_KEY."
+        )
     return key.encode("utf-8")
 
 
@@ -87,18 +90,28 @@ def _parse_trusted_proxy_networks() -> list[ipaddress.IPv4Network | ipaddress.IP
 _trusted_proxy_networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network] | None = None
 
 
+def validate_proxy_config() -> None:
+    """Raise if TRUST_PROXY_HEADERS=true but no valid TRUSTED_PROXY_IPS configured."""
+    if not config.TRUST_PROXY_HEADERS:
+        return
+    networks = _parse_trusted_proxy_networks()
+    if not networks:
+        raise RuntimeError(
+            "TRUST_PROXY_HEADERS=true requires a valid TRUSTED_PROXY_IPS setting. "
+            "Set TRUSTED_PROXY_IPS to the IP/CIDR of your reverse proxy "
+            "(e.g. '172.17.0.0/16' or '10.0.0.1')."
+        )
+
+
 def is_trusted_proxy(client_host: str) -> bool:
     """Return True if proxy headers should be trusted for this direct client."""
     if not config.TRUST_PROXY_HEADERS:
         return False
-    if not config.TRUSTED_PROXY_IPS:
-        # No restriction configured — trust all (backward compat)
-        return True
     global _trusted_proxy_networks
     if _trusted_proxy_networks is None:
         _trusted_proxy_networks = _parse_trusted_proxy_networks()
     if not _trusted_proxy_networks:
-        return True  # Parsed to empty = trust all
+        return False
     try:
         addr = ipaddress.ip_address(client_host)
     except ValueError:
@@ -111,13 +124,33 @@ def get_client_ip(request: Request) -> str:
     if is_trusted_proxy(client_host):
         forwarded_for = request.headers.get("x-forwarded-for", "")
         if forwarded_for:
-            return forwarded_for.split(",", 1)[0].strip()
+            parts = [p.strip() for p in forwarded_for.split(",") if p.strip()]
+            # Walk from right to left; the rightmost non-trusted-proxy entry is the client
+            for ip_candidate in reversed(parts):
+                if not _is_trusted_proxy_ip(ip_candidate):
+                    return ip_candidate
+            # All entries are trusted proxies — use leftmost
+            if parts:
+                return parts[0]
 
         real_ip = request.headers.get("x-real-ip", "")
         if real_ip:
             return real_ip.strip()
 
     return client_host
+
+
+def _is_trusted_proxy_ip(ip_str: str) -> bool:
+    global _trusted_proxy_networks
+    if _trusted_proxy_networks is None:
+        _trusted_proxy_networks = _parse_trusted_proxy_networks()
+    if not _trusted_proxy_networks:
+        return False
+    try:
+        addr = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return False
+    return any(addr in net for net in _trusted_proxy_networks)
 
 
 def _allowlist_entries() -> list[str]:

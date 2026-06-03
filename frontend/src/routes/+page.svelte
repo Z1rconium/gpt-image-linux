@@ -20,10 +20,12 @@
     ApiPath,
     GalleryEntry,
     GenerateJobStatus,
+    OverallConfigUpdateRequest,
     PromptOptimizeResponse,
     PromptSnippet,
     PromptSnippetCreateInput,
     PromptSnippetUpdateInput,
+    ResponseFormatDefault,
     SettingsInput,
     SettingsResponse
   } from '$lib/api/types';
@@ -40,7 +42,14 @@
   import { uiStore, type ToastOptions } from '$lib/stores/ui';
   import { versionStore } from '$lib/stores/version';
   import { copyText, galleryImageSize, imageUrl } from '$lib/utils/format';
-  import { galleryEntryToPromptForm, galleryEntryToPromptOnly, jobToPromptForm, normalizeApiPath } from '$lib/utils/promptForm';
+  import {
+    galleryEntryToPromptForm,
+    galleryEntryToPromptOnly,
+    jobToPromptForm,
+    normalizeApiPath,
+    normalizeResponseFormat,
+    normalizeSubmissionQuantity
+  } from '$lib/utils/promptForm';
 
   type JobsTab = 'running' | 'history';
 
@@ -51,15 +60,28 @@
   let editPreviewLabel = '';
   let lastActivePresetId = '';
   let lastActivePresetDefaultModel = DEFAULT_PROMPT_MODEL;
+  let lastActivePresetDefaultResponseFormat: ResponseFormatDefault = initialPromptFormState.responseFormat;
   let urlSyncReady = false;
   let applyingUrlState = false;
   let urlSyncQueued = false;
   let queuedUrlSyncMode: 'replace' | 'push' = 'replace';
   let lightboxLookupSeq = 0;
+  let lightboxNavigating = false;
   let lastActivePresetApiPath: ApiPath = initialPromptFormState.apiPath;
   let optimizingPrompt = false;
 
   $: activeJobsCount = $jobsStore.jobs.length;
+  $: lightboxImages = $galleryStore.gallery?.images || [];
+  $: lightboxImageIndex = lightboxImages.findIndex((image) => image.id === $lightboxStore.image?.id);
+  $: lightboxImageInCurrentPage = lightboxImageIndex >= 0;
+  $: canNavigatePrevious = Boolean(
+    $lightboxStore.image && lightboxImageInCurrentPage && (lightboxImageIndex > 0 || $galleryStore.gallery?.has_prev)
+  );
+  $: canNavigateNext = Boolean(
+    $lightboxStore.image &&
+      lightboxImageInCurrentPage &&
+      (lightboxImageIndex < lightboxImages.length - 1 || $galleryStore.gallery?.has_next)
+  );
   $: optimizerSettings = $settingsStore.settings?.prompt_optimizer || null;
   $: optimizerAvailable = Boolean(
     optimizerSettings?.enabled &&
@@ -67,13 +89,25 @@
       optimizerSettings.model.trim() &&
       optimizerSettings.has_api_key
   );
-  $: syncFormModelToActivePreset($settingsStore.settings);
+  $: r2BackupSettings = $settingsStore.settings?.r2_backup || null;
+  $: r2BackupAvailable = Boolean(
+    r2BackupSettings?.enabled &&
+      r2BackupSettings.endpoint_url.trim() &&
+      r2BackupSettings.bucket_name.trim() &&
+      r2BackupSettings.has_access_key_id &&
+      r2BackupSettings.has_secret_access_key
+  );
+  $: syncFormDefaultsToActivePreset($settingsStore.settings);
 
   async function loadInitialData() {
     await Promise.all([settingsStore.loadSettings(), jobsStore.loadJobs(), applyUrlStateToApp()]);
     urlSyncReady = true;
     syncUrlState();
     jobsStore.startJobsEvents();
+  }
+
+  async function loadAuthenticatedData() {
+    await Promise.all([versionStore.loadVersion(), loadInitialData()]);
   }
 
   function showToast(message: string, variant?: 'status' | 'error', options?: ToastOptions) {
@@ -149,6 +183,52 @@
     queueUrlSync('replace');
   }
 
+  function lightboxNavigationBlocked() {
+    return Boolean(
+      $confirmStore.request ||
+        $uiStore.editPreviewOpen ||
+        $uiStore.sizeDialogOpen ||
+        $uiStore.promptSnippetsOpen ||
+        $uiStore.jobsOpen ||
+        $uiStore.settingsOpen
+    );
+  }
+
+  async function navigateLightbox(direction: -1 | 1) {
+    if (lightboxNavigating || !$lightboxStore.image || !$galleryStore.gallery) return;
+
+    const gallery = $galleryStore.gallery;
+    const images = gallery.images;
+    const currentIndex = images.findIndex((image) => image.id === $lightboxStore.image?.id);
+    if (currentIndex < 0) return;
+
+    const nextIndex = currentIndex + direction;
+    if (nextIndex >= 0 && nextIndex < images.length) {
+      lightboxStore.open(images[nextIndex]);
+      queueUrlSync('replace');
+      return;
+    }
+
+    const nextPage = gallery.page + direction;
+    if ((direction < 0 && !gallery.has_prev) || (direction > 0 && !gallery.has_next)) return;
+
+    lightboxNavigating = true;
+    try {
+      await galleryStore.loadGallery(nextPage);
+      const nextImages = $galleryStore.gallery?.images || [];
+      const nextImage = direction < 0 ? nextImages[nextImages.length - 1] : nextImages[0];
+      if (nextImage) {
+        lightboxStore.open(nextImage);
+        queueUrlSync('replace');
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : $t.messages.requestFailed;
+      showToast(message || $t.messages.requestFailed, 'error');
+    } finally {
+      lightboxNavigating = false;
+    }
+  }
+
   function openJobsDrawer(tab: JobsTab = jobsTab) {
     jobsTab = tab;
     setUi('jobsOpen', true);
@@ -219,15 +299,22 @@
     return normalizeApiPath(preset?.api_path || settings?.api_path, initialPromptFormState.apiPath);
   }
 
-  function syncFormModelToActivePreset(settings: SettingsResponse | null) {
+  function presetDefaultResponseFormat(settings: SettingsResponse | null): ResponseFormatDefault {
+    const preset = activePreset(settings);
+    return normalizeResponseFormat(preset?.default_response_format ?? settings?.default_response_format, initialPromptFormState.responseFormat);
+  }
+
+  function syncFormDefaultsToActivePreset(settings: SettingsResponse | null) {
     const preset = activePreset(settings);
     const nextPresetId = preset?.id || '';
     const nextDefaultModel = presetDefaultModel(settings);
     const nextApiPath = presetApiPath(settings);
+    const nextDefaultResponseFormat = presetDefaultResponseFormat(settings);
     if (
       nextPresetId === lastActivePresetId &&
       nextDefaultModel === lastActivePresetDefaultModel &&
-      nextApiPath === lastActivePresetApiPath
+      nextApiPath === lastActivePresetApiPath &&
+      nextDefaultResponseFormat === lastActivePresetDefaultResponseFormat
     ) {
       return;
     }
@@ -240,12 +327,16 @@
     if (!form.apiPath || form.apiPath === lastActivePresetApiPath) {
       updates.apiPath = nextApiPath;
     }
+    if (nextPresetId !== lastActivePresetId || nextDefaultResponseFormat !== lastActivePresetDefaultResponseFormat) {
+      updates.responseFormat = nextDefaultResponseFormat;
+    }
     if (Object.keys(updates).length) {
       form = { ...form, ...updates };
     }
     lastActivePresetId = nextPresetId;
     lastActivePresetDefaultModel = nextDefaultModel;
     lastActivePresetApiPath = nextApiPath;
+    lastActivePresetDefaultResponseFormat = nextDefaultResponseFormat;
   }
 
   function saveSettings(body: SettingsInput) {
@@ -257,15 +348,35 @@
   }
 
   function activatePreset(presetId: string) {
-    void settingsStore.activatePreset(presetId, showToast);
+    return settingsStore.activatePreset(presetId, showToast);
   }
 
-  function deleteActivePreset() {
-    void settingsStore.deleteActivePreset(showToast);
+  function deletePreset(presetId: string) {
+    return settingsStore.deletePreset(presetId, showToast);
   }
 
   function checkPresetHealth(presetId: string) {
     void settingsStore.checkPresetHealth(presetId);
+  }
+
+  function checkR2Health(body: NonNullable<SettingsInput['r2_backup']>) {
+    void settingsStore.checkR2Health(body);
+  }
+
+  function loadPromptOptimizerSystemPrompt() {
+    return settingsStore.loadPromptOptimizerSystemPrompt();
+  }
+
+  function savePromptOptimizerSystemPrompt(systemPrompt: string) {
+    return settingsStore.savePromptOptimizerSystemPrompt(systemPrompt, showToast);
+  }
+
+  function loadOverallConfig() {
+    return settingsStore.loadOverallConfig();
+  }
+
+  function saveOverallConfig(body: OverallConfigUpdateRequest) {
+    return settingsStore.saveOverallConfig(body, showToast);
   }
 
   function updatePreviewFromJob(job: GenerateJobStatus) {
@@ -281,11 +392,20 @@
     jobsStore.trackJob(jobId, async (job) => updatePreviewFromJob(job), previewStore.setError);
   }
 
+  function normalizeFormQuantityForSubmit() {
+    const quantity = normalizeSubmissionQuantity(form.quantity);
+    if (form.quantity === '' || Number(form.quantity) !== quantity) {
+      form = { ...form, quantity };
+    }
+  }
+
   function generateImage() {
+    normalizeFormQuantityForSubmit();
     void previewStore.generateImage(form, jobsStore.makeQueuedPreview, trackJob, jobsStore.loadJobs);
   }
 
   function editImage() {
+    normalizeFormQuantityForSubmit();
     void previewStore.editImage(form, $editSourceStore, jobsStore.makeQueuedPreview, trackJob, jobsStore.loadJobs);
   }
 
@@ -523,6 +643,19 @@
     await galleryStore.exportArchive(showToast);
   }
 
+  async function syncGallery() {
+    if (!r2BackupAvailable) {
+      showToast($t.messages.r2BackupUnavailable, 'error');
+      return;
+    }
+    try {
+      await galleryStore.syncGallery(showToast);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : $t.messages.requestFailed;
+      showToast(message || $t.messages.requestFailed, 'error');
+    }
+  }
+
   async function copyPrompt(image: GalleryEntry) {
     await copyText(image.prompt);
     showToast($t.messages.promptCopied);
@@ -559,6 +692,27 @@
     showToast($t.messages.jobLoadedIntoPrompt);
   }
 
+  async function clearJobHistory() {
+    const confirmed = await confirmStore.confirm({
+      title: $t.confirm.clearJobHistoryTitle,
+      message: $t.confirm.clearJobHistoryMessage,
+      details: [$t.confirm.clearJobHistoryDetail],
+      confirmLabel: $t.common.clear,
+      cancelLabel: $t.confirm.cancel,
+      closeLabel: $t.confirm.closeLabel,
+      variant: 'danger'
+    });
+    if (!confirmed) return;
+
+    try {
+      await jobsStore.clearJobHistory();
+      showToast($t.messages.jobHistoryCleared);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : $t.messages.requestFailed;
+      showToast(message || $t.messages.requestFailed, 'error');
+    }
+  }
+
   function retryJob(job: GenerateJobStatus) {
     form = jobToPromptForm(job, lastActivePresetDefaultModel);
     closeJobsDrawer();
@@ -585,8 +739,7 @@
 
   onMount(() => {
     accessStore.installUnauthorizedHandler();
-    void versionStore.loadVersion();
-    void accessStore.checkAccess(loadInitialData);
+    void accessStore.checkAccess(loadAuthenticatedData);
 
     const popstate = () => {
       void applyUrlStateToApp();
@@ -594,13 +747,24 @@
     window.addEventListener('popstate', popstate);
 
     const keydown = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return;
-      if ($uiStore.editPreviewOpen) setUi('editPreviewOpen', false);
-      else if ($lightboxStore.image) closeLightbox();
-      else if ($uiStore.sizeDialogOpen) setUi('sizeDialogOpen', false);
-      else if ($uiStore.promptSnippetsOpen) closePromptSnippetsDrawer();
-      else if ($uiStore.jobsOpen) closeJobsDrawer();
-      else if ($uiStore.settingsOpen) setUi('settingsOpen', false);
+      if (event.key === 'Escape') {
+        if ($uiStore.editPreviewOpen) setUi('editPreviewOpen', false);
+        else if ($lightboxStore.image) closeLightbox();
+        else if ($uiStore.sizeDialogOpen) setUi('sizeDialogOpen', false);
+        else if ($uiStore.promptSnippetsOpen) closePromptSnippetsDrawer();
+        else if ($uiStore.jobsOpen) closeJobsDrawer();
+        else if ($uiStore.settingsOpen) setUi('settingsOpen', false);
+        return;
+      }
+
+      if (!$lightboxStore.image || lightboxNavigationBlocked()) return;
+      if (event.key === 'ArrowLeft' && canNavigatePrevious) {
+        event.preventDefault();
+        void navigateLightbox(-1);
+      } else if (event.key === 'ArrowRight' && canNavigateNext) {
+        event.preventDefault();
+        void navigateLightbox(1);
+      }
     };
     window.addEventListener('keydown', keydown);
     return () => {
@@ -618,7 +782,7 @@
   <title>GPT Image Panel</title>
 </svelte:head>
 
-<AccessGate visible={$accessStore.gateVisible} error={$accessStore.error} loading={$accessStore.loading} onUnlock={(key) => accessStore.unlockAccess(key, loadInitialData)} />
+<AccessGate visible={$accessStore.gateVisible} error={$accessStore.error} loading={$accessStore.loading} onUnlock={(key) => accessStore.unlockAccess(key, loadAuthenticatedData)} />
 <Header
   version={$versionStore.version}
   latestVersion={$versionStore.latestVersion}
@@ -638,12 +802,19 @@
   saving={$settingsStore.saving}
   health={$settingsStore.health}
   healthChecking={$settingsStore.healthChecking}
+  r2Health={$settingsStore.r2Health}
+  r2HealthChecking={$settingsStore.r2HealthChecking}
   onClose={() => setUi('settingsOpen', false)}
   onSave={saveSettings}
   onCreate={createPreset}
   onActivate={activatePreset}
-  onDelete={deleteActivePreset}
+  onDelete={deletePreset}
   onHealthCheck={checkPresetHealth}
+  onR2HealthCheck={checkR2Health}
+  onLoadPromptOptimizerSystemPrompt={loadPromptOptimizerSystemPrompt}
+  onSavePromptOptimizerSystemPrompt={savePromptOptimizerSystemPrompt}
+  onLoadOverallConfig={loadOverallConfig}
+  onSaveOverallConfig={saveOverallConfig}
 />
 
 <PromptSnippetsDrawer
@@ -669,12 +840,15 @@
   historyLoading={$jobsStore.historyLoading}
   historyLoaded={$jobsStore.historyLoaded}
   historyHasMore={$jobsStore.historyHasMore}
+  historyFailedOnly={$jobsStore.historyFailedOnly}
   selectedIds={$jobsStore.selectedIds}
   onClose={closeJobsDrawer}
   onTabChange={setJobsTab}
   onRefresh={jobsStore.loadJobs}
   onRefreshHistory={jobsStore.loadJobHistory}
   onLoadMoreHistory={jobsStore.loadMoreJobHistory}
+  onHistoryFailedOnlyChange={jobsStore.setHistoryFailedOnly}
+  onClearHistory={clearJobHistory}
   onToggle={jobsStore.toggleSelection}
   onToggleAll={jobsStore.toggleAll}
   onCancelSelected={jobsStore.cancelSelected}
@@ -737,6 +911,7 @@
     filters={$galleryStore.filters}
     loading={$galleryStore.loading}
     operationStatus={$galleryStore.operationStatus}
+    canSyncR2={r2BackupAvailable}
     onFilter={galleryStore.updateFilter}
     onResetFilters={galleryStore.resetFilters}
     onPage={galleryStore.loadGallery}
@@ -746,6 +921,7 @@
     onDeleteAll={deleteAllImages}
     onImport={importArchive}
     onExport={exportArchive}
+    onSync={syncGallery}
     onOpen={openLightbox}
     onEdit={prepareGalleryImageForEdit}
     onUsePrompt={useGalleryPrompt}
@@ -773,6 +949,11 @@
   onCopyUrl={copyImageUrl}
   onUsePrompt={useGalleryPrompt}
   onUseAll={useGalleryParams}
+  canNavigatePrevious={canNavigatePrevious}
+  canNavigateNext={canNavigateNext}
+  navigating={lightboxNavigating}
+  onNavigatePrevious={() => navigateLightbox(-1)}
+  onNavigateNext={() => navigateLightbox(1)}
 />
 
 <EditPreviewModal

@@ -1,13 +1,23 @@
-from pydantic import BaseModel, Field, field_validator, model_validator
-from typing import Literal, Optional
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator, model_validator
+from typing import Annotated, Literal, Optional
 from datetime import datetime
 
 from ..core.api_paths import DEFAULT_IMAGE_MODEL
-from ..core.validators import normalize_socks5_proxy_url, normalize_webhook_url
+from ..core.validators import (
+    normalize_secret_env_ref_or_plaintext,
+    normalize_r2_endpoint_url,
+    normalize_socks5_proxy_url,
+    normalize_upstream_base_url,
+    normalize_webhook_url,
+)
 
 ApiPath = Literal["/v1/images/generations", "/v1/responses", "/v1/chat/completions"]
 ApiKeySource = Literal["empty", "stored", "env"]
+OverallConfigValueType = Literal["string", "secret", "bool", "int", "float"]
+OverallConfigValueSource = Literal["override", "env", "default"]
+ResponseFormatDefault = Literal["", "url", "b64_json"]
 PresetHealthStatus = Literal["ok", "warning", "error"]
+MASKED_SECRET_VALUE = "********"
 GenerateJobStatusValue = Literal[
     "queued",
     "running",
@@ -18,6 +28,12 @@ GenerateJobStatusValue = Literal[
     "upstream_error",
 ]
 GalleryExportJobStatusValue = Literal["queued", "running", "success", "error"]
+GallerySyncJobStatusValue = Literal["queued", "running", "success", "error"]
+ShortId = Annotated[str, Field(min_length=1, max_length=128)]
+
+
+class StrictRequestModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
 
 class ApiPresetResponse(BaseModel):
@@ -26,47 +42,77 @@ class ApiPresetResponse(BaseModel):
     api_url: str
     api_path: ApiPath
     default_model: str
+    default_response_format: ResponseFormatDefault = "url"
     api_key_masked: str
     has_api_key: bool
     api_key_source: ApiKeySource = "empty"
     api_key_env_var: Optional[str] = None
 
 
-class PresetCreateRequest(BaseModel):
-    name: Optional[str] = None
-    api_url: Optional[str] = None
+class PresetCreateRequest(StrictRequestModel):
+    name: Optional[str] = Field(default=None, max_length=160)
+    api_url: Optional[str] = Field(default=None, max_length=2048)
     api_key: Optional[str] = Field(
         default=None,
+        max_length=8192,
         description=(
             "API key for authentication, or ${ENV_VAR_NAME} to resolve from "
-            "the server environment. Literal keys are stored as plaintext in "
-            "SQLite; env refs are preferred."
+            "the server environment. Literal keys require "
+            "ALLOW_PLAINTEXT_SECRETS=true."
         ),
     )
     api_path: Optional[ApiPath] = None
-    default_model: Optional[str] = None
-    source_preset_id: Optional[str] = None
+    default_model: Optional[str] = Field(default=None, max_length=200)
+    default_response_format: Optional[ResponseFormatDefault] = None
+    source_preset_id: Optional[str] = Field(default=None, max_length=128)
+
+    @field_validator("api_url")
+    @classmethod
+    def validate_optional_api_url(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        return normalize_upstream_base_url(value)
+
+    @field_validator("api_key")
+    @classmethod
+    def validate_api_key(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        return normalize_secret_env_ref_or_plaintext(
+            value,
+            field_name="API key",
+        )
 
 
-class SettingsRequest(BaseModel):
-    active_preset_id: Optional[str] = None
-    preset_name: Optional[str] = None
-    api_url: str = Field(..., description="Base API URL, e.g. https://api.example.com")
+class SettingsRequest(StrictRequestModel):
+    active_preset_id: Optional[str] = Field(default=None, max_length=128)
+    preset_name: Optional[str] = Field(default=None, max_length=160)
+    api_url: str = Field(
+        ...,
+        min_length=1,
+        max_length=2048,
+        description="Base API URL, e.g. https://api.example.com",
+    )
     api_key: Optional[str] = Field(
         default=None,
+        max_length=8192,
         description=(
             "API key for authentication, or ${ENV_VAR_NAME} to resolve from "
-            "the server environment. Literal keys are stored as plaintext in "
-            "SQLite; env refs are preferred. Omit/null to keep the current key."
+            "the server environment. Literal keys require "
+            "ALLOW_PLAINTEXT_SECRETS=true. Omit/null to keep the current key."
         ),
     )
     api_path: ApiPath = "/v1/images/generations"
-    default_model: Optional[str] = None
+    default_model: Optional[str] = Field(default=None, max_length=200)
+    default_response_format: Optional[ResponseFormatDefault] = None
     upstream_socks5_proxy: Optional[str] = Field(
         default=None,
+        max_length=2048,
         description=(
             "Optional global SOCKS5 proxy for upstream generation/edit API calls. "
-            "Null keeps the current value; an empty string clears it."
+            "Use ${ENV_VAR_NAME} by default; literal values require "
+            "ALLOW_PLAINTEXT_SECRETS=true. Null keeps the current value; "
+            "an empty string clears it."
         ),
     )
     webhook_url: Optional[str] = Field(
@@ -74,24 +120,50 @@ class SettingsRequest(BaseModel):
         max_length=2048,
         description=(
             "Optional global HTTPS webhook callback URL for completed generation/edit jobs. "
-            "Null keeps the current value; an empty string clears it."
+            "Use ${ENV_VAR_NAME} by default; literal values require "
+            "ALLOW_PLAINTEXT_SECRETS=true. Null keeps the current value; "
+            "an empty string clears it."
         ),
     )
     prompt_optimizer: Optional["PromptOptimizerSettingsRequest"] = None
+    r2_backup: Optional["R2BackupSettingsRequest"] = None
+
+    @field_validator("api_url")
+    @classmethod
+    def validate_api_url(cls, value: str) -> str:
+        return normalize_upstream_base_url(value)
+
+    @field_validator("api_key")
+    @classmethod
+    def validate_api_key(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        return normalize_secret_env_ref_or_plaintext(
+            value,
+            field_name="API key",
+        )
 
     @field_validator("upstream_socks5_proxy")
     @classmethod
     def validate_upstream_socks5_proxy(cls, value: Optional[str]) -> Optional[str]:
         if value is None:
             return None
-        return normalize_socks5_proxy_url(value)
+        return normalize_secret_env_ref_or_plaintext(
+            value,
+            field_name="SOCKS5 proxy URL",
+            normalizer=normalize_socks5_proxy_url,
+        )
 
     @field_validator("webhook_url")
     @classmethod
     def validate_settings_webhook_url(cls, value: Optional[str]) -> Optional[str]:
         if value is None:
             return None
-        return normalize_webhook_url(value)
+        return normalize_secret_env_ref_or_plaintext(
+            value,
+            field_name="Webhook URL",
+            normalizer=normalize_webhook_url,
+        )
 
 
 class SettingsResponse(BaseModel):
@@ -103,12 +175,14 @@ class SettingsResponse(BaseModel):
     api_key_env_var: Optional[str] = None
     api_path: ApiPath
     default_model: str
+    default_response_format: ResponseFormatDefault = "url"
     has_upstream_socks5_proxy: bool = False
     upstream_socks5_proxy_masked: str = ""
     has_webhook_url: bool = False
     webhook_url_masked: str = ""
     presets: list[ApiPresetResponse]
     prompt_optimizer: "PromptOptimizerSettingsResponse" = Field(default_factory=lambda: PromptOptimizerSettingsResponse())
+    r2_backup: "R2BackupSettingsResponse" = Field(default_factory=lambda: R2BackupSettingsResponse())
 
 
 class PresetHealthCheck(BaseModel):
@@ -122,8 +196,58 @@ class PresetHealthResponse(BaseModel):
     checks: list[PresetHealthCheck]
 
 
-class AccessRequest(BaseModel):
-    access_key: str = Field(..., min_length=1, description="Access key for site access")
+class R2HealthResponse(PresetHealthResponse):
+    pass
+
+
+class OverallConfigItem(BaseModel):
+    name: str
+    type: OverallConfigValueType
+    group: str
+    description: str
+    value: str | bool | int | float
+    value_masked: str
+    env_value_masked: str
+    override_value_masked: Optional[str] = None
+    source: OverallConfigValueSource
+    is_env_set: bool
+    has_override: bool
+    secret: bool = False
+    hot_reload: bool = True
+    restart_required: bool = False
+    build_only: bool = False
+    updated_at: Optional[str] = None
+    override_updated_at: Optional[str] = None
+
+
+class OverallConfigResponse(BaseModel):
+    items: list[OverallConfigItem]
+    restart_required_names: list[str] = Field(default_factory=list)
+
+
+class OverallConfigUpdateItem(StrictRequestModel):
+    name: str = Field(..., min_length=1, max_length=128)
+    value: str | bool | int | float | None = None
+    clear_override: bool = False
+
+    @model_validator(mode="after")
+    def validate_action(self):
+        if self.clear_override and self.value is not None:
+            raise ValueError("clear_override cannot be combined with value")
+        return self
+
+
+class OverallConfigUpdateRequest(StrictRequestModel):
+    updates: list[OverallConfigUpdateItem] = Field(default_factory=list, max_length=128)
+
+
+class AccessRequest(StrictRequestModel):
+    access_key: str = Field(
+        ...,
+        min_length=1,
+        max_length=4096,
+        description="Access key for site access",
+    )
 
 
 class AccessStatusResponse(BaseModel):
@@ -173,25 +297,122 @@ class PromptOptimizerSettingsResponse(BaseModel):
     enabled: bool = False
     api_url: str = ""
     model: str = "gpt-4o-mini"
+    timeout_seconds: int = 60
     api_key_masked: str = "***"
     has_api_key: bool = False
     api_key_source: ApiKeySource = "empty"
     api_key_env_var: Optional[str] = None
 
 
-class PromptOptimizerSettingsRequest(BaseModel):
+class PromptOptimizerSettingsRequest(StrictRequestModel):
     enabled: Optional[bool] = None
-    api_url: Optional[str] = None
-    model: Optional[str] = None
-    api_key: Optional[str] = None
+    api_url: Optional[str] = Field(default=None, max_length=2048)
+    model: Optional[str] = Field(default=None, max_length=200)
+    timeout_seconds: Optional[int] = Field(default=None, ge=1)
+    api_key: Optional[str] = Field(default=None, max_length=8192)
+
+    @field_validator("api_url")
+    @classmethod
+    def validate_optional_api_url(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        if not value.strip():
+            return ""
+        return normalize_upstream_base_url(value)
+
+    @field_validator("api_key")
+    @classmethod
+    def validate_api_key(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        return normalize_secret_env_ref_or_plaintext(
+            value,
+            field_name="Prompt optimizer API key",
+        )
 
 
-class PromptOptimizeRequest(BaseModel):
+class R2BackupSettingsResponse(BaseModel):
+    enabled: bool = False
+    endpoint_url: str = ""
+    bucket_name: str = ""
+    region: str = "auto"
+    key_prefix: str = "gallery/"
+    sync_interval_hours: int = 0
+    access_key_id_masked: str = "***"
+    has_access_key_id: bool = False
+    access_key_id_source: ApiKeySource = "empty"
+    access_key_id_env_var: Optional[str] = None
+    secret_access_key_masked: str = "***"
+    has_secret_access_key: bool = False
+    secret_access_key_source: ApiKeySource = "empty"
+    secret_access_key_env_var: Optional[str] = None
+
+
+class R2BackupSettingsRequest(StrictRequestModel):
+    enabled: Optional[bool] = None
+    endpoint_url: Optional[str] = Field(default=None, max_length=2048)
+    bucket_name: Optional[str] = Field(default=None, max_length=255)
+    region: Optional[str] = Field(default=None, max_length=100)
+    key_prefix: Optional[str] = Field(default=None, max_length=1024)
+    sync_interval_hours: Optional[Annotated[StrictInt, Field(ge=0)]] = None
+    access_key_id: Optional[str] = Field(default=None, max_length=8192)
+    secret_access_key: Optional[str] = Field(default=None, max_length=8192)
+
+    @field_validator("endpoint_url")
+    @classmethod
+    def validate_endpoint_url(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        return normalize_r2_endpoint_url(value)
+
+    @field_validator("access_key_id")
+    @classmethod
+    def validate_access_key_id(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        if value.strip() == MASKED_SECRET_VALUE:
+            return MASKED_SECRET_VALUE
+        return normalize_secret_env_ref_or_plaintext(
+            value,
+            field_name="R2 access key ID",
+        )
+
+    @field_validator("secret_access_key")
+    @classmethod
+    def validate_secret_access_key(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        if value.strip() == MASKED_SECRET_VALUE:
+            return MASKED_SECRET_VALUE
+        return normalize_secret_env_ref_or_plaintext(
+            value,
+            field_name="R2 secret access key",
+        )
+
+
+class PromptOptimizerSystemPromptResponse(BaseModel):
+    system_prompt: str
+    default_system_prompt: str
+    customized: bool = False
+
+
+class PromptOptimizerSystemPromptRequest(StrictRequestModel):
+    system_prompt: str = Field(..., min_length=1, max_length=20000)
+
+    @field_validator("system_prompt")
+    @classmethod
+    def validate_system_prompt(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("system_prompt must not be empty")
+        return value
+
+
+class PromptOptimizeRequest(StrictRequestModel):
     prompt: str = Field(..., min_length=1, max_length=4000)
     target_language: Literal["en", "zh-CN", "same"] = "en"
     api_path: Optional[ApiPath] = None
-    model: Optional[str] = None
-    size: Optional[str] = None
+    model: Optional[str] = Field(default=None, max_length=200)
+    size: Optional[str] = Field(default=None, max_length=40)
     quality: Optional[Literal["auto", "low", "medium", "high"]] = None
 
 
@@ -210,7 +431,7 @@ class PromptSnippet(BaseModel):
     updated_at: str
 
 
-class PromptSnippetCreateRequest(BaseModel):
+class PromptSnippetCreateRequest(StrictRequestModel):
     title: str = Field(..., min_length=1, max_length=160)
     prompt: str = Field(..., min_length=1, max_length=4000)
     favorite: bool = False
@@ -224,7 +445,7 @@ class PromptSnippetCreateRequest(BaseModel):
         return normalized
 
 
-class PromptSnippetUpdateRequest(BaseModel):
+class PromptSnippetUpdateRequest(StrictRequestModel):
     title: Optional[str] = Field(default=None, min_length=1, max_length=160)
     prompt: Optional[str] = Field(default=None, min_length=1, max_length=4000)
     favorite: Optional[bool] = None
@@ -244,10 +465,10 @@ class PromptSnippetListResponse(BaseModel):
     snippets: list[PromptSnippet]
 
 
-class GenerateRequest(BaseModel):
-    prompt: str = Field(..., max_length=4000)
-    size: str = "auto"
-    model: str = DEFAULT_IMAGE_MODEL
+class GenerateRequest(StrictRequestModel):
+    prompt: str = Field(..., min_length=1, max_length=4000)
+    size: str = Field(default="auto", max_length=40)
+    model: str = Field(default=DEFAULT_IMAGE_MODEL, max_length=200)
     n: int = Field(default=1, ge=1, le=10)
     quality: Literal["auto", "low", "medium", "high"] = "auto"
     output_format: Literal["png", "jpeg", "webp"] = "png"
@@ -304,12 +525,12 @@ class GalleryEntry(BaseModel):
     bytes: Optional[int] = None
 
 
-class GalleryFavoriteRequest(BaseModel):
+class GalleryFavoriteRequest(StrictRequestModel):
     favorite: bool
 
 
-class GalleryBatchRequest(BaseModel):
-    ids: list[str] = Field(..., min_length=1, max_length=1000)
+class GalleryBatchRequest(StrictRequestModel):
+    ids: list[ShortId] = Field(..., min_length=1, max_length=1000)
 
     @field_validator("ids")
     @classmethod
@@ -326,8 +547,8 @@ class GalleryBatchFavoriteRequest(GalleryBatchRequest):
     favorite: bool
 
 
-class GalleryExportRequest(BaseModel):
-    ids: Optional[list[str]] = Field(default=None, max_length=1000)
+class GalleryExportRequest(StrictRequestModel):
+    ids: Optional[list[ShortId]] = Field(default=None, max_length=1000)
 
     @field_validator("ids")
     @classmethod
@@ -359,6 +580,25 @@ class GalleryExportJobStatus(BaseModel):
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
     error: Optional[str] = None
+
+
+class GallerySyncJobStatus(BaseModel):
+    job_id: str
+    status: GallerySyncJobStatusValue
+    stage: Optional[str] = None
+    message: Optional[str] = None
+    progress: int = 0
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    error: Optional[str] = None
+    total_count: int = 0
+    compared_count: int = 0
+    uploaded_count: int = 0
+    skipped_existing_count: int = 0
+    missing_local_count: int = 0
+    failed_count: int = 0
+    bytes_total: int = 0
+    bytes_uploaded: int = 0
 
 
 class GalleryBatchResponse(BaseModel):

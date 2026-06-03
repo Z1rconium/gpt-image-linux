@@ -1,4 +1,5 @@
 import asyncio
+import time
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
@@ -17,8 +18,11 @@ from ..jobs import (
     store_generate_job,
     trim_generate_jobs,
 )
+from ..sse_limiter import sse_limiter
+from ...core import security as auth
+from ...core import settings as config
 from ...core.api_paths import normalize_api_path
-from ...core.constants import ACTIVE_GENERATE_JOB_STATUSES
+from ...core.constants import ACTIVE_GENERATE_JOB_STATUSES, ERROR_GENERATE_JOB_STATUSES
 from ...core.utils import utc_now
 from ...repositories import storage
 from ...schemas.models import (
@@ -66,11 +70,13 @@ async def generate(req: GenerateRequest):
 @router.get("/api/generate/jobs", response_model=list[GenerateJobStatus])
 async def list_generate_jobs(
     include_finished: bool = Query(default=False),
+    failed_only: bool = Query(default=False),
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
 ):
     if include_finished:
-        jobs = await asyncio.to_thread(storage.list_generate_jobs, limit=limit, offset=offset)
+        statuses = ERROR_GENERATE_JOB_STATUSES if failed_only else None
+        jobs = await asyncio.to_thread(storage.list_generate_jobs, statuses=statuses, limit=limit, offset=offset)
     else:
         jobs = list_active_generate_jobs()
     return [GenerateJobStatus(**job) for job in jobs]
@@ -78,6 +84,10 @@ async def list_generate_jobs(
 
 @router.get("/api/generate/jobs/events")
 async def stream_generate_jobs(request: Request):
+    client_ip = auth.get_client_ip(request)
+    if not await sse_limiter.acquire(client_ip):
+        raise HTTPException(status_code=429, detail="Too many SSE connections")
+
     queue: asyncio.Queue = asyncio.Queue(maxsize=20)
     subscribers = get_jobs_subscribers()
     subscribers.add(queue)
@@ -88,9 +98,12 @@ async def stream_generate_jobs(request: Request):
     )
 
     async def event_stream():
+        start = time.monotonic()
         try:
             while True:
                 if await request.is_disconnected():
+                    break
+                if time.monotonic() - start > config.SSE_CONNECTION_TTL_SECONDS:
                     break
                 try:
                     item = await asyncio.wait_for(queue.get(), timeout=15)
@@ -100,6 +113,7 @@ async def stream_generate_jobs(request: Request):
                 yield serialize_sse_event(item["event"], item["data"])
         finally:
             subscribers.discard(queue)
+            await sse_limiter.release(client_ip)
 
     return StreamingResponse(
         event_stream(),
@@ -108,6 +122,15 @@ async def stream_generate_jobs(request: Request):
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
         },
+    )
+
+
+@router.delete("/api/generate/jobs/history", response_model=MessageResponse)
+async def clear_generate_job_history():
+    deleted_count = await asyncio.to_thread(storage.clear_generate_job_history)
+    return MessageResponse(
+        status="success",
+        message=f"Deleted {deleted_count} job history entr{'y' if deleted_count == 1 else 'ies'}",
     )
 
 
@@ -125,6 +148,10 @@ async def stream_generate_job(job_id: str, request: Request):
     if not job:
         raise HTTPException(status_code=404, detail="Generation job not found")
 
+    client_ip = auth.get_client_ip(request)
+    if not await sse_limiter.acquire(client_ip):
+        raise HTTPException(status_code=429, detail="Too many SSE connections")
+
     queue: asyncio.Queue = asyncio.Queue(maxsize=20)
     subscribers_by_job = get_job_subscribers()
     subscribers = subscribers_by_job.setdefault(job_id, set())
@@ -132,9 +159,12 @@ async def stream_generate_job(job_id: str, request: Request):
     publish_queue(queue, {"event": "job", "data": job})
 
     async def event_stream():
+        start = time.monotonic()
         try:
             while True:
                 if await request.is_disconnected():
+                    break
+                if time.monotonic() - start > config.SSE_CONNECTION_TTL_SECONDS:
                     break
                 try:
                     item = await asyncio.wait_for(queue.get(), timeout=15)
@@ -150,6 +180,7 @@ async def stream_generate_job(job_id: str, request: Request):
             subscribers.discard(queue)
             if not subscribers:
                 subscribers_by_job.pop(job_id, None)
+            await sse_limiter.release(client_ip)
 
     return StreamingResponse(
         event_stream(),

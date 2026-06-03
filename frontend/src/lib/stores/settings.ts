@@ -2,7 +2,16 @@ import { derived, get, writable } from 'svelte/store';
 import { apiFetch } from '$lib/api/client';
 import { t } from '$lib/i18n';
 import { confirmStore } from '$lib/stores/confirm';
-import type { PresetHealthResponse, SettingsInput, SettingsResponse } from '$lib/api/types';
+import type {
+  OverallConfigResponse,
+  OverallConfigUpdateRequest,
+  PresetHealthResponse,
+  PromptOptimizerSystemPromptResponse,
+  R2BackupSettingsInput,
+  R2HealthResponse,
+  SettingsInput,
+  SettingsResponse
+} from '$lib/api/types';
 import type { ToastVariant } from '$lib/stores/ui';
 
 type ShowToast = (message: string, variant?: ToastVariant) => void;
@@ -12,13 +21,17 @@ type SettingsState = {
   saving: boolean;
   healthChecking: boolean;
   health: PresetHealthResponse | null;
+  r2HealthChecking: boolean;
+  r2Health: R2HealthResponse | null;
 };
 
 const initialSettingsState: SettingsState = {
   settings: null,
   saving: false,
   healthChecking: false,
-  health: null
+  health: null,
+  r2HealthChecking: false,
+  r2Health: null
 };
 
 function createSettingsStore() {
@@ -50,7 +63,7 @@ function createSettingsStore() {
         },
         'saving settings'
       );
-      update((state) => ({ ...state, settings, health: null }));
+      update((state) => ({ ...state, settings, health: null, r2Health: null }));
       showToast(get(t).messages.presetSaved);
     } finally {
       update((state) => ({ ...state, saving: false }));
@@ -68,7 +81,7 @@ function createSettingsStore() {
       },
       'creating preset'
     );
-    update((state) => ({ ...state, settings, health: null }));
+    update((state) => ({ ...state, settings, health: null, r2Health: null }));
     showToast(get(t).messages.presetCreated);
   }
 
@@ -80,18 +93,18 @@ function createSettingsStore() {
       { method: 'POST' },
       'switching preset'
     );
-    update((state) => ({ ...state, settings, health: null }));
+    update((state) => ({ ...state, settings, health: null, r2Health: null }));
     showToast(get(t).messages.presetSwitched);
   }
 
-  async function deleteActivePreset(showToast: ShowToast) {
+  async function deletePreset(presetId: string, showToast: ShowToast) {
     const current = get(settingsStore).settings;
     if (!current || current.presets.length <= 1) return;
-    const active = current.presets.find((preset) => preset.id === current.active_preset_id);
-    if (!active) return;
+    const target = current.presets.find((preset) => preset.id === presetId) || current.presets.find((preset) => preset.id === current.active_preset_id);
+    if (!target) return;
     const confirmed = await confirmStore.confirm({
       title: get(t).confirm.deletePresetTitle,
-      message: get(t).confirm.deletePresetMessage(active.name || get(t).common.untitledPreset),
+      message: get(t).confirm.deletePresetMessage(target.name || get(t).common.untitledPreset),
       confirmLabel: get(t).settings.deletePreset,
       cancelLabel: get(t).confirm.cancel,
       closeLabel: get(t).confirm.closeLabel,
@@ -99,11 +112,11 @@ function createSettingsStore() {
     });
     if (!confirmed) return;
     const settings = await apiFetch<SettingsResponse>(
-      `/api/settings/presets/${encodeURIComponent(active.id)}`,
+      `/api/settings/presets/${encodeURIComponent(target.id)}`,
       { method: 'DELETE' },
       'deleting preset'
     );
-    update((state) => ({ ...state, settings, health: null }));
+    update((state) => ({ ...state, settings, health: null, r2Health: null }));
     showToast(get(t).messages.presetDeleted);
   }
 
@@ -122,14 +135,85 @@ function createSettingsStore() {
     }
   }
 
+  async function checkR2Health(body: R2BackupSettingsInput) {
+    update((state) => ({ ...state, r2HealthChecking: true }));
+    try {
+      const r2Health = await apiFetch<R2HealthResponse>(
+        '/api/settings/r2/health',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        },
+        'checking R2 health'
+      );
+      update((state) => ({ ...state, r2Health }));
+    } finally {
+      update((state) => ({ ...state, r2HealthChecking: false }));
+    }
+  }
+
+  async function loadPromptOptimizerSystemPrompt() {
+    return apiFetch<PromptOptimizerSystemPromptResponse>(
+      '/api/prompt/optimizer-system-prompt',
+      {},
+      'loading prompt optimizer system prompt'
+    );
+  }
+
+  async function savePromptOptimizerSystemPrompt(systemPrompt: string, showToast: ShowToast) {
+    const response = await apiFetch<PromptOptimizerSystemPromptResponse>(
+      '/api/prompt/optimizer-system-prompt',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ system_prompt: systemPrompt })
+      },
+      'saving prompt optimizer system prompt'
+    );
+    showToast(get(t).messages.promptOptimizerSystemPromptSaved);
+    return response;
+  }
+
+  async function loadOverallConfig() {
+    return apiFetch<OverallConfigResponse>(
+      '/api/settings/overall-config',
+      {},
+      'loading overall config'
+    );
+  }
+
+  async function saveOverallConfig(body: OverallConfigUpdateRequest, showToast: ShowToast) {
+    const response = await apiFetch<OverallConfigResponse>(
+      '/api/settings/overall-config',
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      },
+      'saving overall config'
+    );
+    if (response.restart_required_names.length) {
+      showToast(get(t).messages.overallConfigRestartRequired(response.restart_required_names.length));
+    } else {
+      showToast(get(t).messages.overallConfigSaved);
+    }
+    return response;
+  }
+
   return {
     subscribe,
     loadSettings,
     saveSettings,
     createPreset,
     activatePreset,
-    deleteActivePreset,
-    checkPresetHealth
+    deletePreset,
+    checkPresetHealth,
+    checkR2Health,
+    loadPromptOptimizerSystemPrompt,
+    savePromptOptimizerSystemPrompt,
+    loadOverallConfig,
+    saveOverallConfig
   };
 }
 

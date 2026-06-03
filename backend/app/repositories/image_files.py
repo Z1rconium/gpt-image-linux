@@ -1,9 +1,17 @@
+import io
 import struct
 import tempfile
 import uuid
+import warnings
 from pathlib import Path
 
 from ..core import settings as config
+
+try:
+    from PIL import Image, UnidentifiedImageError
+except ImportError:  # pragma: no cover - Pillow is a runtime dependency
+    Image = None
+    UnidentifiedImageError = OSError
 
 IMAGE_FILE_EXTENSIONS = {
     ".avif",
@@ -63,6 +71,26 @@ IMAGE_FORMAT_CONTENT_TYPES = {
 }
 THUMBNAIL_EXTENSION = ".webp"
 THUMBNAIL_CONTENT_TYPE = "image/webp"
+PILLOW_FORMATS = {
+    "AVIF": "avif",
+    "BMP": "bmp",
+    "GIF": "gif",
+    "HEIF": "heif",
+    "ICO": "ico",
+    "JPEG": "jpeg",
+    "JPG": "jpeg",
+    "PNG": "png",
+    "TIFF": "tiff",
+    "WEBP": "webp",
+}
+
+
+def configure_pillow_image_limits() -> None:
+    if Image is not None:
+        Image.MAX_IMAGE_PIXELS = config.MAX_IMAGE_PIXELS
+
+
+configure_pillow_image_limits()
 
 
 def generate_image_id() -> str:
@@ -97,7 +125,7 @@ def detect_image_format(image_bytes: bytes) -> str | None:
     return None
 
 
-def validate_image_bytes(
+def validate_image_header_bytes(
     image_bytes: bytes,
     *,
     filename: str = "",
@@ -117,6 +145,97 @@ def validate_image_bytes(
     if normalized_content_type and content_type_format != detected_format:
         raise ValueError("Image content type does not match image data")
 
+    return detected_format
+
+
+def _pillow_format_key(format_name: str | None) -> str | None:
+    if not format_name:
+        return None
+    return PILLOW_FORMATS.get(format_name.upper(), format_name.lower())
+
+
+def _raise_image_validation_error(error: BaseException) -> None:
+    raise ValueError(
+        "Image data must be a fully decodable supported raster image"
+    ) from error
+
+
+def _decompression_bomb_warning():
+    if Image is None:
+        return Warning
+    return getattr(Image, "DecompressionBombWarning", Warning)
+
+
+def _verify_pillow_image(
+    opener,
+    *,
+    expected_format: str,
+) -> None:
+    if Image is None:
+        raise ValueError("Pillow is required to validate image data")
+
+    configure_pillow_image_limits()
+    warning_type = _decompression_bomb_warning()
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", warning_type)
+            with opener() as image:
+                decoded_format = _pillow_format_key(getattr(image, "format", None))
+                if decoded_format and decoded_format != expected_format:
+                    raise ValueError("Image decoder format does not match image data")
+                image.verify()
+            with opener() as image:
+                decoded_format = _pillow_format_key(getattr(image, "format", None))
+                if decoded_format and decoded_format != expected_format:
+                    raise ValueError("Image decoder format does not match image data")
+                if getattr(image, "is_animated", False):
+                    image.seek(0)
+                image.load()
+                width, height = image.size
+                if width <= 0 or height <= 0:
+                    raise ValueError("Image dimensions must be positive")
+    except warning_type as e:
+        _raise_image_validation_error(e)
+    except (OSError, UnidentifiedImageError, SyntaxError, ValueError) as e:
+        _raise_image_validation_error(e)
+
+
+def validate_image_file(
+    path: Path,
+    *,
+    filename: str = "",
+    content_type: str = "",
+) -> str:
+    try:
+        with path.open("rb") as file:
+            header = file.read(512)
+    except OSError as e:
+        raise ValueError("Image data could not be read") from e
+
+    detected_format = validate_image_header_bytes(
+        header,
+        filename=filename,
+        content_type=content_type,
+    )
+    _verify_pillow_image(lambda: Image.open(path), expected_format=detected_format)
+    return detected_format
+
+
+def validate_image_bytes(
+    image_bytes: bytes,
+    *,
+    filename: str = "",
+    content_type: str = "",
+) -> str:
+    detected_format = validate_image_header_bytes(
+        image_bytes,
+        filename=filename,
+        content_type=content_type,
+    )
+    _verify_pillow_image(
+        lambda: Image.open(io.BytesIO(image_bytes)),
+        expected_format=detected_format,
+    )
     return detected_format
 
 
@@ -181,6 +300,13 @@ def get_image_dimensions(image_bytes: bytes) -> tuple[int, int] | None:
 
 def image_dimension_metadata(image_bytes: bytes) -> dict[str, int]:
     dimensions = get_image_dimensions(image_bytes)
+    if not dimensions and Image is not None:
+        configure_pillow_image_limits()
+        try:
+            with Image.open(io.BytesIO(image_bytes)) as image:
+                dimensions = image.size
+        except (OSError, UnidentifiedImageError, SyntaxError, ValueError):
+            dimensions = None
     if not dimensions:
         return {}
     width, height = dimensions
@@ -214,18 +340,8 @@ def safe_thumbnail_path(filename: str) -> Path | None:
     return _safe_path(filename, config.THUMBNAILS_DIR, {THUMBNAIL_EXTENSION})
 
 
-def save_image_to_disk(image_bytes: bytes, filename: str) -> Path:
-    validate_image_bytes(image_bytes, filename=filename)
-    path = safe_image_path(filename)
-    if not path:
-        raise ValueError(f"Invalid image filename: {filename}")
-    with open(path, "wb") as f:
-        f.write(image_bytes)
-    return path
-
-
 def save_image_to_temp(image_bytes: bytes, filename: str) -> Path:
-    validate_image_bytes(image_bytes, filename=filename)
+    validate_image_header_bytes(image_bytes, filename=filename)
     path = safe_image_path(filename)
     if not path:
         raise ValueError(f"Invalid image filename: {filename}")
@@ -241,6 +357,7 @@ def save_image_to_temp(image_bytes: bytes, filename: str) -> Path:
     try:
         with temp_file:
             temp_file.write(image_bytes)
+        validate_image_file(temp_path, filename=filename)
     except BaseException:
         temp_path.unlink(missing_ok=True)
         raise

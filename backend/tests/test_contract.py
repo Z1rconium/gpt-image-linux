@@ -3,11 +3,16 @@ import base64
 import io
 import json
 import logging
+import os
 import re
 import sqlite3
+import stat
+import sys
 import threading
 import time
+import types
 import zipfile
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -15,19 +20,75 @@ from fastapi.testclient import TestClient
 
 from backend.app import main as backend_main
 from backend.app.api import jobs
+from backend.app.api.routers import access as access_router
+from backend.app.api.routers import gallery as gallery_router
+from backend.app.api.routers import settings as settings_router
 from backend.app.api.routers import static as static_router
 from backend.app.api.jobs import EditImageSource
 from backend.app.core import settings as config
+from backend.app.integrations import r2_sync
 from backend.app.core.observability import metrics, record_job_stage_timing
-from backend.app.integrations.upstream_client import call_image_edit_api as ORIGINAL_CALL_IMAGE_EDIT_API
+from backend.app.integrations import session_pool
+from backend.app.integrations.upstream_client import (
+    call_image_generation_api as ORIGINAL_CALL_IMAGE_GENERATION_API,
+    call_image_edit_api as ORIGINAL_CALL_IMAGE_EDIT_API,
+    classify_probe_status,
+)
 from backend.app.repositories import storage
 from backend.app.schemas.models import EditRequest
 
 
 PNG_BYTES = base64.b64decode(
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4//8/AwAI/AL+X1N6AAAAAElFTkSuQmCC"
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg=="
 )
-JPEG_BYTES = b"\xff\xd8\xff\xd9"
+JPEG_BYTES = base64.b64decode(
+    "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAABAAEDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDi6KKK+ZP3E//Z"
+)
+CSRF_SOURCE_HEADERS = {"origin", "referer", "sec-fetch-site"}
+CSRF_PROTECTED_TEST_METHODS = {"POST", "PATCH", "DELETE"}
+
+
+class _CsrfTestClient:
+    def __init__(self, client: TestClient):
+        self._client = client
+
+    def __getattr__(self, name):
+        return getattr(self._client, name)
+
+    def _with_default_origin(self, method: str, kwargs: dict):
+        if method.upper() not in CSRF_PROTECTED_TEST_METHODS:
+            return kwargs
+
+        headers = dict(kwargs.get("headers") or {})
+        if not any(name.lower() in CSRF_SOURCE_HEADERS for name in headers):
+            headers["Origin"] = "http://testserver"
+            kwargs["headers"] = headers
+        return kwargs
+
+    def request(self, method: str, url: str, **kwargs):
+        return self._client.request(
+            method,
+            url,
+            **self._with_default_origin(method, kwargs),
+        )
+
+    def get(self, url: str, **kwargs):
+        return self._client.get(url, **kwargs)
+
+    def post(self, url: str, **kwargs):
+        return self.request("POST", url, **kwargs)
+
+    def patch(self, url: str, **kwargs):
+        return self.request("PATCH", url, **kwargs)
+
+    def delete(self, url: str, **kwargs):
+        return self.request("DELETE", url, **kwargs)
+
+
+@contextmanager
+def _test_client(**kwargs):
+    with TestClient(backend_main.app, **kwargs) as test_client:
+        yield _CsrfTestClient(test_client)
 
 
 def _configure_runtime(tmp_path: Path, *, access_key: str = "", allow_unauthenticated: bool = True):
@@ -39,11 +100,28 @@ def _configure_runtime(tmp_path: Path, *, access_key: str = "", allow_unauthenti
     config.IMAGES_DIR = str(images_dir)
     config.DATA_DIR = str(data_dir)
     config.DATABASE_FILE = str(data_dir / "app.sqlite3")
+    os.environ["TEST_DEFAULT_API_KEY"] = "default-key"
+    os.environ["TEST_OPENAI_API_KEY"] = "env-secret"
+    os.environ["TEST_PROMPT_OPTIMIZER_API_KEY"] = "optimizer-key"
+    os.environ["TEST_UPSTREAM_PROXY_URL"] = "socks5://user:secret@127.0.0.1:1080"
+    os.environ["TEST_WEBHOOK_URL"] = "https://hooks.example.com/services/top-secret?token=hidden"
+    os.environ["TEST_R2_ACCESS_KEY_ID"] = "r2-access-key"
+    os.environ["TEST_R2_SECRET_ACCESS_KEY"] = "r2-secret-key"
+    os.environ["ALLOW_UNAUTHENTICATED"] = "true" if allow_unauthenticated else "false"
+    os.environ["ACCESS_KEY"] = access_key
+    os.environ["ENABLE_METRICS"] = "false"
+    os.environ["GITHUB_REPO"] = "Z1rconium/gpt-image-linux"
+    os.environ["TRUSTED_PROXY_IPS"] = ""
+    os.environ["TRUST_PROXY_HEADERS"] = "false"
+
     config.DEFAULT_API_URL = "https://api.example.com"
-    config.DEFAULT_API_KEY = "default-key"
+    config.DEFAULT_API_KEY = "${TEST_DEFAULT_API_KEY}"
     config.DEFAULT_API_PATH = "/v1/images/generations"
     config.DEFAULT_RESPONSES_MODEL = "gpt-5.4"
     config.DEFAULT_UPSTREAM_SOCKS5_PROXY = ""
+    config.AIOHTTP_CONNECTION_LIMIT = 100
+    config.AIOHTTP_CONNECTION_LIMIT_PER_HOST = 20
+    config.ALLOW_PLAINTEXT_SECRETS = False
     config.ACCESS_KEY = access_key
     config.ALLOW_UNAUTHENTICATED = allow_unauthenticated
     config.ACCESS_KEY_COOKIE_NAME = "gpt_image_access"
@@ -53,6 +131,9 @@ def _configure_runtime(tmp_path: Path, *, access_key: str = "", allow_unauthenti
     config.ACCESS_LOCKOUT_SECONDS = 300
     config.IP_ALLOWLIST = ""
     config.TRUST_PROXY_HEADERS = False
+    config.TRUSTED_PROXY_IPS = ""
+    config.PUBLIC_ORIGIN = ""
+    config.ALLOWED_HOSTS = ""
     config.CSRF_ORIGIN_CHECK_ENABLED = True
     config.UPSTREAM_HOST_ALLOWLIST = ""
     config.WEBHOOK_HOST_ALLOWLIST = ""
@@ -60,7 +141,9 @@ def _configure_runtime(tmp_path: Path, *, access_key: str = "", allow_unauthenti
     config.WEBHOOK_TIMEOUT_SECONDS = 1
     config.WEBHOOK_MAX_ATTEMPTS = 1
     config.MAX_FILE_SIZE_MB = 50
+    config.MAX_JSON_BODY_MB = 1
     config.MAX_UPSTREAM_JSON_MB = 128
+    config.MAX_IMAGE_PIXELS = 100000000
     config.MAX_PENDING_EDIT_SOURCE_MB = config.MAX_FILE_SIZE_MB * 4
     config.IMPORT_ARCHIVE_MAX_MB = config.MAX_FILE_SIZE_MB * 20
     config.IMPORT_MAX_FILES = 500
@@ -71,15 +154,31 @@ def _configure_runtime(tmp_path: Path, *, access_key: str = "", allow_unauthenti
     config.MAX_QUEUED_GENERATE_JOBS = 20
     config.ENABLE_METRICS = False
     config.SLOW_GALLERY_QUERY_MS = 200
+    config.ENABLE_NGINX_ACCEL_REDIRECT = False
     config.THUMBNAILS_DIR = str(images_dir / "thumbs")
     config.THUMBNAIL_MAX_SIDE = 512
     config.PROMPT_OPTIMIZER_ENABLED = False
     config.PROMPT_OPTIMIZER_API_URL = ""
     config.PROMPT_OPTIMIZER_API_KEY = ""
     config.PROMPT_OPTIMIZER_MODEL = "gpt-4o-mini"
-    config.PROMPT_OPTIMIZER_TIMEOUT_SECONDS = 20
+    config.PROMPT_OPTIMIZER_TIMEOUT_SECONDS = 60
     config.PROMPT_OPTIMIZER_MAX_OUTPUT_CHARS = 4000
+    config.PROMPT_OPTIMIZER_MAX_RESPONSE_MB = 8
     config.PROMPT_OPTIMIZER_HOST_ALLOWLIST = ""
+    config.R2_BACKUP_ENABLED = False
+    config.R2_ENDPOINT_URL = ""
+    config.R2_BUCKET_NAME = ""
+    config.R2_REGION = "auto"
+    config.R2_KEY_PREFIX = "gallery/"
+    config.R2_ACCESS_KEY_ID = ""
+    config.R2_SECRET_ACCESS_KEY = ""
+    config.R2_SYNC_INTERVAL_HOURS = 0
+    config.MAX_SSE_SUBSCRIBERS_GLOBAL = 200
+    config.MAX_SSE_SUBSCRIBERS_PER_IP = 10
+    config.SSE_CONNECTION_TTL_SECONDS = 3600
+
+    import backend.app.core.security as _sec
+    _sec._trusted_proxy_networks = None
 
     storage.close_database_connections()
     storage._db_initialized = False
@@ -91,7 +190,7 @@ def _configure_runtime(tmp_path: Path, *, access_key: str = "", allow_unauthenti
 @pytest.fixture()
 def client(tmp_path):
     _configure_runtime(tmp_path)
-    with TestClient(backend_main.app) as test_client:
+    with _test_client() as test_client:
         yield test_client
 
 
@@ -125,6 +224,19 @@ def _wait_for_gallery_export_job(client: TestClient, job_id: str, timeout: float
             return last
         time.sleep(0.05)
     raise AssertionError(f"gallery export job {job_id} did not finish: {last}")
+
+
+def _wait_for_gallery_sync_job(client: TestClient, job_id: str, timeout: float = 5.0):
+    deadline = time.time() + timeout
+    last = None
+    while time.time() < deadline:
+        resp = client.get(f"/api/gallery/sync-jobs/{job_id}")
+        assert resp.status_code == 200
+        last = resp.json()
+        if last["status"] in {"success", "error"}:
+            return last
+        time.sleep(0.05)
+    raise AssertionError(f"gallery sync job {job_id} did not finish: {last}")
 
 
 def _fake_gallery_entry(image_id: str, prompt: str, size: str, filename: str):
@@ -532,7 +644,7 @@ def test_frontend_index_uses_csp_nonce(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(backend_main.app.state, "frontend_build_dir", build_dir, raising=False)
 
-    with TestClient(backend_main.app) as client:
+    with _test_client() as client:
         resp = client.get("/")
 
     assert resp.status_code == 200
@@ -540,15 +652,23 @@ def test_frontend_index_uses_csp_nonce(tmp_path, monkeypatch):
     csp = resp.headers["content-security-policy"]
     assert f"'nonce-{nonce}'" in csp
     assert f"script-src-elem 'self' 'nonce-{nonce}'" in csp
+    assert "script-src-attr 'none'" in csp
     assert "'unsafe-inline'" not in csp.split("script-src-elem", 1)[1].split(";", 1)[0]
+    assert "style-src 'self'" in csp
+    assert "style-src-attr 'unsafe-inline'" in csp
 
 
 def test_access_cookie_and_status(tmp_path):
     _configure_runtime(tmp_path, access_key="secret", allow_unauthenticated=False)
-    with TestClient(backend_main.app) as client:
+    with _test_client() as client:
         denied = client.get("/api/settings")
         assert denied.status_code == 401
         assert denied.json()["detail"] == "Access key required"
+
+        version = client.get("/api/version")
+        assert version.status_code == 401
+        latest_version = client.get("/api/version/latest")
+        assert latest_version.status_code == 401
 
         bad = client.post("/api/access", json={"access_key": "nope"})
         assert bad.status_code == 401
@@ -568,6 +688,30 @@ def test_access_cookie_and_status(tmp_path):
         assert status.json()["authenticated"] is True
         assert status.json()["expires_at"]
 
+        version_after_unlock = client.get("/api/version")
+        assert version_after_unlock.status_code == 200
+
+
+def test_access_token_signature_requires_configured_secret(monkeypatch):
+    from backend.app.core import security as auth_security
+
+    monkeypatch.setattr(config, "ACCESS_KEY", "")
+    monkeypatch.setattr(config, "DEFAULT_API_KEY", "")
+
+    with pytest.raises(RuntimeError, match="No signing secret available"):
+        auth_security.create_access_token()
+
+
+def test_allow_unauthenticated_startup_logs_warning(tmp_path, caplog):
+    _configure_runtime(tmp_path, access_key="", allow_unauthenticated=True)
+
+    caplog.set_level(logging.WARNING, logger="backend.app.api.app_state")
+    with _test_client():
+        pass
+
+    assert "ALLOW_UNAUTHENTICATED=true" in caplog.text
+    assert "without access-key authentication" in caplog.text
+
 
 def test_frontend_build_assets_are_available_before_access_unlock(tmp_path, monkeypatch):
     _configure_runtime(tmp_path, access_key="secret", allow_unauthenticated=False)
@@ -577,7 +721,7 @@ def test_frontend_build_assets_are_available_before_access_unlock(tmp_path, monk
     asset_path.write_text("console.log('ok');", encoding="utf-8")
     monkeypatch.setattr(backend_main.app.state, "frontend_build_dir", build_dir, raising=False)
 
-    with TestClient(backend_main.app) as client:
+    with _test_client() as client:
         asset = client.get("/_app/immutable/entry/app.js")
         api = client.get("/api/settings")
 
@@ -588,17 +732,124 @@ def test_frontend_build_assets_are_available_before_access_unlock(tmp_path, monk
 
 def test_access_lockout(tmp_path):
     _configure_runtime(tmp_path, access_key="secret", allow_unauthenticated=False)
-    with TestClient(backend_main.app, raise_server_exceptions=False) as client:
+    with _test_client(raise_server_exceptions=False) as client:
         for _ in range(config.ACCESS_MAX_FAILURES + 1):
             resp = client.post("/api/access", json={"access_key": "wrong"})
         assert resp.status_code == 429
         assert "Too many failed attempts" in resp.json()["detail"]
 
 
+def test_access_failures_stays_bounded_under_unique_ips(tmp_path, monkeypatch):
+    _configure_runtime(tmp_path, access_key="secret", allow_unauthenticated=False)
+    monkeypatch.setattr(access_router, "_ACCESS_FAILURES_MAX_SIZE", 3)
+    current_ip = {"value": "10.0.0.1"}
+    monkeypatch.setattr(
+        access_router.auth,
+        "get_client_ip",
+        lambda request: current_ip["value"],
+    )
+
+    with _test_client(raise_server_exceptions=False) as client:
+        for index in range(5):
+            current_ip["value"] = f"10.0.0.{index}"
+            resp = client.post("/api/access", json={"access_key": "wrong"})
+            assert resp.status_code == 401
+
+        failures = backend_main.app.state.access_failures
+        assert list(failures.keys()) == ["10.0.0.2", "10.0.0.3", "10.0.0.4"]
+        assert len(failures) == 3
+
+
+def test_session_pool_close_all_closes_retired_sessions(monkeypatch):
+    created_sessions = []
+
+    class FakeSession:
+        def __init__(self, timeout=None, connector=None):
+            self.timeout = timeout
+            self.connector = connector
+            self.closed = False
+            self.close_calls = 0
+            created_sessions.append(self)
+
+        async def close(self):
+            self.close_calls += 1
+            self.closed = True
+
+    monkeypatch.setattr(session_pool.aiohttp, "ClientSession", FakeSession)
+    monkeypatch.setattr(session_pool, "_build_socks5_connector", lambda proxy: proxy)
+
+    pool = session_pool.SessionPool()
+    first = pool.get(timeout_kind=session_pool.TIMEOUT_UPSTREAM, socks5_proxy="socks5://a")
+    second = pool.get(timeout_kind=session_pool.TIMEOUT_UPSTREAM, socks5_proxy="socks5://b")
+
+    assert first is created_sessions[0]
+    assert second is created_sessions[1]
+    assert not first.closed
+
+    asyncio.run(pool.close_all())
+
+    assert first.closed is True
+    assert second.closed is True
+    assert first.close_calls == 1
+    assert second.close_calls == 1
+
+
+def test_session_pool_passes_connector_limits(monkeypatch):
+    created_sessions = []
+    safe_connector_kwargs = {}
+    socks_connector_kwargs = {}
+    config.AIOHTTP_CONNECTION_LIMIT = 77
+    config.AIOHTTP_CONNECTION_LIMIT_PER_HOST = 9
+
+    class FakeSession:
+        def __init__(self, timeout=None, connector=None):
+            self.timeout = timeout
+            self.connector = connector
+            self.closed = False
+            created_sessions.append(self)
+
+        async def close(self):
+            self.closed = True
+
+    class FakeProxyConnector:
+        @classmethod
+        def from_url(cls, proxy_url, **kwargs):
+            socks_connector_kwargs["proxy_url"] = proxy_url
+            socks_connector_kwargs.update(kwargs)
+            return "socks-connector"
+
+    monkeypatch.setattr(session_pool.aiohttp, "ClientSession", FakeSession)
+    monkeypatch.setattr(
+        session_pool,
+        "create_safe_connector",
+        lambda **kwargs: safe_connector_kwargs.update(kwargs) or "safe-connector",
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "aiohttp_socks",
+        types.SimpleNamespace(ProxyConnector=FakeProxyConnector),
+    )
+
+    pool = session_pool.SessionPool()
+    safe_session = pool.get()
+    socks_session = pool.get(socks5_proxy="socks5://proxy")
+
+    assert safe_session.connector == "safe-connector"
+    assert safe_connector_kwargs == {"limit": 77, "limit_per_host": 9}
+    assert socks_session.connector == "socks-connector"
+    assert socks_connector_kwargs == {
+        "proxy_url": "socks5://proxy",
+        "limit": 77,
+        "limit_per_host": 9,
+    }
+
+    asyncio.run(pool.close_all())
+
+
 def test_ip_allowlist_blocks_api_but_not_health(tmp_path):
     _configure_runtime(tmp_path)
     config.IP_ALLOWLIST = "10.0.0.1"
-    with TestClient(backend_main.app, raise_server_exceptions=False) as client:
+    with _test_client(raise_server_exceptions=False) as client:
         health = client.get("/health")
         assert health.status_code == 200
         blocked = client.get("/api/version")
@@ -618,7 +869,7 @@ def test_csrf_origin_check_allows_same_origin_state_changes(client):
             "active_preset_id": active_preset_id,
             "preset_name": "Same Origin",
             "api_url": "https://api.example.com",
-            "api_key": "same-origin-key",
+            "api_key": "${TEST_OPENAI_API_KEY}",
             "api_path": "/v1/images/generations",
         },
     )
@@ -644,7 +895,7 @@ def test_csrf_origin_check_allows_same_origin_state_changes(client):
                     "active_preset_id": "default",
                     "preset_name": "Bad Origin",
                     "api_url": "https://api.example.com",
-                    "api_key": "bad-origin-key",
+                    "api_key": "${TEST_OPENAI_API_KEY}",
                     "api_path": "/v1/images/generations",
                 }
             },
@@ -665,7 +916,7 @@ def test_csrf_origin_check_blocks_cross_site_state_changes(client, method, path,
 def test_csrf_origin_check_allows_same_origin_fetch_metadata_through_dev_proxy(tmp_path):
     _configure_runtime(tmp_path, access_key="secret", allow_unauthenticated=False)
 
-    with TestClient(backend_main.app) as client:
+    with _test_client() as client:
         resp = client.post(
             "/api/access",
             headers={
@@ -678,6 +929,62 @@ def test_csrf_origin_check_allows_same_origin_fetch_metadata_through_dev_proxy(t
 
     assert resp.status_code == 200
     assert resp.json()["authenticated"] is True
+
+
+def test_csrf_origin_check_blocks_missing_source_on_access_unlock(tmp_path):
+    _configure_runtime(tmp_path, access_key="secret", allow_unauthenticated=False)
+
+    with TestClient(backend_main.app) as client:
+        resp = client.post("/api/access", json={"access_key": "secret"})
+
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "CSRF origin check failed"
+
+
+def test_host_allowlist_blocks_unknown_host_even_with_same_origin_fetch_metadata(tmp_path):
+    _configure_runtime(tmp_path, access_key="secret", allow_unauthenticated=False)
+    config.ALLOWED_HOSTS = "panel.example.com"
+
+    with _test_client() as client:
+        resp = client.post(
+            "/api/access",
+            headers={
+                "Host": "evil.example",
+                "Origin": "https://evil.example",
+                "Sec-Fetch-Site": "same-origin",
+            },
+            json={"access_key": "secret"},
+        )
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "Host is not allowed"
+
+
+def test_host_allowlist_blocks_untrusted_forwarded_host(client):
+    config.PUBLIC_ORIGIN = "https://panel.example.com"
+    config.TRUST_PROXY_HEADERS = True
+    config.TRUSTED_PROXY_IPS = "127.0.0.0/8"
+    import backend.app.core.security as _sec
+    _sec._trusted_proxy_networks = None
+    original_is_trusted = _sec.is_trusted_proxy
+    _sec.is_trusted_proxy = lambda _host: True
+
+    try:
+        resp = client.post(
+            "/api/settings/presets",
+            headers={
+                "Host": "panel.example.com",
+                "Origin": "https://panel.example.com",
+                "X-Forwarded-Proto": "https",
+                "X-Forwarded-Host": "evil.example",
+            },
+            json={"name": "Proxy Preset"},
+        )
+    finally:
+        _sec.is_trusted_proxy = original_is_trusted
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "Forwarded host is not allowed"
 
 
 def test_csrf_origin_check_does_not_block_get(client):
@@ -699,19 +1006,76 @@ def test_csrf_origin_check_uses_referer_when_origin_is_absent(client):
 
 def test_csrf_origin_check_respects_trusted_forwarded_proto(client):
     config.TRUST_PROXY_HEADERS = True
+    config.TRUSTED_PROXY_IPS = "127.0.0.0/8"
+    import backend.app.core.security as _sec
+    _sec._trusted_proxy_networks = None
+    # TestClient uses "testclient" as client host; patch is_trusted_proxy to accept it
+    original_is_trusted = _sec.is_trusted_proxy
+    _sec.is_trusted_proxy = lambda _host: True
 
+    try:
+        resp = client.post(
+            "/api/settings/presets",
+            headers={
+                "Host": "127.0.0.1:9090",
+                "Origin": "https://panel.example.com",
+                "X-Forwarded-Proto": "https",
+                "X-Forwarded-Host": "panel.example.com",
+            },
+            json={"name": "Proxy Preset"},
+        )
+
+        assert resp.status_code == 200
+    finally:
+        _sec.is_trusted_proxy = original_is_trusted
+
+
+def test_json_body_limit_rejects_oversized_json(client):
+    config.MAX_JSON_BODY_MB = 1
     resp = client.post(
-        "/api/settings/presets",
-        headers={
-            "Host": "127.0.0.1:9090",
-            "Origin": "https://panel.example.com",
-            "X-Forwarded-Proto": "https",
-            "X-Forwarded-Host": "panel.example.com",
-        },
-        json={"name": "Proxy Preset"},
+        "/api/generate",
+        content=json.dumps({"prompt": "x" * (1024 * 1024 + 1)}),
+        headers={"Content-Type": "application/json"},
     )
 
-    assert resp.status_code == 200
+    assert resp.status_code == 413
+    assert resp.json()["detail"] == "Request body too large"
+
+
+def test_request_models_forbid_extra_fields_and_require_prompt(client):
+    extra = client.post(
+        "/api/generate",
+        json={"prompt": "valid", "unexpected": True},
+    )
+    empty_prompt = client.post(
+        "/api/generate",
+        json={"prompt": ""},
+    )
+
+    assert extra.status_code == 422
+    assert empty_prompt.status_code == 422
+
+
+def test_settings_rejects_upstream_url_userinfo_query_and_fragment(client):
+    settings = client.get("/api/settings").json()
+    active_preset_id = settings["active_preset_id"]
+
+    for api_url in (
+        "https://user:secret@api.example.com",
+        "https://api.example.com?token=secret",
+        "https://api.example.com#secret",
+    ):
+        resp = client.post(
+            "/api/settings",
+            json={
+                "active_preset_id": active_preset_id,
+                "preset_name": "Bad URL",
+                "api_url": api_url,
+                "api_key": "${TEST_OPENAI_API_KEY}",
+                "api_path": "/v1/images/generations",
+            },
+        )
+        assert resp.status_code == 422
 
 
 def test_settings_and_presets(client):
@@ -721,7 +1085,9 @@ def test_settings_and_presets(client):
     assert body["presets"]
     assert body["active_preset_id"]
     assert body["default_model"] == "gpt-image-2"
+    assert body["default_response_format"] == "url"
     assert body["presets"][0]["default_model"] == "gpt-image-2"
+    assert body["presets"][0]["default_response_format"] == "url"
 
     updated = client.post(
         "/api/settings",
@@ -729,14 +1095,16 @@ def test_settings_and_presets(client):
             "active_preset_id": body["active_preset_id"],
             "preset_name": "Primary",
             "api_url": "https://api.example.com",
-            "api_key": "new-key",
+            "api_key": "${TEST_OPENAI_API_KEY}",
             "api_path": "/v1/responses",
             "default_model": "gpt-image-2-preview",
+            "default_response_format": "b64_json",
         },
     )
     assert updated.status_code == 200
     assert updated.json()["api_path"] == "/v1/responses"
     assert updated.json()["default_model"] == "gpt-image-2-preview"
+    assert updated.json()["default_response_format"] == "b64_json"
 
     chat_updated = client.post(
         "/api/settings",
@@ -744,18 +1112,31 @@ def test_settings_and_presets(client):
             "active_preset_id": body["active_preset_id"],
             "preset_name": "Primary",
             "api_url": "https://api.example.com",
-            "api_key": "new-key",
+            "api_key": "${TEST_OPENAI_API_KEY}",
             "api_path": "/v1/chat/completions",
         },
     )
     assert chat_updated.status_code == 200
     assert chat_updated.json()["api_path"] == "/v1/chat/completions"
     assert chat_updated.json()["default_model"] == "gpt-image-2-preview"
+    assert chat_updated.json()["default_response_format"] == "b64_json"
 
     created = client.post("/api/settings/presets", json={"name": "Alt"})
     assert created.status_code == 200
     assert len(created.json()["presets"]) == 2
     assert created.json()["default_model"] == "gpt-image-2-preview"
+    assert created.json()["default_response_format"] == "b64_json"
+
+    deleted = client.delete(f"/api/settings/presets/{created.json()['active_preset_id']}")
+    assert deleted.status_code == 200
+    assert len(deleted.json()["presets"]) == 1
+    assert deleted.json()["active_preset_id"] == body["active_preset_id"]
+    assert all(preset["name"] != "Alt" for preset in deleted.json()["presets"])
+
+    reloaded = client.get("/api/settings")
+    assert reloaded.status_code == 200
+    assert len(reloaded.json()["presets"]) == 1
+    assert all(preset["name"] != "Alt" for preset in reloaded.json()["presets"])
 
 
 def test_build_upstream_url_accepts_openai_style_v1_base():
@@ -793,22 +1174,16 @@ def test_settings_global_socks5_proxy_save_mask_preserve_and_clear(client):
         "/api/settings",
         json={
             **base_payload,
-            "upstream_socks5_proxy": "socks5://user:secret@127.0.0.1:1080/",
+            "upstream_socks5_proxy": "${TEST_UPSTREAM_PROXY_URL}",
         },
     )
 
     assert updated.status_code == 200
     updated_body = updated.json()
     assert updated_body["has_upstream_socks5_proxy"] is True
-    assert (
-        updated_body["upstream_socks5_proxy_masked"]
-        == "socks5://user:***@127.0.0.1:1080"
-    )
-    assert "secret" not in json.dumps(updated_body)
-    assert (
-        storage.load_settings()["upstream_socks5_proxy"]
-        == "socks5://user:secret@127.0.0.1:1080"
-    )
+    assert updated_body["upstream_socks5_proxy_masked"] == "${TEST_UPSTREAM_PROXY_URL}"
+    assert "user:secret" not in json.dumps(updated_body)
+    assert storage.load_settings()["upstream_socks5_proxy"] == "${TEST_UPSTREAM_PROXY_URL}"
 
     preserved = client.post(
         "/api/settings",
@@ -818,10 +1193,7 @@ def test_settings_global_socks5_proxy_save_mask_preserve_and_clear(client):
         },
     )
     assert preserved.status_code == 200
-    assert (
-        storage.load_settings()["upstream_socks5_proxy"]
-        == "socks5://user:secret@127.0.0.1:1080"
-    )
+    assert storage.load_settings()["upstream_socks5_proxy"] == "${TEST_UPSTREAM_PROXY_URL}"
 
     cleared = client.post(
         "/api/settings",
@@ -847,30 +1219,24 @@ def test_settings_global_webhook_url_save_mask_preserve_clear_and_use(client, mo
         "/api/settings",
         json={
             **base_payload,
-            "webhook_url": "https://hooks.example.com/services/top-secret?token=hidden",
+            "webhook_url": "${TEST_WEBHOOK_URL}",
         },
     )
 
     assert updated.status_code == 200
     updated_body = updated.json()
     assert updated_body["has_webhook_url"] is True
-    assert updated_body["webhook_url_masked"] == "https://hooks.example.com/***?***"
+    assert updated_body["webhook_url_masked"] == "${TEST_WEBHOOK_URL}"
     assert "top-secret" not in json.dumps(updated_body)
     assert "hidden" not in json.dumps(updated_body)
-    assert (
-        storage.load_settings()["webhook_url"]
-        == "https://hooks.example.com/services/top-secret?token=hidden"
-    )
+    assert storage.load_settings()["webhook_url"] == "${TEST_WEBHOOK_URL}"
 
     preserved = client.post(
         "/api/settings",
         json={**base_payload, "webhook_url": updated_body["webhook_url_masked"]},
     )
     assert preserved.status_code == 200
-    assert (
-        storage.load_settings()["webhook_url"]
-        == "https://hooks.example.com/services/top-secret?token=hidden"
-    )
+    assert storage.load_settings()["webhook_url"] == "${TEST_WEBHOOK_URL}"
 
     created = client.post("/api/settings/presets", json={"name": "Alt webhook preset"})
     assert created.status_code == 200
@@ -906,6 +1272,77 @@ def test_settings_global_webhook_url_save_mask_preserve_clear_and_use(client, mo
     assert storage.load_settings()["webhook_url"] == ""
 
 
+@pytest.mark.parametrize(
+    ("payload", "detail"),
+    [
+        (
+            {
+                "preset_name": "Plain API key",
+                "api_url": "https://api.example.com",
+                "api_key": "plain-secret",
+                "api_path": "/v1/images/generations",
+            },
+            "API key must use ${ENV_VAR_NAME} unless ALLOW_PLAINTEXT_SECRETS=true.",
+        ),
+        (
+            {
+                "preset_name": "Plain proxy",
+                "api_url": "https://api.example.com",
+                "api_key": "${TEST_OPENAI_API_KEY}",
+                "api_path": "/v1/images/generations",
+                "upstream_socks5_proxy": "socks5://user:secret@127.0.0.1:1080",
+            },
+            "SOCKS5 proxy URL must use ${ENV_VAR_NAME} unless ALLOW_PLAINTEXT_SECRETS=true.",
+        ),
+        (
+            {
+                "preset_name": "Plain webhook",
+                "api_url": "https://api.example.com",
+                "api_key": "${TEST_OPENAI_API_KEY}",
+                "api_path": "/v1/images/generations",
+                "webhook_url": "https://hooks.example.com/services/top-secret?token=hidden",
+            },
+            "Webhook URL must use ${ENV_VAR_NAME} unless ALLOW_PLAINTEXT_SECRETS=true.",
+        ),
+    ],
+)
+def test_settings_rejects_plaintext_secrets_by_default(client, payload, detail):
+    settings = client.get("/api/settings").json()
+    resp = client.post(
+        "/api/settings",
+        json={
+            "active_preset_id": settings["active_preset_id"],
+            **payload,
+        },
+    )
+
+    assert resp.status_code == 422
+    assert detail in resp.text
+
+
+def test_settings_can_opt_in_to_plaintext_secret_storage(client):
+    config.ALLOW_PLAINTEXT_SECRETS = True
+    settings = client.get("/api/settings").json()
+    resp = client.post(
+        "/api/settings",
+        json={
+            "active_preset_id": settings["active_preset_id"],
+            "preset_name": "Plaintext allowed",
+            "api_url": "https://api.example.com",
+            "api_key": "plain-secret",
+            "api_path": "/v1/images/generations",
+            "upstream_socks5_proxy": "socks5://user:secret@127.0.0.1:1080",
+            "webhook_url": "https://hooks.example.com/services/top-secret?token=hidden",
+        },
+    )
+
+    assert resp.status_code == 200
+    persisted = storage.load_settings()
+    assert persisted["presets"][0]["api_key"] == "plain-secret"
+    assert persisted["upstream_socks5_proxy"] == "socks5://user:secret@127.0.0.1:1080"
+    assert persisted["webhook_url"] == "https://hooks.example.com/services/top-secret?token=hidden"
+
+
 def _settings_payload(settings: dict, **overrides):
     payload = {
         "active_preset_id": settings["active_preset_id"],
@@ -923,6 +1360,7 @@ def test_prompt_optimizer_settings_mask_preserve_and_clear(client):
     settings = client.get("/api/settings").json()
     assert settings["prompt_optimizer"]["enabled"] is False
     assert settings["prompt_optimizer"]["has_api_key"] is False
+    assert settings["prompt_optimizer"]["timeout_seconds"] == 60
 
     updated = client.post(
         "/api/settings",
@@ -932,7 +1370,8 @@ def test_prompt_optimizer_settings_mask_preserve_and_clear(client):
                 "enabled": True,
                 "api_url": "https://example.com/v1/chat/completions",
                 "model": "gpt-4o-mini",
-                "api_key": "optimizer-secret",
+                "timeout_seconds": 75,
+                "api_key": "${TEST_PROMPT_OPTIMIZER_API_KEY}",
             },
         ),
     )
@@ -943,10 +1382,13 @@ def test_prompt_optimizer_settings_mask_preserve_and_clear(client):
     assert optimizer["enabled"] is True
     assert optimizer["api_url"] == "https://example.com/v1/chat/completions"
     assert optimizer["model"] == "gpt-4o-mini"
+    assert optimizer["timeout_seconds"] == 75
     assert optimizer["has_api_key"] is True
-    assert optimizer["api_key_source"] == "stored"
+    assert optimizer["api_key_source"] == "env"
+    assert optimizer["api_key_env_var"] == "TEST_PROMPT_OPTIMIZER_API_KEY"
     assert "optimizer-secret" not in json.dumps(body)
-    assert storage.load_prompt_optimizer_settings()["api_key"] == "optimizer-secret"
+    assert storage.load_prompt_optimizer_settings()["api_key"] == "${TEST_PROMPT_OPTIMIZER_API_KEY}"
+    assert storage.load_prompt_optimizer_settings()["timeout_seconds"] == 75
 
     preserved = client.post(
         "/api/settings",
@@ -956,12 +1398,14 @@ def test_prompt_optimizer_settings_mask_preserve_and_clear(client):
                 "enabled": True,
                 "api_url": "https://example.com/v1/chat/completions",
                 "model": "gpt-4o-mini",
-                "api_key": "********",
+                "timeout_seconds": 90,
+                "api_key": "${TEST_PROMPT_OPTIMIZER_API_KEY}",
             },
         ),
     )
     assert preserved.status_code == 200
-    assert storage.load_prompt_optimizer_settings()["api_key"] == "optimizer-secret"
+    assert storage.load_prompt_optimizer_settings()["api_key"] == "${TEST_PROMPT_OPTIMIZER_API_KEY}"
+    assert storage.load_prompt_optimizer_settings()["timeout_seconds"] == 90
 
     cleared = client.post(
         "/api/settings",
@@ -971,6 +1415,7 @@ def test_prompt_optimizer_settings_mask_preserve_and_clear(client):
                 "enabled": False,
                 "api_url": "",
                 "model": "gpt-4o-mini",
+                "timeout_seconds": 60,
                 "api_key": "",
             },
         ),
@@ -978,6 +1423,362 @@ def test_prompt_optimizer_settings_mask_preserve_and_clear(client):
     assert cleared.status_code == 200
     assert cleared.json()["prompt_optimizer"]["has_api_key"] is False
     assert storage.load_prompt_optimizer_settings()["api_key"] == ""
+
+    invalid_timeout = client.post(
+        "/api/settings",
+        json=_settings_payload(
+            cleared.json(),
+            prompt_optimizer={
+                "enabled": False,
+                "api_url": "",
+                "model": "gpt-4o-mini",
+                "timeout_seconds": 0,
+                "api_key": "",
+            },
+        ),
+    )
+    assert invalid_timeout.status_code == 422
+
+
+def test_prompt_optimizer_rejects_plaintext_api_key_by_default(client):
+    settings = client.get("/api/settings").json()
+    resp = client.post(
+        "/api/settings",
+        json=_settings_payload(
+            settings,
+            prompt_optimizer={
+                "enabled": True,
+                "api_url": "https://example.com/v1/chat/completions",
+                "model": "gpt-4o-mini",
+                "timeout_seconds": 75,
+                "api_key": "optimizer-secret",
+            },
+        ),
+    )
+
+    assert resp.status_code == 422
+    assert "Prompt optimizer API key must use ${ENV_VAR_NAME} unless ALLOW_PLAINTEXT_SECRETS=true." in resp.text
+
+
+def test_r2_backup_settings_mask_preserve_and_clear(client):
+    settings = client.get("/api/settings").json()
+    assert settings["r2_backup"]["enabled"] is False
+    assert settings["r2_backup"]["key_prefix"] == "gallery/"
+    assert settings["r2_backup"]["sync_interval_hours"] == 0
+
+    updated = client.post(
+        "/api/settings",
+        json=_settings_payload(
+            settings,
+            r2_backup={
+                "enabled": True,
+                "endpoint_url": "https://account.r2.cloudflarestorage.com",
+                "bucket_name": "image-backups",
+                "region": "auto",
+                "key_prefix": "gallery-test",
+                "sync_interval_hours": 6,
+                "access_key_id": "${TEST_R2_ACCESS_KEY_ID}",
+                "secret_access_key": "${TEST_R2_SECRET_ACCESS_KEY}",
+            },
+        ),
+    )
+
+    assert updated.status_code == 200
+    body = updated.json()
+    r2 = body["r2_backup"]
+    assert r2["enabled"] is True
+    assert r2["endpoint_url"] == "https://account.r2.cloudflarestorage.com"
+    assert r2["bucket_name"] == "image-backups"
+    assert r2["key_prefix"] == "gallery-test/"
+    assert r2["sync_interval_hours"] == 6
+    assert r2["has_access_key_id"] is True
+    assert r2["access_key_id_source"] == "env"
+    assert r2["access_key_id_env_var"] == "TEST_R2_ACCESS_KEY_ID"
+    assert r2["has_secret_access_key"] is True
+    assert r2["secret_access_key_source"] == "env"
+    assert r2["secret_access_key_env_var"] == "TEST_R2_SECRET_ACCESS_KEY"
+    assert "r2-secret-key" not in json.dumps(body)
+    assert storage.load_r2_backup_settings()["access_key_id"] == "${TEST_R2_ACCESS_KEY_ID}"
+    assert storage.load_r2_backup_settings()["secret_access_key"] == "${TEST_R2_SECRET_ACCESS_KEY}"
+
+    preserved = client.post(
+        "/api/settings",
+        json=_settings_payload(
+            body,
+            r2_backup={
+                "enabled": True,
+                "endpoint_url": "https://account.r2.cloudflarestorage.com",
+                "bucket_name": "image-backups",
+                "region": "auto",
+                "key_prefix": "gallery-test/",
+                "sync_interval_hours": 6,
+                "access_key_id": "********",
+                "secret_access_key": "********",
+            },
+        ),
+    )
+    assert preserved.status_code == 200
+    assert storage.load_r2_backup_settings()["access_key_id"] == "${TEST_R2_ACCESS_KEY_ID}"
+    assert storage.load_r2_backup_settings()["secret_access_key"] == "${TEST_R2_SECRET_ACCESS_KEY}"
+
+    cleared = client.post(
+        "/api/settings",
+        json=_settings_payload(
+            preserved.json(),
+            r2_backup={
+                "enabled": False,
+                "endpoint_url": "",
+                "bucket_name": "",
+                "region": "auto",
+                "key_prefix": "gallery/",
+                "sync_interval_hours": 0,
+                "access_key_id": "",
+                "secret_access_key": "",
+            },
+        ),
+    )
+    assert cleared.status_code == 200
+    assert cleared.json()["r2_backup"]["has_access_key_id"] is False
+    assert cleared.json()["r2_backup"]["has_secret_access_key"] is False
+    assert cleared.json()["r2_backup"]["sync_interval_hours"] == 0
+    assert storage.load_r2_backup_settings()["access_key_id"] == ""
+    assert storage.load_r2_backup_settings()["secret_access_key"] == ""
+
+
+def test_r2_backup_settings_rejects_invalid_sync_interval(client):
+    settings = client.get("/api/settings").json()
+
+    negative = client.post(
+        "/api/settings",
+        json=_settings_payload(settings, r2_backup={"sync_interval_hours": -1}),
+    )
+    assert negative.status_code == 422
+
+    non_numeric = client.post(
+        "/api/settings",
+        json=_settings_payload(settings, r2_backup={"sync_interval_hours": "6"}),
+    )
+    assert non_numeric.status_code == 422
+
+
+def test_r2_env_defaults_fill_empty_persisted_settings(tmp_path, monkeypatch):
+    _configure_runtime(tmp_path)
+    storage.save_r2_backup_settings(
+        {
+            "enabled": False,
+            "endpoint_url": "",
+            "bucket_name": "",
+            "region": "auto",
+            "key_prefix": "gallery/",
+            "access_key_id": "",
+            "secret_access_key": "",
+        }
+    )
+
+    monkeypatch.setenv("R2_ACCESS_KEY_ID", "env-r2-access")
+    monkeypatch.setenv("R2_SECRET_ACCESS_KEY", "env-r2-secret")
+    config.R2_BACKUP_ENABLED = True
+    config.R2_ENDPOINT_URL = "https://account.r2.cloudflarestorage.com"
+    config.R2_BUCKET_NAME = "env-image-backups"
+    config.R2_ACCESS_KEY_ID = "env-r2-access"
+    config.R2_SECRET_ACCESS_KEY = "env-r2-secret"
+
+    settings = storage.load_r2_backup_settings()
+    assert settings["enabled"] is True
+    assert settings["endpoint_url"] == "https://account.r2.cloudflarestorage.com"
+    assert settings["bucket_name"] == "env-image-backups"
+    assert settings["access_key_id"] == "${R2_ACCESS_KEY_ID}"
+    assert settings["secret_access_key"] == "${R2_SECRET_ACCESS_KEY}"
+
+    with storage._connect() as conn:
+        raw = storage._get_setting_value(conn, storage.R2_BACKUP_SETTINGS_KEY)
+    assert raw
+    persisted = json.loads(raw)
+    assert persisted["enabled"] is True
+    assert persisted["endpoint_url"] == "https://account.r2.cloudflarestorage.com"
+    assert persisted["bucket_name"] == "env-image-backups"
+    assert persisted["access_key_id"] == "${R2_ACCESS_KEY_ID}"
+    assert persisted["secret_access_key"] == "${R2_SECRET_ACCESS_KEY}"
+
+
+def test_r2_sync_interval_env_default_and_invalid_normalization(tmp_path):
+    _configure_runtime(tmp_path)
+    config.R2_SYNC_INTERVAL_HOURS = 4
+
+    settings = storage.load_r2_backup_settings()
+    assert settings["sync_interval_hours"] == 4
+
+    storage.save_r2_backup_settings({"sync_interval_hours": "bad"})
+    assert storage.load_r2_backup_settings()["sync_interval_hours"] == 0
+
+    storage.save_r2_backup_settings({"sync_interval_hours": -2})
+    assert storage.load_r2_backup_settings()["sync_interval_hours"] == 0
+
+    storage.save_r2_backup_settings({"sync_interval_hours": 1.5})
+    assert storage.load_r2_backup_settings()["sync_interval_hours"] == 0
+
+
+def test_missing_r2_settings_key_persists_env_defaults_to_sqlite(tmp_path, monkeypatch):
+    _configure_runtime(tmp_path)
+    storage.save_settings(
+        {
+            "active_preset_id": "default",
+            "upstream_socks5_proxy": "",
+            "webhook_url": "",
+            "presets": [
+                {
+                    "id": "default",
+                    "name": "Default",
+                    "api_url": "https://api.example.com",
+                    "api_key": "${TEST_DEFAULT_API_KEY}",
+                    "api_path": "/v1/images/generations",
+                    "default_model": "gpt-image-2",
+                    "default_response_format": "url",
+                }
+            ],
+            "prompt_optimizer": {
+                "enabled": False,
+                "api_url": "",
+                "api_key": "",
+                "model": "gpt-4o-mini",
+                "timeout_seconds": 60,
+            },
+        }
+    )
+    with storage._connect() as conn:
+        conn.execute(
+            "DELETE FROM settings_kv WHERE key = ?",
+            (storage.R2_BACKUP_SETTINGS_KEY,),
+        )
+        conn.commit()
+
+    monkeypatch.setenv("R2_ACCESS_KEY_ID", "env-r2-access")
+    monkeypatch.setenv("R2_SECRET_ACCESS_KEY", "env-r2-secret")
+    config.R2_BACKUP_ENABLED = True
+    config.R2_ENDPOINT_URL = "https://account.r2.cloudflarestorage.com"
+    config.R2_BUCKET_NAME = "env-image-backups"
+    config.R2_REGION = "auto"
+    config.R2_KEY_PREFIX = "gallery-env/"
+    config.R2_ACCESS_KEY_ID = "env-r2-access"
+    config.R2_SECRET_ACCESS_KEY = "env-r2-secret"
+    config.R2_SYNC_INTERVAL_HOURS = 8
+
+    settings = storage.load_settings()
+    assert settings["r2_backup"]["enabled"] is True
+    assert settings["r2_backup"]["bucket_name"] == "env-image-backups"
+    assert settings["r2_backup"]["access_key_id"] == "${R2_ACCESS_KEY_ID}"
+    assert settings["r2_backup"]["secret_access_key"] == "${R2_SECRET_ACCESS_KEY}"
+    assert settings["r2_backup"]["sync_interval_hours"] == 8
+
+    with storage._connect() as conn:
+        raw = storage._get_setting_value(conn, storage.R2_BACKUP_SETTINGS_KEY)
+    assert raw
+    persisted = json.loads(raw)
+    assert persisted["enabled"] is True
+    assert persisted["bucket_name"] == "env-image-backups"
+    assert persisted["sync_interval_hours"] == 8
+    assert persisted["key_prefix"] == "gallery-env/"
+    assert persisted["access_key_id"] == "${R2_ACCESS_KEY_ID}"
+    assert persisted["secret_access_key"] == "${R2_SECRET_ACCESS_KEY}"
+
+
+def test_r2_health_uses_draft_settings_and_preserves_masked_credentials(client, monkeypatch):
+    settings = client.get("/api/settings").json()
+    saved = client.post(
+        "/api/settings",
+        json=_settings_payload(
+            settings,
+            r2_backup={
+                "enabled": True,
+                "endpoint_url": "https://account.r2.cloudflarestorage.com",
+                "bucket_name": "image-backups",
+                "region": "auto",
+                "key_prefix": "gallery/",
+                "access_key_id": "${TEST_R2_ACCESS_KEY_ID}",
+                "secret_access_key": "${TEST_R2_SECRET_ACCESS_KEY}",
+            },
+        ),
+    )
+    assert saved.status_code == 200
+
+    seen: dict[str, dict] = {}
+
+    def fake_probe(draft):
+        seen["draft"] = draft
+        return {
+            "status": "ok",
+            "checks": [{"name": "configuration", "status": "ok", "message": "ok"}],
+        }
+
+    monkeypatch.setattr(settings_router.r2_sync, "probe_r2_settings", fake_probe)
+    health = client.post(
+        "/api/settings/r2/health",
+        json={
+            "enabled": True,
+            "endpoint_url": "https://draft.r2.cloudflarestorage.com",
+            "bucket_name": "draft-backups",
+            "region": "auto",
+            "key_prefix": "draft/",
+            "access_key_id": "********",
+            "secret_access_key": "********",
+        },
+    )
+
+    assert health.status_code == 200
+    assert health.json()["status"] == "ok"
+    assert health.json()["checks"][0]["name"] == "configuration"
+    assert seen["draft"]["endpoint_url"] == "https://draft.r2.cloudflarestorage.com"
+    assert seen["draft"]["bucket_name"] == "draft-backups"
+    assert seen["draft"]["access_key_id"] == "${TEST_R2_ACCESS_KEY_ID}"
+    assert seen["draft"]["secret_access_key"] == "${TEST_R2_SECRET_ACCESS_KEY}"
+
+
+def test_storage_secures_data_directory_and_database_permissions(client):
+    client.get("/api/settings")
+
+    data_dir_mode = stat.S_IMODE(Path(config.DATA_DIR).stat().st_mode)
+    database_mode = stat.S_IMODE(Path(config.DATABASE_FILE).stat().st_mode)
+
+    assert data_dir_mode == 0o700
+    assert database_mode == 0o600
+
+
+def test_prompt_optimizer_system_prompt_file_roundtrip(client):
+    from backend.app.integrations.prompt_optimizer_client import (
+        PROMPT_OPTIMIZER_SYSTEM_PROMPT,
+        load_prompt_optimizer_system_prompt,
+        prompt_optimizer_system_prompt_path,
+    )
+
+    initial = client.get("/api/prompt/optimizer-system-prompt")
+
+    assert initial.status_code == 200
+    assert initial.json() == {
+        "system_prompt": PROMPT_OPTIMIZER_SYSTEM_PROMPT,
+        "default_system_prompt": PROMPT_OPTIMIZER_SYSTEM_PROMPT,
+        "customized": False,
+    }
+
+    updated = client.post(
+        "/api/prompt/optimizer-system-prompt",
+        json={"system_prompt": "  Custom optimizer prompt\n"},
+    )
+
+    assert updated.status_code == 200
+    assert updated.json()["system_prompt"] == "Custom optimizer prompt"
+    assert updated.json()["customized"] is True
+    assert (
+        prompt_optimizer_system_prompt_path().read_text(encoding="utf-8")
+        == "Custom optimizer prompt\n"
+    )
+    assert load_prompt_optimizer_system_prompt() == "Custom optimizer prompt"
+
+    empty = client.post(
+        "/api/prompt/optimizer-system-prompt",
+        json={"system_prompt": "   "},
+    )
+    assert empty.status_code == 422
+    assert load_prompt_optimizer_system_prompt() == "Custom optimizer prompt"
 
 
 def test_prompt_optimize_disabled_returns_400(client):
@@ -1000,11 +1801,17 @@ def test_prompt_optimize_success_uses_configured_upstream(client, monkeypatch):
                 "enabled": True,
                 "api_url": "https://example.com/v1/chat/completions",
                 "model": "prompt-model",
-                "api_key": "optimizer-key",
+                "timeout_seconds": 45,
+                "api_key": "${TEST_PROMPT_OPTIMIZER_API_KEY}",
             },
         ),
     )
     assert configured.status_code == 200
+    custom_system_prompt = client.post(
+        "/api/prompt/optimizer-system-prompt",
+        json={"system_prompt": "Custom optimizer prompt"},
+    )
+    assert custom_system_prompt.status_code == 200
     seen: dict[str, object] = {}
 
     async def fake_optimize_prompt(**kwargs):
@@ -1034,7 +1841,9 @@ def test_prompt_optimize_success_uses_configured_upstream(client, monkeypatch):
     assert seen["api_url"] == "https://example.com/v1/chat/completions"
     assert seen["api_key"] == "optimizer-key"
     assert seen["model"] == "prompt-model"
+    assert seen["timeout_seconds"] == 45
     assert seen["image_api_path"] == "/v1/responses"
+    assert seen["system_prompt"] == "Custom optimizer prompt"
 
 
 def test_prompt_optimize_upstream_error_and_timeout(client, monkeypatch):
@@ -1050,7 +1859,7 @@ def test_prompt_optimize_upstream_error_and_timeout(client, monkeypatch):
                 "enabled": True,
                 "api_url": "https://example.com/v1/chat/completions",
                 "model": "prompt-model",
-                "api_key": "optimizer-key",
+                "api_key": "${TEST_PROMPT_OPTIMIZER_API_KEY}",
             },
         ),
     )
@@ -1145,6 +1954,7 @@ def test_prompt_snippets_crud_search_and_validation(client):
 
 
 def test_settings_rejects_invalid_socks5_proxy(client):
+    config.ALLOW_PLAINTEXT_SECRETS = True
     settings = client.get("/api/settings").json()
 
     resp = client.post(
@@ -1164,6 +1974,7 @@ def test_settings_rejects_invalid_socks5_proxy(client):
 
 
 def test_settings_rejects_invalid_global_webhook_url(client):
+    config.ALLOW_PLAINTEXT_SECRETS = True
     settings = client.get("/api/settings").json()
 
     resp = client.post(
@@ -1195,7 +2006,7 @@ def test_socks5_proxy_only_flows_to_generation_and_edit(client, monkeypatch):
             "api_url": "https://api.example.com",
             "api_key": None,
             "api_path": "/v1/images/generations",
-            "upstream_socks5_proxy": "socks5://127.0.0.1:1080",
+            "upstream_socks5_proxy": "${TEST_UPSTREAM_PROXY_URL}",
         },
     )
     assert updated.status_code == 200
@@ -1283,8 +2094,8 @@ def test_socks5_proxy_only_flows_to_generation_and_edit(client, monkeypatch):
     assert edit.status_code == 202
     assert _wait_for_job(client, edit.json()["job_id"])["status"] == "success"
 
-    assert seen["generation_proxy"] == "socks5://127.0.0.1:1080"
-    assert seen["edit_proxy"] == "socks5://127.0.0.1:1080"
+    assert seen["generation_proxy"] == "socks5://user:secret@127.0.0.1:1080"
+    assert seen["edit_proxy"] == "socks5://user:secret@127.0.0.1:1080"
 
 
 def test_preset_health_and_env_api_key_resolution(client, monkeypatch):
@@ -1366,6 +2177,149 @@ def test_preset_health_and_env_api_key_resolution(client, monkeypatch):
     job = _wait_for_job(client, resp.json()["job_id"])
     assert job["status"] == "success"
     assert seen["generation_key"] == "env-secret"
+
+
+def _overall_config_item(client, name: str):
+    response = client.get("/api/settings/overall-config")
+    assert response.status_code == 200
+    items = response.json()["items"]
+    return next(item for item in items if item["name"] == name)
+
+
+def test_overall_config_syncs_env_and_hot_override(client, monkeypatch):
+    github_repo = _overall_config_item(client, "GITHUB_REPO")
+    assert github_repo["value"] == "Z1rconium/gpt-image-linux"
+    assert github_repo["source"] == "env"
+
+    response = client.put(
+        "/api/settings/overall-config",
+        json={"updates": [{"name": "ENABLE_METRICS", "value": True}]},
+    )
+    assert response.status_code == 200
+    item = next(i for i in response.json()["items"] if i["name"] == "ENABLE_METRICS")
+    assert item["value"] is True
+    assert item["source"] == "override"
+    assert config.ENABLE_METRICS is True
+
+    rows = storage.sync_overall_config_env_values(
+        {"ENABLE_METRICS": ("false", True), "ALLOW_UNAUTHENTICATED": ("true", True)}
+    )
+    assert rows["ENABLE_METRICS"]["override_value"] == "true"
+
+    response = client.put(
+        "/api/settings/overall-config",
+        json={"updates": [{"name": "ENABLE_METRICS", "clear_override": True}]},
+    )
+    assert response.status_code == 200
+    item = next(i for i in response.json()["items"] if i["name"] == "ENABLE_METRICS")
+    assert item["source"] == "env"
+    assert item["value"] is False
+
+
+def test_overall_config_secret_mask_and_preserve(client):
+    response = client.put(
+        "/api/settings/overall-config",
+        json={"updates": [{"name": "WEBHOOK_SIGNING_SECRET", "value": "super-secret"}]},
+    )
+    assert response.status_code == 200
+    item = next(i for i in response.json()["items"] if i["name"] == "WEBHOOK_SIGNING_SECRET")
+    assert item["value"] == "********"
+    assert item["value_masked"] == "********"
+    assert "super-secret" not in response.text
+
+    response = client.put(
+        "/api/settings/overall-config",
+        json={"updates": [{"name": "WEBHOOK_SIGNING_SECRET", "value": "********"}]},
+    )
+    assert response.status_code == 200
+    rows = storage.list_overall_config_values()
+    assert rows["WEBHOOK_SIGNING_SECRET"]["override_value"] == "super-secret"
+
+
+def test_overall_config_validation_errors(client):
+    unknown = client.put(
+        "/api/settings/overall-config",
+        json={"updates": [{"name": "NO_SUCH_ENV", "value": "x"}]},
+    )
+    assert unknown.status_code == 422
+
+    invalid_bool = client.put(
+        "/api/settings/overall-config",
+        json={"updates": [{"name": "ENABLE_METRICS", "value": "maybe"}]},
+    )
+    assert invalid_bool.status_code == 422
+
+    invalid_repo = client.put(
+        "/api/settings/overall-config",
+        json={"updates": [{"name": "GITHUB_REPO", "value": "not a repo"}]},
+    )
+    assert invalid_repo.status_code == 422
+
+    invalid_proxy = client.put(
+        "/api/settings/overall-config",
+        json={"updates": [{"name": "TRUST_PROXY_HEADERS", "value": True}]},
+    )
+    assert invalid_proxy.status_code == 422
+
+
+def test_overall_config_restart_and_build_only_badges(client):
+    response = client.put(
+        "/api/settings/overall-config",
+        json={
+            "updates": [
+                {"name": "ACCESS_KEY_COOKIE_NAME", "value": "custom_access"},
+                {"name": "PYTHON_BASE_IMAGE", "value": "python:3.12-slim"},
+            ]
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert set(body["restart_required_names"]) == {
+        "ACCESS_KEY_COOKIE_NAME",
+        "PYTHON_BASE_IMAGE",
+    }
+    items = {item["name"]: item for item in body["items"]}
+    assert items["ACCESS_KEY_COOKIE_NAME"]["restart_required"] is True
+    assert items["PYTHON_BASE_IMAGE"]["build_only"] is True
+
+
+def test_options_404_probe_is_warning():
+    status, message = classify_probe_status("OPTIONS", 404)
+    assert status == "warning"
+    assert "may only support POST" in message
+
+
+def test_preset_health_ignores_upstream_probe_error_for_overall_status(client, monkeypatch):
+    settings = client.get("/api/settings").json()
+    active_preset_id = settings["active_preset_id"]
+
+    async def fake_probe(api_url, api_path, api_key=""):
+        return {
+            "status": "error",
+            "message": "HEAD probe returned HTTP 404; check API URL/path",
+        }
+
+    monkeypatch.setattr(backend_main.proxy, "probe_upstream_endpoint", fake_probe)
+    updated = client.post(
+        "/api/settings",
+        json={
+            "active_preset_id": active_preset_id,
+            "preset_name": "Probe-only failure",
+            "api_url": "https://api.example.com",
+            "api_key": "${TEST_DEFAULT_API_KEY}",
+            "api_path": "/v1/images/generations",
+        },
+    )
+    assert updated.status_code == 200
+
+    health = client.post(f"/api/settings/presets/{active_preset_id}/health")
+    assert health.status_code == 200
+    body = health.json()
+    assert body["status"] == "ok"
+    assert any(
+        check["name"] == "upstream_probe" and check["status"] == "error"
+        for check in body["checks"]
+    )
 
 
 def test_missing_env_api_key_is_reported(client, monkeypatch):
@@ -1461,7 +2415,7 @@ def test_generate_request_api_path_overrides_active_preset(client):
 def test_multi_image_job_returns_all_results(client, monkeypatch):
     calls = []
     calls_lock = threading.Lock()
-    all_started = threading.Event()
+    upstream_window_started = threading.Event()
     release_event = threading.Event()
 
     async def blocking_generation_api(
@@ -1475,8 +2429,8 @@ def test_multi_image_job_returns_all_results(client, monkeypatch):
     ):
         with calls_lock:
             calls.append(payload)
-            if len(calls) == 3:
-                all_started.set()
+            if len(calls) == config.MAX_ACTIVE_GENERATE_JOBS:
+                upstream_window_started.set()
         await asyncio.to_thread(release_event.wait)
         return [
             await _add_generated_gallery_entry(
@@ -1507,7 +2461,7 @@ def test_multi_image_job_returns_all_results(client, monkeypatch):
     job_id = resp.json()["job_id"]
 
     try:
-        assert all_started.wait(2)
+        assert upstream_window_started.wait(2)
         active_jobs = client.get("/api/generate/jobs")
         assert active_jobs.status_code == 200
         assert len(active_jobs.json()) == 1
@@ -1757,11 +2711,15 @@ def test_gallery_slow_query_logs_filters_page_and_total(client, caplog):
     assert "Slow /api/gallery query" in caplog.text
     assert "page=1" in caplog.text
     assert "total=1" in caplog.text
-    assert "'prompt': 'slow'" in caplog.text
+    assert "'prompt_present': True" in caplog.text
+    assert "'prompt_len': 4" in caplog.text
+    assert "slow query prompt" not in caplog.text
+    assert "'prompt_hash':" in caplog.text
     assert metrics.snapshot()["counters"]["sqlite.slow_queries"] == 1
 
 
-def test_storage_connect_closes_sqlite_handle(client, monkeypatch):
+def test_storage_connect_reuses_thread_local_sqlite_handle_until_closed(tmp_path, monkeypatch):
+    _configure_runtime(tmp_path)
     closed_paths: list[str] = []
     real_connect = sqlite3.connect
 
@@ -1777,8 +2735,16 @@ def test_storage_connect_closes_sqlite_handle(client, monkeypatch):
     monkeypatch.setattr(storage.sqlite3, "connect", tracked_connect)
 
     with storage._connect() as conn:
+        first_conn = conn
         assert conn.execute("SELECT 1").fetchone()[0] == 1
 
+    with storage._connect() as conn:
+        assert conn is first_conn
+        assert conn.execute("SELECT 1").fetchone()[0] == 1
+
+    assert closed_paths == []
+
+    storage.close_database_connections()
     assert closed_paths == [config.DATABASE_FILE]
 
 
@@ -2104,7 +3070,7 @@ def test_cancelled_edit_job_cleans_temp_source(tmp_path, monkeypatch):
 
     monkeypatch.setattr(backend_main.proxy, "call_image_edit_api", blocking_edit_api)
 
-    with TestClient(backend_main.app) as test_client:
+    with _test_client() as test_client:
         edit = test_client.post(
             "/api/edits",
             data={
@@ -2172,7 +3138,7 @@ def test_edit_queue_capacity_uses_pending_source_bytes(tmp_path, monkeypatch):
 
     monkeypatch.setattr(backend_main.proxy, "call_image_edit_api", blocking_edit_api)
 
-    with TestClient(backend_main.app) as test_client:
+    with _test_client() as test_client:
         first = test_client.post(
             "/api/edits",
             data={
@@ -2210,7 +3176,7 @@ def test_edit_queue_capacity_counts_multiple_source_bytes(tmp_path):
     config.MAX_PENDING_EDIT_SOURCE_MB = 1
     large_png = PNG_BYTES + (b"\0" * (600 * 1024))
 
-    with TestClient(backend_main.app) as test_client:
+    with _test_client() as test_client:
         edit = test_client.post(
             "/api/edits",
             data={
@@ -2286,6 +3252,49 @@ def test_gallery_image_download_and_zip(client):
         assert metadata["images"][0]["sha256"]
 
 
+def test_gallery_image_responses_use_x_accel_redirect_when_enabled(client):
+    config.ENABLE_NGINX_ACCEL_REDIRECT = True
+    entry = _fake_gallery_entry("gallery-accel", "accel", "1024x1024", "gallery accel.png")
+    assert entry.thumbnail_filename
+
+    image = client.get("/api/image/gallery%20accel.png")
+    assert image.status_code == 200
+    assert image.headers["x-accel-redirect"] == "/_protected/images/gallery%20accel.png"
+    assert image.headers["cache-control"].startswith("public")
+    assert image.headers["content-type"].startswith("image/png")
+    assert image.content == b""
+
+    thumbnail_path = storage.safe_thumbnail_path(entry.thumbnail_filename)
+    assert thumbnail_path is not None
+    thumbnail_path.unlink()
+
+    thumb = client.get("/api/thumb/gallery%20accel.png")
+    assert thumb.status_code == 200
+    assert thumb.headers["x-accel-redirect"] == f"/_protected/thumbs/{entry.thumbnail_filename}"
+    assert thumb.headers["cache-control"].startswith("public")
+    assert thumb.headers["content-type"].startswith("image/webp")
+    assert thumbnail_path.exists()
+
+    download = client.get("/api/download/gallery%20accel.png")
+    assert download.status_code == 200
+    assert download.headers["x-accel-redirect"] == "/_protected/images/gallery%20accel.png"
+    assert "attachment" in download.headers["content-disposition"]
+    assert download.headers["content-type"].startswith("image/png")
+
+
+def test_orphan_gallery_files_are_not_directly_served(client):
+    orphan_path = Path(config.IMAGES_DIR) / "orphan.png"
+    orphan_path.write_bytes(PNG_BYTES)
+
+    image = client.get("/api/image/orphan.png")
+    thumb = client.get("/api/thumb/orphan.png")
+    download = client.get("/api/download/orphan.png")
+
+    assert image.status_code == 404
+    assert thumb.status_code == 404
+    assert download.status_code == 404
+
+
 def test_download_all_deduplicates_shared_filenames(client):
     _fake_gallery_entry("dup-1", "first", "1024x1024", "dup.png")
     storage.add_to_gallery_sync(
@@ -2338,6 +3347,186 @@ def test_gallery_export_job_reports_progress_and_downloads_zip(client):
         assert "metadata.json" in zf.namelist()
         assert "images/export-job-1.png" in zf.namelist()
         assert "images/export-job-2.png" in zf.namelist()
+
+
+def test_gallery_sync_job_reports_progress_and_terminal_sse(client, monkeypatch):
+    _fake_gallery_entry("sync-job-1", "one", "1024x1024", "sync-job-1.png")
+    _fake_gallery_entry("sync-job-2", "two", "1024x1024", "sync-job-2.png")
+    storage.save_r2_backup_settings(
+        {
+            "enabled": True,
+            "endpoint_url": "https://account.r2.cloudflarestorage.com",
+            "bucket_name": "image-backups",
+            "region": "auto",
+            "key_prefix": "gallery-test/",
+            "access_key_id": "${TEST_R2_ACCESS_KEY_ID}",
+            "secret_access_key": "${TEST_R2_SECRET_ACCESS_KEY}",
+        }
+    )
+
+    def fake_sync(settings, entries, *, total_count, progress_cb=None, client_factory=None):
+        assert settings["bucket_name"] == "image-backups"
+        assert len(list(entries)) == 2
+        result = r2_sync.R2SyncResult(
+            total_count=total_count,
+            compared_count=2,
+            uploaded_count=1,
+            skipped_existing_count=1,
+            missing_local_count=0,
+            failed_count=0,
+            bytes_total=len(PNG_BYTES) * 2,
+            bytes_uploaded=len(PNG_BYTES),
+        )
+        if progress_cb:
+            progress_cb(
+                {
+                    "stage": "uploading",
+                    "message": "Compared 2 gallery image(s)",
+                    "progress": 100,
+                    **result.to_updates(),
+                }
+            )
+        return result
+
+    monkeypatch.setattr(r2_sync, "sync_gallery_to_r2", fake_sync)
+    created = client.post("/api/gallery/sync-jobs")
+    assert created.status_code == 202
+    job = created.json()
+    assert job["status"] == "queued"
+    assert job["total_count"] == 2
+
+    finished = _wait_for_gallery_sync_job(client, job["job_id"])
+    assert finished["status"] == "success"
+    assert finished["progress"] == 100
+    assert finished["uploaded_count"] == 1
+    assert finished["skipped_existing_count"] == 1
+    assert finished["bytes_uploaded"] == len(PNG_BYTES)
+
+    events = client.get(f"/api/gallery/sync-jobs/{job['job_id']}/events")
+    assert events.status_code == 200
+    assert events.headers["content-type"].startswith("text/event-stream")
+    assert "event: sync" in events.text
+    assert job["job_id"] in events.text
+
+
+def test_gallery_sync_job_accepts_enabled_r2_env_defaults(tmp_path, monkeypatch):
+    _configure_runtime(tmp_path)
+    monkeypatch.setenv("R2_ACCESS_KEY_ID", "env-r2-access")
+    monkeypatch.setenv("R2_SECRET_ACCESS_KEY", "env-r2-secret")
+    config.R2_BACKUP_ENABLED = True
+    config.R2_ENDPOINT_URL = "https://account.r2.cloudflarestorage.com"
+    config.R2_BUCKET_NAME = "env-image-backups"
+    config.R2_REGION = "auto"
+    config.R2_KEY_PREFIX = "gallery-env/"
+    config.R2_ACCESS_KEY_ID = "env-r2-access"
+    config.R2_SECRET_ACCESS_KEY = "env-r2-secret"
+
+    _fake_gallery_entry("sync-env-config", "one", "1024x1024", "sync-env-config.png")
+
+    def fake_sync(settings, entries, *, total_count, progress_cb=None, client_factory=None):
+        assert settings["enabled"] is True
+        assert settings["bucket_name"] == "env-image-backups"
+        assert settings["access_key_id"] == "${R2_ACCESS_KEY_ID}"
+        assert settings["secret_access_key"] == "${R2_SECRET_ACCESS_KEY}"
+        assert len(list(entries)) == 1
+        return r2_sync.R2SyncResult(total_count=total_count, compared_count=1)
+
+    monkeypatch.setattr(r2_sync, "sync_gallery_to_r2", fake_sync)
+
+    with _test_client() as client:
+        created = client.post("/api/gallery/sync-jobs")
+        assert created.status_code == 202, created.json()
+        finished = _wait_for_gallery_sync_job(client, created.json()["job_id"])
+        assert finished["status"] == "success"
+        assert finished["total_count"] == 1
+
+
+def test_scheduled_gallery_sync_skips_when_disabled(client):
+    _fake_gallery_entry("scheduled-disabled", "one", "1024x1024", "scheduled-disabled.png")
+
+    async def run_once():
+        backend_main.app.state.gallery_sync_lock = asyncio.Lock()
+        return await gallery_router._run_scheduled_gallery_r2_sync_once()
+
+    outcome = asyncio.run(run_once())
+    assert outcome == {"started": False, "reason": "disabled"}
+
+
+def test_scheduled_gallery_sync_creates_regular_sync_job(client, monkeypatch):
+    _fake_gallery_entry("scheduled-sync", "one", "1024x1024", "scheduled-sync.png")
+    storage.save_r2_backup_settings(
+        {
+            "enabled": True,
+            "endpoint_url": "https://account.r2.cloudflarestorage.com",
+            "bucket_name": "image-backups",
+            "region": "auto",
+            "key_prefix": "gallery-test/",
+            "sync_interval_hours": 1,
+            "access_key_id": "${TEST_R2_ACCESS_KEY_ID}",
+            "secret_access_key": "${TEST_R2_SECRET_ACCESS_KEY}",
+        }
+    )
+    seen = {}
+
+    def fake_sync(settings, entries, *, total_count, progress_cb=None, client_factory=None):
+        seen["settings"] = settings
+        seen["entries"] = list(entries)
+        return r2_sync.R2SyncResult(total_count=total_count, compared_count=1)
+
+    monkeypatch.setattr(r2_sync, "sync_gallery_to_r2", fake_sync)
+
+    async def run_once():
+        backend_main.app.state.gallery_sync_lock = asyncio.Lock()
+        outcome = await gallery_router._run_scheduled_gallery_r2_sync_once()
+        assert outcome["started"] is True
+        task = gallery_router._gallery_sync_tasks()[outcome["job_id"]]
+        await task
+        return gallery_router._gallery_sync_jobs()[outcome["job_id"]]
+
+    job = asyncio.run(run_once())
+    assert job["status"] == "success"
+    assert job["total_count"] == 1
+    assert seen["settings"]["sync_interval_hours"] == 1
+    assert [entry["id"] for entry in seen["entries"]] == ["scheduled-sync"]
+
+
+def test_scheduled_gallery_sync_skips_active_sync(client):
+    _fake_gallery_entry("scheduled-active", "one", "1024x1024", "scheduled-active.png")
+    storage.save_r2_backup_settings(
+        {
+            "enabled": True,
+            "endpoint_url": "https://account.r2.cloudflarestorage.com",
+            "bucket_name": "image-backups",
+            "region": "auto",
+            "key_prefix": "gallery-test/",
+            "sync_interval_hours": 1,
+            "access_key_id": "${TEST_R2_ACCESS_KEY_ID}",
+            "secret_access_key": "${TEST_R2_SECRET_ACCESS_KEY}",
+        }
+    )
+
+    async def run_once():
+        backend_main.app.state.gallery_sync_lock = asyncio.Lock()
+        gallery_router._gallery_sync_jobs()["active-sync"] = {
+            "job_id": "active-sync",
+            "status": "running",
+            "updated_at": "2026-05-18T12:00:00Z",
+        }
+        return await gallery_router._run_scheduled_gallery_r2_sync_once()
+
+    outcome = asyncio.run(run_once())
+    assert outcome == {"started": False, "reason": "active_sync"}
+
+
+def test_gallery_sync_job_rejects_empty_gallery_and_missing_r2_config(client):
+    empty = client.post("/api/gallery/sync-jobs")
+    assert empty.status_code == 404
+    assert empty.json()["detail"] == "No images in gallery"
+
+    _fake_gallery_entry("sync-missing-config", "one", "1024x1024", "sync-missing-config.png")
+    missing_config = client.post("/api/gallery/sync-jobs")
+    assert missing_config.status_code == 400
+    assert "R2 backup is disabled" in missing_config.json()["detail"]
 
 
 def test_gallery_total_bytes_uses_sql_aggregate_without_disk_backfill(client, monkeypatch):
@@ -2724,8 +3913,8 @@ def test_import_archive_rejects_uploaded_archive_size_limit(client):
 
     resp = _post_import_archive(client, _import_archive_bytes())
 
-    assert resp.status_code == 400
-    assert resp.json()["detail"] == "Uploaded archive is too large"
+    assert resp.status_code == 413
+    assert resp.json()["detail"] == "Request body too large"
 
 
 def test_import_archive_rejects_high_compression_ratio(client):
@@ -2795,6 +3984,11 @@ def test_safe_image_paths_reject_traversal(client):
     assert image.status_code == 404
     assert thumb.status_code == 404
     assert download.status_code == 404
+
+
+def test_image_validation_rejects_magic_only_truncated_image(client):
+    with pytest.raises(ValueError, match="fully decodable"):
+        storage.validate_image_bytes(b"\xff\xd8\xff\xd9", filename="truncated.jpg")
 
 
 def test_download_all_skips_polluted_gallery_filename(client):
@@ -2881,7 +4075,7 @@ def test_generate_queue_capacity_and_concurrency_limit(tmp_path, monkeypatch):
 
     monkeypatch.setattr(backend_main.proxy, "call_image_generation_api", blocking_generation_api)
 
-    with TestClient(backend_main.app) as client:
+    with _test_client() as client:
         first = client.post(
             "/api/generate",
             json={"prompt": "one", "model": "gpt-image-2"},
@@ -2907,14 +4101,16 @@ def test_generate_queue_capacity_and_concurrency_limit(tmp_path, monkeypatch):
     assert max_active_calls == 1
 
 
-def test_batch_generate_counts_as_one_public_queue_slot(tmp_path, monkeypatch):
+def test_batch_generate_counts_image_units_and_bounds_upstream_calls(tmp_path, monkeypatch):
     _configure_runtime(tmp_path)
     config.MAX_ACTIVE_GENERATE_JOBS = 1
-    config.MAX_QUEUED_GENERATE_JOBS = 1
+    config.MAX_QUEUED_GENERATE_JOBS = 3
     calls = []
     calls_lock = threading.Lock()
     batch_started = threading.Event()
     release_event = threading.Event()
+    active_calls = 0
+    max_active_calls = 0
 
     async def blocking_generation_api(
         api_url,
@@ -2925,24 +4121,30 @@ def test_batch_generate_counts_as_one_public_queue_slot(tmp_path, monkeypatch):
         progress=None,
         socks5_proxy=None,
     ):
+        nonlocal active_calls, max_active_calls
+        active_calls += 1
+        max_active_calls = max(max_active_calls, active_calls)
         with calls_lock:
             calls.append(payload)
             batch_calls = [call for call in calls if call.prompt == "batch"]
-            if len(batch_calls) == 3:
+            if len(batch_calls) == 1:
                 batch_started.set()
-        if payload.prompt == "batch":
-            await asyncio.to_thread(release_event.wait)
-        return [
-            await _add_generated_gallery_entry(
-                payload,
-                api_path,
-                api_preset_name,
-            )
-        ]
+        try:
+            if payload.prompt == "batch":
+                await asyncio.to_thread(release_event.wait)
+            return [
+                await _add_generated_gallery_entry(
+                    payload,
+                    api_path,
+                    api_preset_name,
+                )
+            ]
+        finally:
+            active_calls -= 1
 
     monkeypatch.setattr(backend_main.proxy, "call_image_generation_api", blocking_generation_api)
 
-    with TestClient(backend_main.app) as client:
+    with _test_client() as client:
         first = client.post(
             "/api/generate",
             json={"prompt": "batch", "model": "gpt-image-2", "n": 3},
@@ -2980,6 +4182,7 @@ def test_batch_generate_counts_as_one_public_queue_slot(tmp_path, monkeypatch):
         batch_calls = [call for call in calls if call.prompt == "batch"]
     assert len(batch_calls) == 3
     assert all(payload.n == 1 for payload in batch_calls)
+    assert max_active_calls == 1
 
 
 def test_edit_jobs_share_queue_capacity(tmp_path, monkeypatch):
@@ -3022,7 +4225,7 @@ def test_edit_jobs_share_queue_capacity(tmp_path, monkeypatch):
     monkeypatch.setattr(backend_main.proxy, "call_image_generation_api", blocking_generation_api)
     monkeypatch.setattr(backend_main.proxy, "call_image_edit_api", blocking_edit_api)
 
-    with TestClient(backend_main.app) as client:
+    with _test_client() as client:
         generate = client.post(
             "/api/generate",
             json={"prompt": "one", "model": "gpt-image-2"},
@@ -3071,6 +4274,19 @@ def test_image_url_download_disables_redirects_and_validates_redirect_target(cli
 
     assert session.requested_urls == ["https://example.com/image.png"]
     assert session.allow_redirects_values == [False]
+
+
+def test_image_url_download_rejects_plain_http(client):
+    session = _FakeSession(
+        [
+            _FakeResponse(200, {}, [PNG_BYTES], peer_ip="93.184.216.34"),
+        ]
+    )
+
+    with pytest.raises(ValueError, match="Only HTTPS URLs are allowed"):
+        asyncio.run(_download_with_fake_session(session, "http://example.com/image.png"))
+
+    assert session.requested_urls == []
 
 
 def test_image_url_download_rejects_large_content_length(client):
@@ -3124,6 +4340,56 @@ def test_upstream_json_response_rejects_stream_over_limit(tmp_path):
         )
 
 
+def test_upstream_json_response_accepts_json_body_with_wrong_content_type(tmp_path):
+    _configure_runtime(tmp_path)
+    from backend.app.integrations import upstream_client
+
+    image_b64 = base64.b64encode(PNG_BYTES).decode("ascii")
+    response_body = json.dumps(
+        {"created": 1779943365, "data": [{"b64_json": image_b64}]}
+    ).encode("utf-8")
+    resp = _FakeResponse(
+        200,
+        {"Content-Type": "text/plain; charset=utf-8"},
+        [response_body],
+    )
+
+    result, response_text = asyncio.run(
+        upstream_client.parse_upstream_json_response(
+            resp,
+            "/v1/images/generations",
+            None,
+        )
+    )
+
+    assert result["data"][0]["b64_json"] == image_b64
+    assert response_text.startswith('{"created":')
+
+
+def test_upstream_chat_response_accepts_json_body_with_wrong_content_type(tmp_path):
+    _configure_runtime(tmp_path)
+    from backend.app.integrations import upstream_client
+
+    response_body = json.dumps(
+        {"choices": [{"message": {"content": "https://example.com/generated.png"}}]}
+    ).encode("utf-8")
+    resp = _FakeResponse(
+        200,
+        {"Content-Type": "text/plain"},
+        [response_body],
+    )
+
+    result, _response_text = asyncio.run(
+        upstream_client.parse_upstream_chat_completion_response(
+            resp,
+            "/v1/chat/completions",
+            None,
+        )
+    )
+
+    assert result["choices"][0]["message"]["content"] == "https://example.com/generated.png"
+
+
 def test_image_url_download_rejects_private_peer_ip(client):
     session = _FakeSession(
         [
@@ -3133,6 +4399,33 @@ def test_image_url_download_rejects_private_peer_ip(client):
 
     with pytest.raises(ValueError, match="private/internal IP"):
         asyncio.run(_download_with_fake_session(session, "https://example.com/image.png"))
+
+
+def test_socks5_upstream_private_dns_logs_trust_boundary_warning(tmp_path, monkeypatch, caplog):
+    _configure_runtime(tmp_path)
+    from backend.app.integrations import upstream_client
+    from backend.app.schemas.models import GenerateRequest
+
+    monkeypatch.setattr(
+        upstream_client.ssrf,
+        "resolve_hostname",
+        lambda hostname: (hostname, ["10.0.0.5"]),
+    )
+
+    caplog.set_level(logging.WARNING, logger="backend.app.integrations.upstream_client")
+    with pytest.raises(ValueError, match="private/internal IP"):
+        asyncio.run(
+            ORIGINAL_CALL_IMAGE_GENERATION_API(
+                "https://api.example.com",
+                "key",
+                "/v1/images/generations",
+                GenerateRequest(prompt="private dns"),
+                socks5_proxy="socks5://127.0.0.1:1080",
+            )
+        )
+
+    assert "SOCKS5 proxy is enabled" in caplog.text
+    assert "proxy is the trust boundary" in caplog.text
 
 
 def test_upstream_returned_image_url_download_stays_direct(tmp_path, monkeypatch):
@@ -3339,7 +4632,7 @@ def test_running_progress_persists_only_terminal_states(tmp_path, monkeypatch):
     monkeypatch.setattr(storage, "upsert_generate_job", tracking_upsert)
     monkeypatch.setattr(backend_main.proxy, "call_image_generation_api", noisy_generation_api)
 
-    with TestClient(backend_main.app) as client:
+    with _test_client() as client:
         resp = client.post("/api/generate", json={"prompt": "noisy", "model": "gpt-image-2"})
         assert resp.status_code == 202
         job = _wait_for_job(client, resp.json()["job_id"])
@@ -3419,9 +4712,65 @@ def test_generate_jobs_history_supports_offset_pagination(client):
     assert [job["job_id"] for job in resp.json()] == ["history-2", "history-1"]
 
 
+def test_generate_jobs_history_failed_only_filters_error_statuses(client):
+    for job_id, status in [
+        ("history-success", "success"),
+        ("history-cancelled", "cancelled"),
+        ("history-error", "error"),
+        ("history-upstream", "upstream_error"),
+    ]:
+        storage.upsert_generate_job(
+            {
+                "job_id": job_id,
+                "status": status,
+                "operation": "generation",
+                "prompt": job_id,
+                "size": "1024x1024",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-01T00:00:00+00:00",
+                "completed_at": "2026-01-01T00:00:00+00:00",
+                "error": "failed" if status in {"error", "upstream_error"} else None,
+            }
+        )
+
+    resp = client.get("/api/generate/jobs?include_finished=true&failed_only=true")
+
+    assert resp.status_code == 200
+    assert {job["job_id"] for job in resp.json()} == {"history-error", "history-upstream"}
+
+
+def test_clear_generate_jobs_history_deletes_only_terminal_jobs(client):
+    for job_id, status in [
+        ("history-success", "success"),
+        ("history-error", "error"),
+        ("active-running", "running"),
+    ]:
+        storage.upsert_generate_job(
+            {
+                "job_id": job_id,
+                "status": status,
+                "operation": "generation",
+                "prompt": job_id,
+                "size": "1024x1024",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-01T00:00:00+00:00",
+                "completed_at": "2026-01-01T00:00:00+00:00" if status != "running" else None,
+                "error": "failed" if status == "error" else None,
+            }
+        )
+
+    resp = client.delete("/api/generate/jobs/history")
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "success"
+    assert storage.get_generate_job("history-success") is None
+    assert storage.get_generate_job("history-error") is None
+    assert storage.get_generate_job("active-running") is not None
+
+
 def test_validation_422_and_global_500(tmp_path, monkeypatch):
     _configure_runtime(tmp_path)
-    with TestClient(backend_main.app, raise_server_exceptions=False) as client:
+    with _test_client(raise_server_exceptions=False) as client:
         bad = client.post(
             "/api/generate",
             json={"prompt": "x", "size": "1025x1025"},
@@ -3461,7 +4810,7 @@ def test_generate_uses_active_preset_default_model_when_model_is_omitted(client)
             "active_preset_id": settings["active_preset_id"],
             "preset_name": "Primary",
             "api_url": settings["api_url"],
-            "api_key": "new-key",
+            "api_key": "${TEST_OPENAI_API_KEY}",
             "api_path": settings["api_path"],
             "default_model": "gpt-image-3",
         },

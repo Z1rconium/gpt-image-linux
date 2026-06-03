@@ -271,6 +271,14 @@ def get_generate_job_semaphore() -> asyncio.Semaphore:
     return app.state.generate_job_semaphore
 
 
+def get_upstream_request_semaphore() -> asyncio.Semaphore:
+    semaphore = getattr(app.state, "upstream_request_semaphore", None)
+    if semaphore is None:
+        semaphore = asyncio.Semaphore(config.MAX_ACTIVE_GENERATE_JOBS)
+        app.state.upstream_request_semaphore = semaphore
+    return semaphore
+
+
 def get_pending_edit_source_bytes() -> int:
     return max(0, int(getattr(app.state, "pending_edit_source_bytes", 0) or 0))
 
@@ -303,15 +311,40 @@ def count_active_jobs() -> int:
     )
 
 
+def request_image_units(req: GenerateRequest | EditRequest) -> int:
+    try:
+        return max(1, int(req.n or 1))
+    except (TypeError, ValueError):
+        return 1
+
+
+def job_image_units(job: dict) -> int:
+    try:
+        return max(1, int(job.get("image_units") or job.get("n") or 1))
+    except (TypeError, ValueError):
+        return 1
+
+
+def count_active_job_units() -> int:
+    jobs = app.state.generate_jobs or {}
+    return sum(
+        job_image_units(job)
+        for job in jobs.values()
+        if job.get("status") in ACTIVE_GENERATE_JOB_STATUSES
+    )
+
+
 def snapshot_queue_metrics() -> dict[str, int]:
     jobs = app.state.generate_jobs or {}
     counts: dict[str, int] = {
         "image_jobs.active": 0,
+        "image_jobs.active_units": 0,
         "image_jobs.queued": 0,
         "image_jobs.running": 0,
         "image_jobs.capacity": config.MAX_ACTIVE_GENERATE_JOBS + config.MAX_QUEUED_GENERATE_JOBS,
         "image_jobs.running_capacity": config.MAX_ACTIVE_GENERATE_JOBS,
         "image_jobs.queued_capacity": config.MAX_QUEUED_GENERATE_JOBS,
+        "image_jobs.upstream_request_capacity": config.MAX_ACTIVE_GENERATE_JOBS,
         "image_jobs.tasks": len(get_generate_job_tasks()),
         "image_jobs.sse_job_subscribers": sum(
             len(subscribers)
@@ -331,6 +364,7 @@ def snapshot_queue_metrics() -> dict[str, int]:
             continue
         operation = str(job.get("operation") or "generation")
         counts["image_jobs.active"] += 1
+        counts["image_jobs.active_units"] += job_image_units(job)
         counts[f"image_jobs.{status}"] += 1
         if operation in {"generation", "edit"}:
             counts[f"image_jobs.{operation}.{status}.current"] += 1
@@ -338,9 +372,13 @@ def snapshot_queue_metrics() -> dict[str, int]:
     return counts
 
 
-def ensure_job_queue_capacity(extra_pending_edit_source_bytes: int = 0):
+def ensure_job_queue_capacity(
+    extra_pending_edit_source_bytes: int = 0,
+    image_units: int = 1,
+):
     capacity = config.MAX_ACTIVE_GENERATE_JOBS + config.MAX_QUEUED_GENERATE_JOBS
-    if count_active_jobs() >= capacity:
+    requested_units = max(1, int(image_units or 1))
+    if count_active_job_units() + requested_units > capacity:
         metrics.increment("image_jobs.rejected.queue_full")
         raise HTTPException(status_code=429, detail="Generation job queue is full")
     max_pending_edit_source_bytes = get_max_pending_edit_source_bytes()
@@ -372,6 +410,7 @@ def build_pending_job(
     message: str,
     api_path: str | None = None,
     api_preset_name: str | None = None,
+    image_units: int = 1,
 ) -> dict:
     now = utc_now()
     return {
@@ -390,6 +429,7 @@ def build_pending_job(
         "output_compression": req.output_compression,
         "response_format": req.response_format,
         "n": req.n,
+        "image_units": max(1, int(image_units or 1)),
         "api_path": api_path,
         "api_preset_name": api_preset_name,
     }
@@ -482,11 +522,19 @@ def queue_image_job(
             status_code=400,
             detail="API URL not configured. Please set it in Settings.",
         )
+    try:
+        api_url = ssrf.normalize_upstream_base_url(api_url)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     api_key = get_effective_preset_api_key(active_preset)
     socks5_proxy = get_upstream_socks5_proxy()
 
     webhook_url = validate_job_webhook_url(req.webhook_url or get_webhook_url())
-    ensure_job_queue_capacity(pending_edit_source_bytes)
+    image_units = request_image_units(req)
+    ensure_job_queue_capacity(
+        pending_edit_source_bytes,
+        image_units=image_units,
+    )
     job_id = str(uuid.uuid4())
     reserved_edit_source_bytes = 0
     task: asyncio.Task | None = None
@@ -503,6 +551,7 @@ def queue_image_job(
             message=queued_message,
             api_path=resolved_api_path,
             api_preset_name=api_preset_name,
+            image_units=image_units,
         )
         store_generate_job(job_id, pending_job)
         metrics.increment(f"image_jobs.{operation}.queued")
@@ -619,15 +668,16 @@ async def call_batched_image_generation_api(
         nonlocal completed
         child_req = req.model_copy(update={"n": 1})
         try:
-            return await proxy.call_image_generation_api(
-                api_url,
-                api_key,
-                api_path,
-                child_req,
-                api_preset_name,
-                lambda _stage, _message: None,
-                socks5_proxy=socks5_proxy,
-            )
+            async with get_upstream_request_semaphore():
+                return await proxy.call_image_generation_api(
+                    api_url,
+                    api_key,
+                    api_path,
+                    child_req,
+                    api_preset_name,
+                    lambda _stage, _message: None,
+                    socks5_proxy=socks5_proxy,
+                )
         finally:
             completed += 1
             publish_batch_progress()
@@ -768,7 +818,7 @@ async def _run_image_job(
             log_action,
             job_id,
             e.__class__.__name__,
-            api_url,
+            ssrf.redact_url(api_url),
             api_path,
             req.model,
             req.size,
@@ -859,20 +909,21 @@ async def run_generate_job(
 ):
     async def call_generation_upstream() -> list[GalleryEntry] | ImageJobOutcome:
         if req.n <= 1:
-            return await proxy.call_image_generation_api(
-                api_url,
-                api_key,
-                api_path,
-                req,
-                api_preset_name,
-                lambda stage, message: set_generate_job_progress(
-                    job_id,
-                    stage,
-                    message,
-                    "generation",
-                ),
-                socks5_proxy=socks5_proxy,
-            )
+            async with get_upstream_request_semaphore():
+                return await proxy.call_image_generation_api(
+                    api_url,
+                    api_key,
+                    api_path,
+                    req,
+                    api_preset_name,
+                    lambda stage, message: set_generate_job_progress(
+                        job_id,
+                        stage,
+                        message,
+                        "generation",
+                    ),
+                    socks5_proxy=socks5_proxy,
+                )
         return await call_batched_image_generation_api(
             job_id=job_id,
             api_url=api_url,
@@ -910,6 +961,23 @@ async def run_edit_job(
     image_source_bytes: int,
     socks5_proxy: str = "",
 ):
+    async def call_edit_upstream() -> list[GalleryEntry]:
+        async with get_upstream_request_semaphore():
+            return await proxy.call_image_edit_api(
+                api_url,
+                api_key,
+                req,
+                image_sources,
+                api_preset_name,
+                lambda stage, message: set_generate_job_progress(
+                    job_id,
+                    stage,
+                    message,
+                    "edit",
+                ),
+                socks5_proxy=socks5_proxy,
+            )
+
     try:
         await _run_image_job(
             job_id=job_id,
@@ -924,20 +992,7 @@ async def run_edit_job(
             failed_stage="edit_failed",
             cancel_message="Image edit job cancelled",
             log_action="edit",
-            call_upstream=lambda: proxy.call_image_edit_api(
-                api_url,
-                api_key,
-                req,
-                image_sources,
-                api_preset_name,
-                lambda stage, message: set_generate_job_progress(
-                    job_id,
-                    stage,
-                    message,
-                    "edit",
-                ),
-                socks5_proxy=socks5_proxy,
-            ),
+            call_upstream=call_edit_upstream,
         )
     finally:
         for source in image_sources:

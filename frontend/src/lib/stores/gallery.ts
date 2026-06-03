@@ -28,7 +28,7 @@ export type GalleryState = {
 };
 
 export type GalleryOperationStatus = {
-  kind: 'import' | 'export' | 'download';
+  kind: 'import' | 'export' | 'download' | 'sync';
   label: string;
   detail: string;
   progress: number | null;

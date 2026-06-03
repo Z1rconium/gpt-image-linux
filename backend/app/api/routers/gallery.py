@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import logging
 import mimetypes
 import time
@@ -6,9 +7,10 @@ import uuid
 from collections.abc import Iterable
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import APIRouter, Body, File, HTTPException, Query, Request, UploadFile
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from starlette.background import BackgroundTask
 
 from ..app_state import app
@@ -21,9 +23,12 @@ from ..gallery_archive import (
     write_gallery_zip_file,
 )
 from ..jobs import publish_queue, serialize_sse_event
+from ..sse_limiter import sse_limiter
+from ...core import security as auth
 from ...core import settings as config
 from ...core.observability import metrics
 from ...core.utils import utc_now
+from ...integrations import r2_sync
 from ...repositories import storage
 from ...schemas.models import (
     GalleryBatchFavoriteRequest,
@@ -34,6 +39,7 @@ from ...schemas.models import (
     GalleryExportRequest,
     GalleryFavoriteRequest,
     GalleryResponse,
+    GallerySyncJobStatus,
     MessageResponse,
 )
 
@@ -41,6 +47,83 @@ from ...schemas.models import (
 router = APIRouter()
 logger = logging.getLogger(__name__)
 GALLERY_EXPORT_TERMINAL_STATUSES = {"success", "error"}
+GALLERY_SYNC_TERMINAL_STATUSES = {"success", "error"}
+MAX_ACTIVE_EXPORT_JOBS = 5
+MAX_ACTIVE_SYNC_JOBS = 1
+EXPORT_JOB_TTL_SECONDS = 1800
+EXPORT_JOB_GC_INTERVAL_SECONDS = 300
+SYNC_JOB_TTL_SECONDS = 1800
+SCHEDULED_R2_SYNC_DISABLED_POLL_SECONDS = 60
+
+
+def _resolve_gallery_image_path(filename: str) -> Path | None:
+    path = storage.safe_image_path(filename)
+    if not path or not path.exists():
+        return None
+    if not storage.is_gallery_filename_referenced(filename):
+        return None
+    return path
+
+
+def _resolve_gallery_thumbnail_path(filename: str) -> Path | None:
+    if not storage.is_gallery_filename_referenced(filename):
+        return None
+
+    thumbnail_filename = storage.ensure_thumbnail_for_image(filename)
+    if not thumbnail_filename:
+        return None
+
+    path = storage.safe_thumbnail_path(thumbnail_filename)
+    if path and path.exists():
+        return path
+
+    storage.invalidate_thumbnail_cache(thumbnail_filename)
+    thumbnail_filename = storage.ensure_thumbnail_for_image(filename)
+    if not thumbnail_filename:
+        return None
+
+    path = storage.safe_thumbnail_path(thumbnail_filename)
+    if not path or not path.exists():
+        return None
+    return path
+
+
+def _x_accel_response(
+    path: Path,
+    *,
+    internal_prefix: str,
+    media_type: str,
+    download: bool = False,
+) -> Response:
+    headers = {
+        "X-Accel-Redirect": f"{internal_prefix}{quote(path.name, safe='')}",
+        "Cache-Control": "public, max-age=31536000",
+    }
+    if download:
+        extension = path.suffix.lstrip(".") or "png"
+        filename = f"gpt-image-{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.{extension}"
+        headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+    return Response(status_code=200, media_type=media_type, headers=headers)
+
+
+def _resolve_batch_download_entries(
+    entries: list[GalleryEntry],
+) -> tuple[list[GalleryEntry], list[dict[str, str]]]:
+    exportable_entries: list[GalleryEntry] = []
+    skipped_entries: list[dict[str, str]] = []
+    for entry in entries:
+        path = storage.safe_image_path(entry.filename)
+        if path and path.exists():
+            exportable_entries.append(entry)
+            continue
+        skipped_entries.append(
+            {
+                "id": entry.id,
+                "filename": entry.filename,
+                "reason": "image_file_missing",
+            }
+        )
+    return exportable_entries, skipped_entries
 
 
 def normalize_gallery_date_filter(value: str | None, end_of_day: bool = False) -> str | None:
@@ -88,12 +171,32 @@ def build_gallery_filters(
     }
 
 
+def _gallery_filters_for_log(filters: dict) -> dict:
+    prompt = str(filters.get("prompt") or "")
+    return {
+        "prompt_present": bool(prompt),
+        "prompt_len": len(prompt),
+        "prompt_hash": hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+        if prompt
+        else None,
+        **{
+            key: value
+            for key, value in filters.items()
+            if key != "prompt" and value not in (None, "", False)
+        },
+    }
+
+
 async def _gallery_zip_response(
     entries,
     filename_prefix: str,
     skipped: list[dict] | None = None,
     extra_headers: dict[str, str] | None = None,
+    reserve_export_slot: bool = False,
 ) -> StreamingResponse:
+    if reserve_export_slot:
+        await _reserve_gallery_export_direct_slot()
+
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     filename = f"{filename_prefix}-{timestamp}.zip"
     headers = {
@@ -103,8 +206,16 @@ async def _gallery_zip_response(
     }
     if extra_headers:
         headers.update(extra_headers)
+
+    def zip_chunks():
+        try:
+            yield from iter_gallery_zip_chunks(entries, skipped=skipped)
+        finally:
+            if reserve_export_slot:
+                _release_gallery_export_direct_slot()
+
     return StreamingResponse(
-        iter_gallery_zip_chunks(entries, skipped=skipped),
+        zip_chunks(),
         media_type="application/zip",
         headers=headers,
     )
@@ -131,6 +242,59 @@ def _gallery_export_subscribers() -> dict[str, set[asyncio.Queue]]:
     if not hasattr(app.state, "gallery_export_subscribers"):
         app.state.gallery_export_subscribers = {}
     return app.state.gallery_export_subscribers
+
+
+def _gallery_export_lock() -> asyncio.Lock:
+    if not hasattr(app.state, "gallery_export_lock"):
+        app.state.gallery_export_lock = asyncio.Lock()
+    return app.state.gallery_export_lock
+
+
+def _gallery_export_direct_downloads() -> int:
+    return max(0, int(getattr(app.state, "gallery_export_direct_downloads", 0) or 0))
+
+
+def _active_gallery_export_count() -> int:
+    active_jobs = sum(
+        1
+        for job in _gallery_export_jobs().values()
+        if job.get("status") not in GALLERY_EXPORT_TERMINAL_STATUSES
+    )
+    return active_jobs + _gallery_export_direct_downloads()
+
+
+def _release_gallery_export_direct_slot() -> None:
+    app.state.gallery_export_direct_downloads = max(
+        0,
+        _gallery_export_direct_downloads() - 1,
+    )
+
+
+async def _reserve_gallery_export_direct_slot() -> None:
+    async with _gallery_export_lock():
+        active_count = _active_gallery_export_count()
+        if active_count >= MAX_ACTIVE_EXPORT_JOBS:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Too many active export jobs ({active_count}). "
+                "Please wait for existing exports to complete.",
+            )
+        app.state.gallery_export_direct_downloads = _gallery_export_direct_downloads() + 1
+
+
+async def _create_reserved_gallery_export_job(
+    filename_prefix: str,
+    requested_count: int,
+) -> dict:
+    async with _gallery_export_lock():
+        active_count = _active_gallery_export_count()
+        if active_count >= MAX_ACTIVE_EXPORT_JOBS:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Too many active export jobs ({active_count}). "
+                "Please wait for existing exports to complete.",
+            )
+        return _create_gallery_export_job(filename_prefix, requested_count)
 
 
 def _gallery_export_payload(job: dict) -> dict:
@@ -177,6 +341,48 @@ def _cleanup_gallery_export_job(job_id: str) -> None:
     path = job.get("path")
     if path:
         Path(path).unlink(missing_ok=True)
+
+
+async def gc_gallery_export_jobs() -> None:
+    """Periodically clean up completed/errored export jobs and orphan ZIP files."""
+    while True:
+        try:
+            await asyncio.sleep(EXPORT_JOB_GC_INTERVAL_SECONDS)
+            now_ts = time.time()
+            jobs = _gallery_export_jobs()
+            stale_ids = []
+            for job_id, job in jobs.items():
+                if job.get("status") not in GALLERY_EXPORT_TERMINAL_STATUSES:
+                    continue
+                updated_at = job.get("updated_at", "")
+                try:
+                    job_ts = datetime.fromisoformat(
+                        str(updated_at).replace("Z", "+00:00")
+                    ).timestamp()
+                except (ValueError, AttributeError):
+                    job_ts = 0
+                if now_ts - job_ts >= EXPORT_JOB_TTL_SECONDS:
+                    stale_ids.append(job_id)
+            for job_id in stale_ids:
+                _cleanup_gallery_export_job(job_id)
+            if stale_ids:
+                logger.info(
+                    "GC cleaned up %d stale gallery export job(s)", len(stale_ids)
+                )
+            # Remove orphan ZIP files with no matching in-memory job
+            exports_dir = Path(config.DATA_DIR) / "exports"
+            if exports_dir.exists():
+                known_ids = set(jobs.keys())
+                for zip_path in exports_dir.glob("*.zip"):
+                    if zip_path.stem not in known_ids:
+                        zip_path.unlink(missing_ok=True)
+                        logger.info(
+                            "GC removed orphan export file: %s", zip_path.name
+                        )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("Gallery export GC error", exc_info=True)
 
 
 def _create_gallery_export_job(filename_prefix: str, requested_count: int) -> dict:
@@ -277,6 +483,277 @@ async def _run_gallery_export_job(
         _gallery_export_tasks().pop(job_id, None)
 
 
+def _gallery_sync_jobs() -> dict[str, dict]:
+    if not hasattr(app.state, "gallery_sync_jobs"):
+        app.state.gallery_sync_jobs = {}
+    return app.state.gallery_sync_jobs
+
+
+def _gallery_sync_tasks() -> dict[str, asyncio.Task]:
+    if not hasattr(app.state, "gallery_sync_tasks"):
+        app.state.gallery_sync_tasks = {}
+    return app.state.gallery_sync_tasks
+
+
+def _gallery_sync_subscribers() -> dict[str, set[asyncio.Queue]]:
+    if not hasattr(app.state, "gallery_sync_subscribers"):
+        app.state.gallery_sync_subscribers = {}
+    return app.state.gallery_sync_subscribers
+
+
+def _gallery_sync_lock() -> asyncio.Lock:
+    if not hasattr(app.state, "gallery_sync_lock"):
+        app.state.gallery_sync_lock = asyncio.Lock()
+    return app.state.gallery_sync_lock
+
+
+def _active_gallery_sync_count() -> int:
+    return sum(
+        1
+        for job in _gallery_sync_jobs().values()
+        if job.get("status") not in GALLERY_SYNC_TERMINAL_STATUSES
+    )
+
+
+def _gallery_sync_payload(job: dict) -> dict:
+    keys = (
+        "job_id",
+        "status",
+        "stage",
+        "message",
+        "progress",
+        "created_at",
+        "updated_at",
+        "error",
+        "total_count",
+        "compared_count",
+        "uploaded_count",
+        "skipped_existing_count",
+        "missing_local_count",
+        "failed_count",
+        "bytes_total",
+        "bytes_uploaded",
+    )
+    return {key: job.get(key) for key in keys}
+
+
+def _publish_gallery_sync_job(job_id: str, updates: dict) -> dict | None:
+    job = _gallery_sync_jobs().get(job_id)
+    if not job:
+        return None
+    job.update(updates)
+    job["updated_at"] = utc_now()
+    payload = _gallery_sync_payload(job)
+    event = {"event": "sync", "data": payload}
+    for queue in list(_gallery_sync_subscribers().get(job_id, set())):
+        publish_queue(queue, event)
+    return payload
+
+
+def _cleanup_gallery_sync_jobs() -> None:
+    now_ts = time.time()
+    stale_ids = []
+    for job_id, job in _gallery_sync_jobs().items():
+        if job.get("status") not in GALLERY_SYNC_TERMINAL_STATUSES:
+            continue
+        updated_at = job.get("updated_at", "")
+        try:
+            job_ts = datetime.fromisoformat(str(updated_at).replace("Z", "+00:00")).timestamp()
+        except (ValueError, AttributeError):
+            job_ts = 0
+        if now_ts - job_ts >= SYNC_JOB_TTL_SECONDS:
+            stale_ids.append(job_id)
+    for job_id in stale_ids:
+        _gallery_sync_jobs().pop(job_id, None)
+        _gallery_sync_tasks().pop(job_id, None)
+        _gallery_sync_subscribers().pop(job_id, None)
+
+
+def _create_gallery_sync_job(total_count: int) -> dict:
+    job_id = uuid.uuid4().hex
+    now = utc_now()
+    job = {
+        "job_id": job_id,
+        "status": "queued",
+        "stage": "queued",
+        "message": "Queued R2 gallery sync",
+        "progress": 0,
+        "created_at": now,
+        "updated_at": now,
+        "error": None,
+        "total_count": total_count,
+        "compared_count": 0,
+        "uploaded_count": 0,
+        "skipped_existing_count": 0,
+        "missing_local_count": 0,
+        "failed_count": 0,
+        "bytes_total": 0,
+        "bytes_uploaded": 0,
+    }
+    _gallery_sync_jobs()[job_id] = job
+    return job
+
+
+async def _create_reserved_gallery_sync_job(total_count: int) -> dict:
+    async with _gallery_sync_lock():
+        _cleanup_gallery_sync_jobs()
+        active_count = _active_gallery_sync_count()
+        if active_count >= MAX_ACTIVE_SYNC_JOBS:
+            raise HTTPException(
+                status_code=429,
+                detail="A gallery R2 sync job is already queued or running.",
+            )
+        return _create_gallery_sync_job(total_count)
+
+
+def _r2_sync_interval_hours(r2_settings: dict | None) -> int:
+    if not isinstance(r2_settings, dict):
+        return 0
+    try:
+        interval_hours = int(r2_settings.get("sync_interval_hours") or 0)
+    except (TypeError, ValueError):
+        return 0
+    return interval_hours if interval_hours > 0 else 0
+
+
+async def _scheduled_gallery_r2_sync_delay_seconds() -> int:
+    try:
+        r2_settings = await asyncio.to_thread(storage.load_r2_backup_settings)
+    except Exception:
+        logger.warning("Failed to load R2 settings for scheduled sync", exc_info=True)
+        return SCHEDULED_R2_SYNC_DISABLED_POLL_SECONDS
+    if not r2_settings.get("enabled"):
+        return SCHEDULED_R2_SYNC_DISABLED_POLL_SECONDS
+    interval_hours = _r2_sync_interval_hours(r2_settings)
+    if interval_hours <= 0:
+        return SCHEDULED_R2_SYNC_DISABLED_POLL_SECONDS
+    return interval_hours * 3600
+
+
+async def _run_scheduled_gallery_r2_sync_once() -> dict[str, object]:
+    r2_settings = await asyncio.to_thread(storage.load_r2_backup_settings)
+    interval_hours = _r2_sync_interval_hours(r2_settings)
+    if not r2_settings.get("enabled") or interval_hours <= 0:
+        return {"started": False, "reason": "disabled"}
+
+    try:
+        await asyncio.to_thread(
+            r2_sync.resolve_r2_backup_settings,
+            r2_settings,
+            require_enabled=True,
+        )
+    except r2_sync.R2ConfigurationError as e:
+        logger.info("Skipping scheduled R2 gallery sync: %s", e)
+        return {"started": False, "reason": "invalid_config"}
+
+    gallery_count = await asyncio.to_thread(storage.get_gallery_count)
+    if gallery_count <= 0:
+        return {"started": False, "reason": "empty_gallery"}
+
+    async with _gallery_sync_lock():
+        _cleanup_gallery_sync_jobs()
+        if _active_gallery_sync_count() >= MAX_ACTIVE_SYNC_JOBS:
+            return {"started": False, "reason": "active_sync"}
+        job = _create_gallery_sync_job(gallery_count)
+
+    task = asyncio.create_task(
+        _run_gallery_sync_job(
+            job["job_id"],
+            r2_settings,
+            storage.iter_gallery_export_rows(),
+            total_count=gallery_count,
+        )
+    )
+    _gallery_sync_tasks()[job["job_id"]] = task
+    logger.info("Queued scheduled R2 gallery sync job %s", job["job_id"])
+    return {"started": True, "job_id": job["job_id"]}
+
+
+async def run_gallery_r2_scheduled_sync() -> None:
+    while True:
+        delay_seconds = await _scheduled_gallery_r2_sync_delay_seconds()
+        await asyncio.sleep(delay_seconds)
+        try:
+            await _run_scheduled_gallery_r2_sync_once()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("Scheduled R2 gallery sync failed before job creation", exc_info=True)
+
+
+async def _run_gallery_sync_job(
+    job_id: str,
+    r2_settings: dict,
+    entries: Iterable[dict],
+    *,
+    total_count: int,
+) -> None:
+    if job_id not in _gallery_sync_jobs():
+        return
+
+    loop = asyncio.get_running_loop()
+
+    def progress(updates: dict):
+        loop.call_soon_threadsafe(_publish_gallery_sync_job, job_id, updates)
+
+    try:
+        _publish_gallery_sync_job(
+            job_id,
+            {
+                "status": "running",
+                "stage": "listing_remote",
+                "message": "Listing existing R2 objects",
+                "progress": 0,
+            },
+        )
+        result = await asyncio.to_thread(
+            r2_sync.sync_gallery_to_r2,
+            r2_settings,
+            entries,
+            total_count=total_count,
+            progress_cb=progress,
+        )
+        _publish_gallery_sync_job(
+            job_id,
+            {
+                "status": "success",
+                "stage": "completed",
+                "message": "R2 gallery sync complete",
+                "progress": 100,
+                "error": None,
+                **result.to_updates(),
+            },
+        )
+    except asyncio.CancelledError:
+        raise
+    except r2_sync.R2SyncError as e:
+        logger.warning("Gallery R2 sync job %s finished with upload errors", job_id)
+        _publish_gallery_sync_job(
+            job_id,
+            {
+                "status": "error",
+                "stage": "error",
+                "message": "R2 gallery sync failed",
+                "progress": 100,
+                "error": str(e),
+                **e.result.to_updates(),
+            },
+        )
+    except Exception as e:
+        logger.warning("Gallery R2 sync job %s failed", job_id, exc_info=True)
+        _publish_gallery_sync_job(
+            job_id,
+            {
+                "status": "error",
+                "stage": "error",
+                "message": "R2 gallery sync failed",
+                "error": str(e),
+            },
+        )
+    finally:
+        _gallery_sync_tasks().pop(job_id, None)
+
+
 @router.get("/api/gallery", response_model=GalleryResponse)
 async def get_gallery_handler(
     page: int = Query(default=1, ge=1),
@@ -321,11 +798,7 @@ async def get_gallery_handler(
             gallery_page.page,
             gallery_page.page_size,
             gallery_page.total,
-            {
-                key: value
-                for key, value in filters.items()
-                if value not in (None, "", False)
-            },
+            _gallery_filters_for_log(filters),
         )
 
     return GalleryResponse(
@@ -385,7 +858,6 @@ async def download_gallery_batch(req: GalleryBatchRequest):
         raise HTTPException(status_code=404, detail="Gallery entries not found")
 
     missing_ids = _missing_gallery_ids(req.ids, entries)
-    exportable_entries: list[GalleryEntry] = []
     skipped_entries = [
         {
             "id": image_id,
@@ -393,18 +865,11 @@ async def download_gallery_batch(req: GalleryBatchRequest):
         }
         for image_id in missing_ids
     ]
-    for entry in entries:
-        path = await asyncio.to_thread(storage.safe_image_path, entry.filename)
-        if path and await asyncio.to_thread(path.exists):
-            exportable_entries.append(entry)
-            continue
-        skipped_entries.append(
-            {
-                "id": entry.id,
-                "filename": entry.filename,
-                "reason": "image_file_missing",
-            }
-        )
+    exportable_entries, file_skipped_entries = await asyncio.to_thread(
+        _resolve_batch_download_entries,
+        entries,
+    )
+    skipped_entries.extend(file_skipped_entries)
 
     return await _gallery_zip_response(
         exportable_entries,
@@ -415,6 +880,7 @@ async def download_gallery_batch(req: GalleryBatchRequest):
             "X-Gallery-Exported-Count": str(len(exportable_entries)),
             "X-Gallery-Missing-Count": str(len(skipped_entries)),
         },
+        reserve_export_slot=True,
     )
 
 
@@ -444,7 +910,7 @@ async def create_gallery_export_job(req: GalleryExportRequest | None = Body(defa
         requested_count = gallery_count
         filename_prefix = "gpt-images"
 
-    job = _create_gallery_export_job(filename_prefix, requested_count)
+    job = await _create_reserved_gallery_export_job(filename_prefix, requested_count)
     task = asyncio.create_task(
         _run_gallery_export_job(
             job["job_id"],
@@ -471,6 +937,10 @@ async def stream_gallery_export_job(job_id: str, request: Request):
     if not job:
         raise HTTPException(status_code=404, detail="Gallery export job not found")
 
+    client_ip = auth.get_client_ip(request)
+    if not await sse_limiter.acquire(client_ip):
+        raise HTTPException(status_code=429, detail="Too many SSE connections")
+
     queue: asyncio.Queue = asyncio.Queue(maxsize=20)
     subscribers_by_job = _gallery_export_subscribers()
     subscribers = subscribers_by_job.setdefault(job_id, set())
@@ -478,9 +948,12 @@ async def stream_gallery_export_job(job_id: str, request: Request):
     publish_queue(queue, {"event": "export", "data": _gallery_export_payload(job)})
 
     async def event_stream():
+        start = time.monotonic()
         try:
             while True:
                 if await request.is_disconnected():
+                    break
+                if time.monotonic() - start > config.SSE_CONNECTION_TTL_SECONDS:
                     break
                 try:
                     item = await asyncio.wait_for(queue.get(), timeout=15)
@@ -496,6 +969,7 @@ async def stream_gallery_export_job(job_id: str, request: Request):
             subscribers.discard(queue)
             if not subscribers:
                 subscribers_by_job.pop(job_id, None)
+            await sse_limiter.release(client_ip)
 
     return StreamingResponse(
         event_stream(),
@@ -534,6 +1008,93 @@ async def download_gallery_export_job(job_id: str):
     )
 
 
+@router.post("/api/gallery/sync-jobs", response_model=GallerySyncJobStatus, status_code=202)
+async def create_gallery_sync_job():
+    gallery_count = await asyncio.to_thread(storage.get_gallery_count)
+    if gallery_count == 0:
+        raise HTTPException(status_code=404, detail="No images in gallery")
+
+    r2_settings = await asyncio.to_thread(storage.load_r2_backup_settings)
+    try:
+        await asyncio.to_thread(
+            r2_sync.resolve_r2_backup_settings,
+            r2_settings,
+            require_enabled=True,
+        )
+    except r2_sync.R2ConfigurationError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    job = await _create_reserved_gallery_sync_job(gallery_count)
+    task = asyncio.create_task(
+        _run_gallery_sync_job(
+            job["job_id"],
+            r2_settings,
+            storage.iter_gallery_export_rows(),
+            total_count=gallery_count,
+        )
+    )
+    _gallery_sync_tasks()[job["job_id"]] = task
+    return GallerySyncJobStatus(**_gallery_sync_payload(job))
+
+
+@router.get("/api/gallery/sync-jobs/{job_id}", response_model=GallerySyncJobStatus)
+async def get_gallery_sync_job(job_id: str):
+    job = _gallery_sync_jobs().get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Gallery sync job not found")
+    return GallerySyncJobStatus(**_gallery_sync_payload(job))
+
+
+@router.get("/api/gallery/sync-jobs/{job_id}/events")
+async def stream_gallery_sync_job(job_id: str, request: Request):
+    job = _gallery_sync_jobs().get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Gallery sync job not found")
+
+    client_ip = auth.get_client_ip(request)
+    if not await sse_limiter.acquire(client_ip):
+        raise HTTPException(status_code=429, detail="Too many SSE connections")
+
+    queue: asyncio.Queue = asyncio.Queue(maxsize=20)
+    subscribers_by_job = _gallery_sync_subscribers()
+    subscribers = subscribers_by_job.setdefault(job_id, set())
+    subscribers.add(queue)
+    publish_queue(queue, {"event": "sync", "data": _gallery_sync_payload(job)})
+
+    async def event_stream():
+        start = time.monotonic()
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                if time.monotonic() - start > config.SSE_CONNECTION_TTL_SECONDS:
+                    break
+                try:
+                    item = await asyncio.wait_for(queue.get(), timeout=15)
+                except asyncio.TimeoutError:
+                    yield ": keep-alive\n\n"
+                    continue
+
+                data = item["data"]
+                yield serialize_sse_event(item["event"], data)
+                if data.get("status") in GALLERY_SYNC_TERMINAL_STATUSES:
+                    break
+        finally:
+            subscribers.discard(queue)
+            if not subscribers:
+                subscribers_by_job.pop(job_id, None)
+            await sse_limiter.release(client_ip)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @router.patch("/api/gallery/{image_id}/favorite", response_model=GalleryEntry)
 async def update_gallery_favorite(
     image_id: str,
@@ -554,11 +1115,19 @@ async def get_gallery_item(image_id: str):
 
 
 async def _image_file_response(filename: str, *, download: bool = False):
-    path = await asyncio.to_thread(storage.safe_image_path, filename)
-    if not path or not await asyncio.to_thread(path.exists):
+    path = await asyncio.to_thread(_resolve_gallery_image_path, filename)
+    if not path:
         raise HTTPException(status_code=404, detail="Image not found")
 
     media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    if config.ENABLE_NGINX_ACCEL_REDIRECT:
+        return _x_accel_response(
+            path,
+            internal_prefix="/_protected/images/",
+            media_type=media_type,
+            download=download,
+        )
+
     if download:
         extension = path.suffix.lstrip(".") or "png"
         return FileResponse(
@@ -581,25 +1150,19 @@ async def serve_image(filename: str):
 
 @router.get("/api/thumb/{filename}")
 async def serve_thumbnail(filename: str):
-    thumbnail_filename = await asyncio.to_thread(
-        storage.ensure_thumbnail_for_image,
+    path = await asyncio.to_thread(
+        _resolve_gallery_thumbnail_path,
         filename,
     )
-    if not thumbnail_filename:
+    if not path:
         raise HTTPException(status_code=404, detail="Thumbnail not found")
 
-    path = storage.safe_thumbnail_path(thumbnail_filename)
-    if not path or not path.exists():
-        await asyncio.to_thread(storage.invalidate_thumbnail_cache, thumbnail_filename)
-        thumbnail_filename = await asyncio.to_thread(
-            storage.ensure_thumbnail_for_image,
-            filename,
+    if config.ENABLE_NGINX_ACCEL_REDIRECT:
+        return _x_accel_response(
+            path,
+            internal_prefix="/_protected/thumbs/",
+            media_type=storage.THUMBNAIL_CONTENT_TYPE,
         )
-        if not thumbnail_filename:
-            raise HTTPException(status_code=404, detail="Thumbnail not found")
-        path = storage.safe_thumbnail_path(thumbnail_filename)
-        if not path or not path.exists():
-            raise HTTPException(status_code=404, detail="Thumbnail not found")
 
     return FileResponse(
         path,
@@ -622,6 +1185,7 @@ async def download_all_images():
     return await _gallery_zip_response(
         storage.iter_gallery_export_rows(),
         "gpt-images",
+        reserve_export_slot=True,
     )
 
 

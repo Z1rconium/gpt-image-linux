@@ -1,6 +1,58 @@
 import ipaddress
+import os
+import re
 import socket
 from urllib.parse import urlparse, urlsplit, urlunsplit
+
+from . import settings as config
+
+
+ENV_VAR_REF_RE = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$")
+
+
+def get_env_var_ref_name(value: str | None) -> str | None:
+    match = ENV_VAR_REF_RE.match(str(value or "").strip())
+    return match.group(1) if match else None
+
+
+def is_malformed_env_var_ref(value: str | None) -> bool:
+    normalized = str(value or "").strip()
+    return bool(normalized) and ("${" in normalized or "}" in normalized) and not get_env_var_ref_name(normalized)
+
+
+def resolve_env_var_ref(value: str | None) -> str:
+    normalized = str(value or "").strip()
+    env_var = get_env_var_ref_name(normalized)
+    if env_var:
+        return os.getenv(env_var, "").strip()
+    return normalized
+
+
+def normalize_secret_env_ref_or_plaintext(
+    value: str | None,
+    *,
+    field_name: str,
+    normalizer=None,
+) -> str:
+    normalized = str(value or "").strip()
+    if not normalized:
+        return ""
+    if is_malformed_env_var_ref(normalized):
+        raise ValueError(
+            f"{field_name} env ref must be formatted as ${{ENV_VAR_NAME}}."
+        )
+
+    env_var = get_env_var_ref_name(normalized)
+    if env_var:
+        return f"${{{env_var}}}"
+
+    if not config.ALLOW_PLAINTEXT_SECRETS:
+        raise ValueError(
+            f"{field_name} must use ${{ENV_VAR_NAME}} unless "
+            "ALLOW_PLAINTEXT_SECRETS=true."
+        )
+
+    return normalizer(normalized) if normalizer is not None else normalized
 
 
 def _get_private_ip_ranges() -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]:
@@ -99,6 +151,8 @@ def _validate_url_base(
     private_ip_error: str,
     allowlist: str = "",
     allowlist_error_prefix: str = "Hostname",
+    reject_userinfo: bool = False,
+    reject_query_fragment: bool = False,
 ) -> None:
     parsed = urlparse(url)
 
@@ -107,6 +161,12 @@ def _validate_url_base(
 
     if not parsed.hostname:
         raise ValueError(missing_hostname_error)
+
+    if reject_userinfo and (parsed.username is not None or parsed.password is not None):
+        raise ValueError("URL must not include username or password")
+
+    if reject_query_fragment and (parsed.query or parsed.fragment):
+        raise ValueError("URL must not include query strings or fragments")
 
     hostname = parsed.hostname.lower()
 
@@ -136,14 +196,96 @@ def validate_upstream_url(url: str, allowlist: str) -> None:
         blocked_hostname_error="Hostname '{hostname}' is not allowed",
         private_ip_error="Hostname '{hostname}' resolves to private/internal IP(s): {resolved_info}",
         allowlist=allowlist,
+        reject_userinfo=True,
+        reject_query_fragment=True,
     )
+
+
+def normalize_upstream_base_url(url: str | None) -> str:
+    value = str(url or "").strip()
+    if not value:
+        raise ValueError("API URL must not be empty")
+
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError as e:
+        raise ValueError("API URL must include a valid port") from e
+
+    if parsed.scheme.lower() != "https":
+        raise ValueError("API URL must use https://")
+    if not parsed.hostname:
+        raise ValueError("API URL must include a hostname")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("API URL must not include username or password")
+    if parsed.query or parsed.fragment:
+        raise ValueError("API URL must not include query strings or fragments")
+
+    hostname = parsed.hostname.lower()
+    host = f"[{hostname}]" if ":" in hostname and not hostname.startswith("[") else hostname
+    if port is not None:
+        host = f"{host}:{port}"
+    path = parsed.path.rstrip("/")
+    return urlunsplit(("https", host, path, "", ""))
+
+
+def normalize_r2_endpoint_url(url: str | None) -> str:
+    value = str(url or "").strip()
+    if not value:
+        return ""
+
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError as e:
+        raise ValueError("R2 endpoint URL must include a valid port") from e
+
+    if parsed.scheme.lower() != "https":
+        raise ValueError("R2 endpoint URL must use https://")
+    if not parsed.hostname:
+        raise ValueError("R2 endpoint URL must include a hostname")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("R2 endpoint URL must not include username or password")
+    if parsed.query or parsed.fragment:
+        raise ValueError("R2 endpoint URL must not include query strings or fragments")
+
+    hostname = parsed.hostname.lower()
+    host = f"[{hostname}]" if ":" in hostname and not hostname.startswith("[") else hostname
+    if port is not None:
+        host = f"{host}:{port}"
+    path = parsed.path.rstrip("/")
+    return urlunsplit(("https", host, path, "", ""))
+
+
+def redact_url(url: str | None) -> str:
+    value = str(url or "").strip()
+    if not value:
+        return ""
+
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError:
+        return "***"
+
+    if not parsed.scheme or not parsed.hostname:
+        return "***"
+
+    hostname = parsed.hostname
+    host = f"[{hostname}]" if ":" in hostname and not hostname.startswith("[") else hostname
+    port_part = f":{port}" if port is not None else ""
+    userinfo = "***@" if parsed.username is not None or parsed.password is not None else ""
+    path = "/***" if parsed.path and parsed.path != "/" else parsed.path
+    query = "***" if parsed.query else ""
+    fragment = "***" if parsed.fragment else ""
+    return urlunsplit((parsed.scheme, f"{userinfo}{host}{port_part}", path, query, fragment))
 
 
 def validate_image_url(url: str) -> None:
     _validate_url_base(
         url,
-        allowed_schemes={"http", "https"},
-        scheme_error="Only HTTP/HTTPS URLs are allowed for image URLs",
+        allowed_schemes={"https"},
+        scheme_error="Only HTTPS URLs are allowed for image URLs",
         missing_hostname_error="Invalid URL: no hostname",
         blocked_hostname_error="Hostname '{hostname}' is not allowed",
         private_ip_error="Image URL hostname '{hostname}' resolves to private/internal IP(s): {resolved_info}",
@@ -180,6 +322,8 @@ def mask_webhook_url(url: str | None) -> str:
     value = str(url or "").strip()
     if not value:
         return ""
+    if get_env_var_ref_name(value):
+        return value
 
     try:
         parsed = urlsplit(value)
@@ -230,6 +374,8 @@ def mask_socks5_proxy_url(url: str | None) -> str:
     value = str(url or "").strip()
     if not value:
         return ""
+    if get_env_var_ref_name(value):
+        return value
 
     try:
         parsed = urlsplit(value)

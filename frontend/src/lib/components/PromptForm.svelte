@@ -1,7 +1,9 @@
 <script lang="ts">
   import PromptHelperPanel from '$lib/components/PromptHelperPanel.svelte';
+  import { plainTextInput } from '$lib/actions/plainTextInput';
   import { t } from '$lib/i18n';
   import type { PromptFormState } from '$lib/stores/preview';
+  import { RESPONSE_FORMAT_OPTIONS, sanitizeQuantityInput } from '$lib/utils/promptForm';
 
   export let form: PromptFormState;
   export let loading = false;
@@ -25,8 +27,8 @@
       : '0-100';
   $: optimizeDisabled = loading || optimizing || !optimizerEnabled || !form.prompt.trim();
 
-  function clampQuantity() {
-    form = { ...form, quantity: Math.min(Math.max(Number(form.quantity) || 1, 1), 10) };
+  function handleQuantityInput() {
+    form = { ...form, quantity: sanitizeQuantityInput(form.quantity) };
   }
 
   function clampCompression() {
@@ -70,9 +72,11 @@
           maxlength="4000"
           rows="8"
           autocomplete="off"
+          spellcheck="false"
           aria-label={$t.common.prompt}
           placeholder={$t.promptForm.placeholder}
           class="control-focus h-full min-h-[13rem] w-full flex-1 resize-y rounded-xl border border-zinc-800 bg-zinc-950 px-4 py-3 pb-8 text-sm leading-6 text-zinc-100 focus:border-emerald-500 lg:resize-none"
+          use:plainTextInput
         ></textarea>
         <div class="pointer-events-none absolute bottom-3 right-4 text-xs text-zinc-500">{promptLen}/4000</div>
       </div>
@@ -120,7 +124,15 @@
 
     <label class="block">
       <span class="mb-1.5 block text-xs font-medium text-zinc-400">{$t.promptForm.quantity}</span>
-      <input bind:value={form.quantity} disabled={promptOnlyMode || loading} type="number" min="1" max="10" class="control-focus w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2.5 text-sm text-zinc-100 focus:border-emerald-500 disabled:cursor-not-allowed disabled:opacity-50" on:input={clampQuantity} />
+      <input
+        bind:value={form.quantity}
+        disabled={promptOnlyMode || loading}
+        type="text"
+        inputmode="numeric"
+        pattern="[0-9]*"
+        class="control-focus w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2.5 text-sm text-zinc-100 focus:border-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
+        on:input={handleQuantityInput}
+      />
     </label>
 
     <label class="block">
@@ -140,9 +152,9 @@
     <label class="block">
       <span class="mb-1.5 block text-xs font-medium text-zinc-400">{$t.promptForm.responseFormat}</span>
       <select bind:value={form.responseFormat} disabled={promptOnlyMode || loading} class="control-focus w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2.5 text-sm text-zinc-100 focus:border-emerald-500 disabled:cursor-not-allowed disabled:opacity-50">
-        <option value="">{$t.promptForm.defaultResponseFormat}</option>
-        <option value="url">url</option>
-        <option value="b64_json">b64_json</option>
+        {#each RESPONSE_FORMAT_OPTIONS as responseFormat}
+          <option value={responseFormat}>{responseFormat || $t.promptForm.defaultResponseFormat}</option>
+        {/each}
       </select>
     </label>
 

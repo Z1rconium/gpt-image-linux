@@ -42,6 +42,7 @@ type MockOptions = {
   editUploadFailure?: boolean;
   galleryImages?: GalleryImageFixture[];
   promptSnippets?: PromptSnippetFixture[];
+  settings?: Record<string, unknown>;
   generatedJob?: unknown;
   runningJobs?: unknown[];
   historyJobs?: unknown[];
@@ -102,6 +103,7 @@ const settingsResponse = {
   api_key_source: 'stored',
   api_path: '/v1/images/generations',
   default_model: 'preset-default-model',
+  default_response_format: 'url',
   has_upstream_socks5_proxy: false,
   upstream_socks5_proxy_masked: '',
   has_webhook_url: true,
@@ -110,10 +112,27 @@ const settingsResponse = {
     enabled: true,
     api_url: 'https://example.com/v1/chat/completions',
     model: 'gpt-4o-mini',
+    timeout_seconds: 60,
     api_key_masked: '********',
     has_api_key: true,
     api_key_source: 'stored',
     api_key_env_var: null
+  },
+  r2_backup: {
+    enabled: false,
+    endpoint_url: '',
+    bucket_name: '',
+    region: 'auto',
+    key_prefix: 'gallery/',
+    sync_interval_hours: 0,
+    access_key_id_masked: '********',
+    has_access_key_id: false,
+    access_key_id_source: 'empty',
+    access_key_id_env_var: null,
+    secret_access_key_masked: '********',
+    has_secret_access_key: false,
+    secret_access_key_source: 'empty',
+    secret_access_key_env_var: null
   },
   presets: [
     {
@@ -124,7 +143,90 @@ const settingsResponse = {
       has_api_key: true,
       api_key_source: 'stored',
       api_path: '/v1/images/generations',
-      default_model: 'preset-default-model'
+      default_model: 'preset-default-model',
+      default_response_format: 'url'
+    }
+  ]
+};
+
+const overallConfigResponse = {
+  restart_required_names: [],
+  items: [
+    {
+      name: 'ENABLE_METRICS',
+      type: 'bool',
+      group: 'Observability',
+      description: 'Enable /api/metrics.',
+      value: false,
+      value_masked: 'false',
+      env_value_masked: 'false',
+      override_value_masked: null,
+      source: 'env',
+      is_env_set: true,
+      has_override: false,
+      secret: false,
+      hot_reload: true,
+      restart_required: false,
+      build_only: false,
+      updated_at: '2026-05-18T12:00:00Z',
+      override_updated_at: null
+    },
+    {
+      name: 'WEBHOOK_SIGNING_SECRET',
+      type: 'secret',
+      group: 'Webhooks',
+      description: 'Webhook signing secret.',
+      value: '********',
+      value_masked: '********',
+      env_value_masked: '',
+      override_value_masked: '********',
+      source: 'override',
+      is_env_set: false,
+      has_override: true,
+      secret: true,
+      hot_reload: true,
+      restart_required: false,
+      build_only: false,
+      updated_at: '2026-05-18T12:00:00Z',
+      override_updated_at: '2026-05-18T12:00:00Z'
+    },
+    {
+      name: 'ACCESS_KEY_COOKIE_NAME',
+      type: 'string',
+      group: 'Access / Security',
+      description: 'Access cookie name.',
+      value: 'gpt_image_access',
+      value_masked: 'gpt_image_access',
+      env_value_masked: 'gpt_image_access',
+      override_value_masked: 'custom_access',
+      source: 'override',
+      is_env_set: false,
+      has_override: true,
+      secret: false,
+      hot_reload: false,
+      restart_required: true,
+      build_only: false,
+      updated_at: '2026-05-18T12:00:00Z',
+      override_updated_at: null
+    },
+    {
+      name: 'PYTHON_BASE_IMAGE',
+      type: 'string',
+      group: 'Docker Build',
+      description: 'Python base image for Docker builds.',
+      value: 'python:3.11-slim',
+      value_masked: 'python:3.11-slim',
+      env_value_masked: 'python:3.11-slim',
+      override_value_masked: null,
+      source: 'default',
+      is_env_set: false,
+      has_override: false,
+      secret: false,
+      hot_reload: false,
+      restart_required: false,
+      build_only: true,
+      updated_at: '2026-05-18T12:00:00Z',
+      override_updated_at: null
     }
   ]
 };
@@ -244,6 +346,32 @@ function manyJobs(count: number) {
   return Array.from({ length: count }, (_, index) => job(`job-${index}`, `history prompt ${index}`, 'running'));
 }
 
+function isErrorJob(candidate: unknown) {
+  if (!candidate || typeof candidate !== 'object') return false;
+  const status = (candidate as { status?: unknown }).status;
+  return status === 'error' || status === 'upstream_error';
+}
+
+function cloneSettings(settings: Record<string, unknown>) {
+  return structuredClone(settings) as typeof settingsResponse;
+}
+
+function applyActivePresetFields(settings: typeof settingsResponse) {
+  const active = settings.presets.find((preset) => preset.id === settings.active_preset_id) || settings.presets[0];
+  if (!active) return settings;
+  return {
+    ...settings,
+    active_preset_id: active.id,
+    api_url: active.api_url,
+    api_key_masked: active.api_key_masked,
+    has_api_key: active.has_api_key,
+    api_key_source: active.api_key_source,
+    api_path: active.api_path,
+    default_model: active.default_model,
+    default_response_format: active.default_response_format
+  };
+}
+
 function manyGalleryImages(count: number) {
   return Array.from({ length: count }, (_, index) => ({
     ...baseGalleryImages[index % baseGalleryImages.length],
@@ -259,8 +387,11 @@ async function mockApi(page: Page, options: MockOptions = {}) {
   let galleryImages = [...(options.galleryImages ?? baseGalleryImages)];
   let promptSnippets = [...(options.promptSnippets ?? basePromptSnippets)];
   let promptSnippetCounter = promptSnippets.length + 1;
+  let mockedSettings = cloneSettings(options.settings ?? settingsResponse);
+  let mockedOverallConfig: any = structuredClone(overallConfigResponse);
+  let optimizerSystemPrompt = 'Default optimizer system prompt';
   const runningJobs = options.runningJobs ?? [];
-  const historyJobs = options.historyJobs ?? [job('history-1', 'saved prompt')];
+  let historyJobs = options.historyJobs ?? [job('history-1', 'saved prompt')];
 
   await page.addInitScript(() => {
     localStorage.setItem('gpt-image-panel-language', 'en');
@@ -288,8 +419,73 @@ async function mockApi(page: Page, options: MockOptions = {}) {
       await route.fulfill(json({ latest_version: null, has_update: false, checked_at: null }));
       return;
     }
+    if (url.pathname === '/api/settings/overall-config' && request.method() === 'GET') {
+      await route.fulfill(json(mockedOverallConfig));
+      return;
+    }
+    if (url.pathname === '/api/settings/overall-config' && request.method() === 'PUT') {
+      const body = JSON.parse(request.postData() || '{}');
+      const restartNames: string[] = [];
+      mockedOverallConfig = {
+        ...mockedOverallConfig,
+        restart_required_names: restartNames,
+        items: mockedOverallConfig.items.map((item: any) => {
+          const update = body.updates?.find((candidate: { name?: string }) => candidate.name === item.name);
+          if (!update) return item;
+          if (update.clear_override) {
+            return { ...item, has_override: false, override_value_masked: null, source: item.is_env_set ? 'env' : 'default' };
+          }
+          if (item.restart_required || item.build_only) restartNames.push(item.name);
+          const masked = item.secret ? '********' : String(update.value);
+          return {
+            ...item,
+            value: item.secret ? '********' : update.value,
+            value_masked: masked,
+            override_value_masked: masked,
+            source: 'override',
+            has_override: true
+          };
+        })
+      };
+      await route.fulfill(json(mockedOverallConfig));
+      return;
+    }
     if (url.pathname === '/api/settings') {
-      await route.fulfill(json(settingsResponse));
+      await route.fulfill(json(mockedSettings));
+      return;
+    }
+    if (url.pathname.match(/^\/api\/settings\/presets\/[^/]+\/activate$/) && request.method() === 'POST') {
+      const id = decodeURIComponent(url.pathname.split('/').at(-2) || '');
+      if (!mockedSettings.presets.some((preset) => preset.id === id)) {
+        await route.fulfill(json({ detail: 'Preset not found' }, 404));
+        return;
+      }
+      mockedSettings = applyActivePresetFields({ ...mockedSettings, active_preset_id: id });
+      await route.fulfill(json(mockedSettings));
+      return;
+    }
+    if (url.pathname.match(/^\/api\/settings\/presets\/[^/]+$/) && request.method() === 'DELETE') {
+      const id = decodeURIComponent(url.pathname.split('/').pop() || '');
+      if (mockedSettings.presets.length <= 1) {
+        await route.fulfill(json({ detail: 'At least one preset is required' }, 400));
+        return;
+      }
+      const deleteIndex = mockedSettings.presets.findIndex((preset) => preset.id === id);
+      if (deleteIndex < 0) {
+        await route.fulfill(json({ detail: 'Preset not found' }, 404));
+        return;
+      }
+      const nextPresets = mockedSettings.presets.filter((preset) => preset.id !== id);
+      const nextActiveId =
+        mockedSettings.active_preset_id === id
+          ? nextPresets[Math.min(deleteIndex, nextPresets.length - 1)].id
+          : mockedSettings.active_preset_id;
+      mockedSettings = applyActivePresetFields({
+        ...mockedSettings,
+        active_preset_id: nextActiveId,
+        presets: nextPresets
+      });
+      await route.fulfill(json(mockedSettings));
       return;
     }
     if (url.pathname === '/api/prompt-snippets' && request.method() === 'GET') {
@@ -347,6 +543,32 @@ async function mockApi(page: Page, options: MockOptions = {}) {
           duration_ms: 12
         })
       );
+      return;
+    }
+    if (url.pathname === '/api/prompt/optimizer-system-prompt' && request.method() === 'GET') {
+      await route.fulfill(
+        json({
+          system_prompt: optimizerSystemPrompt,
+          default_system_prompt: 'Default optimizer system prompt',
+          customized: optimizerSystemPrompt !== 'Default optimizer system prompt'
+        })
+      );
+      return;
+    }
+    if (url.pathname === '/api/prompt/optimizer-system-prompt' && request.method() === 'POST') {
+      const body = JSON.parse(request.postData() || '{}');
+      optimizerSystemPrompt = String(body.system_prompt || '').trim();
+      await route.fulfill(
+        json({
+          system_prompt: optimizerSystemPrompt,
+          default_system_prompt: 'Default optimizer system prompt',
+          customized: true
+        })
+      );
+      return;
+    }
+    if (url.pathname === '/api/settings/r2/health') {
+      await route.fulfill(json({ status: 'ok', checks: [{ name: 'configuration', status: 'ok', message: 'ok' }] }));
       return;
     }
     if (url.pathname.endsWith('/health') && url.pathname.startsWith('/api/settings/presets/')) {
@@ -423,7 +645,13 @@ async function mockApi(page: Page, options: MockOptions = {}) {
     }
     if (url.pathname === '/api/generate/jobs') {
       const includeFinished = url.searchParams.get('include_finished') === 'true';
-      await route.fulfill(json(includeFinished ? historyJobs : runningJobs));
+      const failedOnly = url.searchParams.get('failed_only') === 'true';
+      await route.fulfill(json(includeFinished ? (failedOnly ? historyJobs.filter(isErrorJob) : historyJobs) : runningJobs));
+      return;
+    }
+    if (url.pathname === '/api/generate/jobs/history' && request.method() === 'DELETE') {
+      historyJobs = [];
+      await route.fulfill(json({ status: 'success', message: 'Deleted job history' }));
       return;
     }
     if (url.pathname === '/api/generate/jobs/events') {
@@ -486,12 +714,16 @@ test('settings drawer traps focus and key form controls have accessible names', 
   await loadApp(page);
 
   await expect(page.getByRole('textbox', { name: 'Model' })).toHaveValue('preset-default-model');
+  await expect(page.getByLabel('Response format')).toHaveValue('url');
   await page.getByRole('button', { name: 'Settings' }).click();
   const drawer = page.getByRole('dialog', { name: 'Settings' });
   await expect(drawer).toBeVisible();
   await expect(page.getByLabel('API URL')).toHaveValue('https://api.example.com');
   await expect(page.getByLabel('Default model')).toHaveValue('preset-default-model');
+  await expect(page.getByLabel('Default response format')).toHaveValue('url');
   await expect(page.getByLabel('Webhook URL')).toHaveValue('https://hooks.example.com/***');
+  await expect(page.getByLabel('Sync interval hours')).toHaveValue('0');
+  await expect(page.getByLabel('Timeout seconds')).toHaveValue('60');
   await expect(drawer).toContainText('Literal keys are saved as plaintext.');
   await expect(page.getByLabel('Filter prompt')).toBeVisible();
 
@@ -502,6 +734,148 @@ test('settings drawer traps focus and key form controls have accessible names', 
 
   await page.keyboard.press('Escape');
   await expect(drawer).toBeHidden();
+});
+
+test('settings drawer saves prompt optimizer timeout seconds', async ({ page }) => {
+  await loadApp(page);
+
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await page.getByLabel('Timeout seconds').fill('90');
+  const saveRequest = page.waitForRequest((request) => new URL(request.url()).pathname === '/api/settings' && request.method() === 'POST');
+  await page.getByRole('button', { name: 'Save Preset' }).click();
+  const request = await saveRequest;
+
+  expect(request.postDataJSON().prompt_optimizer).toMatchObject({
+    timeout_seconds: 90
+  });
+});
+
+test('settings drawer saves R2 sync interval hours', async ({ page }) => {
+  await loadApp(page);
+
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await page.getByLabel('Sync interval hours').fill('6');
+  const saveRequest = page.waitForRequest((request) => new URL(request.url()).pathname === '/api/settings' && request.method() === 'POST');
+  await page.getByRole('button', { name: 'Save Preset' }).click();
+  const request = await saveRequest;
+
+  expect(request.postDataJSON().r2_backup).toMatchObject({
+    sync_interval_hours: 6
+  });
+});
+
+test('settings drawer edits the prompt optimizer system prompt', async ({ page }) => {
+  await loadApp(page);
+
+  await page.getByRole('button', { name: 'Settings' }).click();
+  const drawer = page.getByRole('dialog', { name: 'Settings' });
+  await drawer.getByRole('button', { name: 'Edit System Prompt' }).click();
+
+  const editor = page.getByRole('dialog', { name: 'Prompt Optimizer System Prompt' });
+  await expect(editor).toBeVisible();
+  const prompt = editor.getByRole('textbox', { name: 'System prompt' });
+  await expect(prompt).toHaveValue('Default optimizer system prompt');
+
+  await prompt.fill('Custom optimizer system prompt');
+  const saveRequest = page.waitForRequest(
+    (request) => new URL(request.url()).pathname === '/api/prompt/optimizer-system-prompt' && request.method() === 'POST'
+  );
+  await editor.getByRole('button', { name: 'Save' }).click();
+  const request = await saveRequest;
+  expect(request.postDataJSON()).toEqual({ system_prompt: 'Custom optimizer system prompt' });
+  await expect(page.getByRole('status')).toContainText('Prompt Optimizer system prompt saved');
+  await expect(editor).toBeHidden();
+});
+
+test('settings drawer edits overall config overrides', async ({ page }) => {
+  await loadApp(page);
+
+  await page.getByRole('button', { name: 'Settings' }).click();
+  const drawer = page.getByRole('dialog', { name: 'Settings' });
+  await drawer.getByRole('button', { name: 'Overall Config' }).click();
+
+  const modal = page.getByRole('dialog', { name: 'Overall Config' });
+  await expect(modal).toBeVisible();
+  await expect(modal).toContainText('ENABLE_METRICS');
+  await expect(modal).toContainText('WEBHOOK_SIGNING_SECRET');
+  await expect(modal).toContainText('restart');
+  await expect(modal).toContainText('build only');
+
+  await modal.getByTestId('overall-config-ENABLE_METRICS').locator('input[type="checkbox"]').check();
+  await modal.getByTestId('overall-config-WEBHOOK_SIGNING_SECRET').locator('input').fill('********');
+  await modal.getByTestId('overall-config-ACCESS_KEY_COOKIE_NAME').getByRole('button', { name: 'Reset to .env' }).click();
+
+  const saveRequest = page.waitForRequest(
+    (request) => new URL(request.url()).pathname === '/api/settings/overall-config' && request.method() === 'PUT'
+  );
+  await modal.getByRole('button', { name: 'Save config' }).click();
+  const request = await saveRequest;
+  expect(request.postDataJSON()).toEqual({
+    updates: [
+      { name: 'ENABLE_METRICS', value: true },
+      { name: 'WEBHOOK_SIGNING_SECRET', value: '********' },
+      { name: 'ACCESS_KEY_COOKIE_NAME', clear_override: true }
+    ]
+  });
+  await expect(page.getByRole('status')).toContainText('Overall config saved');
+});
+
+test('active preset response format default is applied to prompt form', async ({ page }) => {
+  await loadApp(page, {
+    settings: {
+      ...settingsResponse,
+      default_response_format: 'b64_json',
+      presets: settingsResponse.presets.map((preset) => ({
+        ...preset,
+        default_response_format: 'b64_json'
+      }))
+    }
+  });
+
+  await expect(page.getByLabel('Response format')).toHaveValue('b64_json');
+
+  const generateRequest = page.waitForRequest((request) => new URL(request.url()).pathname === '/api/generate');
+  await page.getByRole('textbox', { name: 'Prompt', exact: true }).fill('preset response format prompt');
+  await page.getByRole('button', { name: 'Generate', exact: true }).click();
+  const request = await generateRequest;
+  expect(request.postDataJSON()).toMatchObject({
+    prompt: 'preset response format prompt',
+    response_format: 'b64_json'
+  });
+});
+
+test('settings drawer deletes the active preset and switches to fallback', async ({ page }) => {
+  await loadApp(page, {
+    settings: {
+      ...settingsResponse,
+      presets: [
+        ...settingsResponse.presets,
+        {
+          ...settingsResponse.presets[0],
+          id: 'alt',
+          name: 'Alt preset',
+          default_model: 'alt-model',
+          default_response_format: 'b64_json'
+        }
+      ]
+    }
+  });
+
+  await page.getByRole('button', { name: 'Settings' }).click();
+  const drawer = page.getByRole('dialog', { name: 'Settings' });
+  await expect(drawer).toContainText('Default');
+  await expect(drawer).toContainText('Alt preset');
+
+  await drawer.getByRole('button', { name: 'Delete' }).click();
+  const confirm = page.getByRole('dialog', { name: 'Delete preset?' });
+  await expect(confirm).toContainText('Delete preset "Default"?');
+  await confirm.getByRole('button', { name: 'Delete' }).click();
+
+  await expect(page.getByRole('status')).toContainText('Preset deleted');
+  await expect(drawer.getByText('Default', { exact: true })).toHaveCount(0);
+  await expect(drawer).toContainText('Alt preset');
+  await expect(page.getByRole('main').getByRole('textbox', { name: 'Model' })).toHaveValue('alt-model');
+  await expect(page.getByRole('main').getByLabel('Response format')).toHaveValue('b64_json');
 });
 
 test('generation, gallery edit source, batch favorite, and lightbox flows work with mocked API', async ({ page }) => {
@@ -531,6 +905,23 @@ test('generation, gallery edit source, batch favorite, and lightbox flows work w
   await expect(lightbox).toBeVisible();
   await page.keyboard.press('Escape');
   await expect(lightbox).toBeHidden();
+});
+
+test('empty quantity falls back to 1 on generate', async ({ page }) => {
+  await loadApp(page);
+
+  await page.getByRole('textbox', { name: 'Prompt', exact: true }).fill('empty quantity prompt');
+  await page.getByLabel('Quantity').fill('');
+
+  const generateRequest = page.waitForRequest((request) => new URL(request.url()).pathname === '/api/generate');
+  await page.getByRole('button', { name: 'Generate', exact: true }).click();
+  const request = await generateRequest;
+
+  expect(request.postDataJSON()).toMatchObject({
+    prompt: 'empty quantity prompt',
+    n: 1
+  });
+  await expect(page.getByLabel('Quantity')).toHaveValue('1');
 });
 
 test('prompt helper tags append once and optimizer replaces prompt with undo', async ({ page }) => {
@@ -643,6 +1034,45 @@ test('lightbox use all reuses parameters and edit api path is ignored', async ({
   await expect(page.getByRole('status')).toContainText('edit API path was ignored');
 });
 
+test('lightbox navigates images across gallery pages', async ({ page }) => {
+  await loadApp(page, { galleryImages: manyGalleryImages(10) });
+
+  await page.getByRole('img', { name: 'Paged gallery image 1', exact: true }).click();
+  const lightbox = page.getByRole('dialog', { name: 'Image Details' });
+  await expect(lightbox).toBeVisible();
+  await expect(lightbox.getByRole('button', { name: 'Previous image' })).toHaveCount(0);
+  await expect(lightbox.getByRole('button', { name: 'Next image' })).toBeVisible();
+
+  await lightbox.getByRole('button', { name: 'Next image' }).click();
+  await expect(lightbox).toContainText('paged-img-2.png');
+  await expect(page).toHaveURL(/image=paged-img-2/);
+
+  await page.keyboard.press('ArrowLeft');
+  await expect(lightbox).toContainText('paged-img-1.png');
+  await expect(page).toHaveURL(/image=paged-img-1/);
+
+  await page.keyboard.press('Escape');
+  await expect(lightbox).toBeHidden();
+
+  await page.getByRole('img', { name: 'Paged gallery image 9', exact: true }).click();
+  await expect(lightbox).toContainText('paged-img-9.png');
+  const nextPageRequest = page.waitForRequest((request) => {
+    const url = new URL(request.url());
+    return request.method() === 'GET' && url.pathname === '/api/gallery' && url.searchParams.get('page') === '2';
+  });
+  await page.keyboard.press('ArrowRight');
+  await nextPageRequest;
+
+  await expect(lightbox).toContainText('paged-img-10.png');
+  await expect(page).toHaveURL(/page=2/);
+  await expect(page).toHaveURL(/image=paged-img-10/);
+  await expect(lightbox.getByRole('button', { name: 'Next image' })).toHaveCount(0);
+
+  await page.keyboard.press('ArrowRight');
+  await expect(lightbox).toContainText('paged-img-10.png');
+  await expect(page).toHaveURL(/image=paged-img-10/);
+});
+
 test('multi-image job results can be previewed individually', async ({ page }) => {
   const generatedJob = {
     ...job('job-generated', 'browser multi prompt'),
@@ -678,11 +1108,16 @@ test('multi-image job results can be previewed individually', async ({ page }) =
 });
 
 test('job history shows detailed terminal statuses', async ({ page }) => {
+  const detailedUpstreamError = 'Upstream API error (400): Invalid model';
   await loadApp(page, {
     historyJobs: [
       job('cancelled-job', 'cancelled prompt', 'cancelled'),
       job('interrupted-job', 'interrupted prompt', 'interrupted'),
-      job('upstream-job', 'upstream prompt', 'upstream_error')
+      {
+        ...job('upstream-job', 'upstream prompt', 'upstream_error'),
+        message: 'Generation failed',
+        error: detailedUpstreamError
+      }
     ]
   });
 
@@ -692,14 +1127,51 @@ test('job history shows detailed terminal statuses', async ({ page }) => {
   await expect(jobsDrawer.getByText('cancelled', { exact: true })).toBeVisible();
   await expect(jobsDrawer.getByText('interrupted', { exact: true })).toBeVisible();
   await expect(jobsDrawer.getByText('upstream error', { exact: true })).toBeVisible();
+
+  const upstreamJob = jobsDrawer.locator('article').filter({ hasText: 'upstream prompt' });
+  await expect(upstreamJob.getByText('Generation failed', { exact: true })).toBeVisible();
+  await expect(upstreamJob.getByText(detailedUpstreamError, { exact: true })).toBeHidden();
+  await upstreamJob.getByRole('button', { name: 'Show error' }).click();
+  await expect(upstreamJob.getByText(detailedUpstreamError, { exact: true })).toBeVisible();
+  await expect(upstreamJob.getByRole('button', { name: 'Hide error' })).toBeVisible();
+  await upstreamJob.getByRole('button', { name: 'Hide error' }).click();
+  await expect(upstreamJob.getByText(detailedUpstreamError, { exact: true })).toBeHidden();
+
+  await jobsDrawer.getByLabel('Errors only').check();
+  await expect(jobsDrawer.getByText('upstream prompt')).toBeVisible();
+  await expect(jobsDrawer.getByText('cancelled prompt')).toBeHidden();
+  await expect(jobsDrawer.getByText('interrupted prompt')).toBeHidden();
+
+  await jobsDrawer.getByLabel('Errors only').uncheck();
+  await expect(jobsDrawer.getByText('cancelled prompt')).toBeVisible();
+  await expect(jobsDrawer.getByText('interrupted prompt')).toBeVisible();
+});
+
+test('job history clear removes persisted history rows', async ({ page }) => {
+  await loadApp(page, {
+    historyJobs: [job('history-1', 'saved prompt'), job('history-2', 'another saved prompt')]
+  });
+
+  await page.getByRole('button', { name: 'Job History' }).click();
+  const jobsDrawer = page.getByRole('dialog', { name: 'Job History' });
+  await jobsDrawer.getByRole('button', { name: 'History', exact: true }).click();
+  await expect(jobsDrawer.getByText('saved prompt', { exact: true })).toBeVisible();
+
+  await jobsDrawer.getByRole('button', { name: 'Clear' }).click();
+  const confirmDialog = page.getByRole('dialog', { name: 'Clear all job history?' });
+  await expect(confirmDialog.getByText('local SQLite')).toBeVisible();
+  await confirmDialog.getByRole('button', { name: 'Clear' }).click();
+
+  await expect(jobsDrawer.getByText('No job history')).toBeVisible();
+  await expect(jobsDrawer.getByText('saved prompt', { exact: true })).toBeHidden();
 });
 
 test('gallery url state restores filters, lightbox, and job history tab', async ({ page }) => {
   await mockApi(page);
   await page.goto('/?prompt=Second&favorite=true&image=img-2&jobs=history');
 
-  await expect(page.getByLabel('Filter prompt')).toHaveValue('Second');
-  await expect(page).toHaveURL(/prompt=Second/);
+  await expect(page.getByLabel('Filter prompt')).toHaveValue('');
+  await expect(page).not.toHaveURL(/prompt=Second/);
   await expect(page).toHaveURL(/favorite=true/);
 
   const lightbox = page.getByRole('dialog', { name: 'Image Details' });
@@ -716,8 +1188,13 @@ test('gallery url state restores filters, lightbox, and job history tab', async 
   await expect(jobsDrawer.getByText('saved prompt')).toBeVisible();
   await expect(page).toHaveURL(/jobs=history/);
 
+  const promptFilterRequest = page.waitForRequest((request) => {
+    const url = new URL(request.url());
+    return request.method() === 'GET' && url.pathname === '/api/gallery' && url.searchParams.get('prompt') === 'First';
+  });
   await page.getByLabel('Filter prompt').fill('First');
-  await expect(page).toHaveURL(/prompt=First/);
+  await promptFilterRequest;
+  await expect(page).not.toHaveURL(/prompt=First/);
 });
 
 test('gallery page input jumps to the requested page on Enter', async ({ page }) => {

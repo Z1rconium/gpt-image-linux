@@ -5,7 +5,7 @@ import { t } from '$lib/i18n';
 import { confirmStore } from '$lib/stores/confirm';
 import type { ToastOptions, ToastVariant } from '$lib/stores/ui';
 import { formatBytes } from '$lib/utils/format';
-import type { GalleryBatchResponse, GalleryExportJobStatus, GalleryResponse } from '$lib/api/types';
+import type { GalleryBatchResponse, GalleryExportJobStatus, GalleryResponse, GallerySyncJobStatus } from '$lib/api/types';
 import type { GalleryOperationStatus, GalleryState } from '$lib/stores/gallery';
 
 type GalleryActionDeps = {
@@ -59,6 +59,22 @@ function exportJobDetail(job: GalleryExportJobStatus) {
   return job.message || labels.exportPreparing;
 }
 
+function syncJobDetail(job: GallerySyncJobStatus) {
+  const labels = get(t).gallery;
+  if (job.status === 'success') return labels.syncCompleteDetail(job.uploaded_count, job.skipped_existing_count);
+  if (job.stage === 'listing_remote') return labels.syncListingRemote;
+  if (job.total_count > 0) {
+    return labels.syncProgress(
+      Math.min(job.compared_count, job.total_count),
+      job.total_count,
+      job.uploaded_count,
+      job.skipped_existing_count,
+      formatBytes(job.bytes_uploaded)
+    );
+  }
+  return job.message || labels.syncPreparing;
+}
+
 function batchToastMessage(action: 'delete' | 'favorite', result: GalleryBatchResponse) {
   const updatedCount = result.updated_count ?? result.count;
   const missingCount = result.missing_count ?? Math.max(0, (result.requested_count || 0) - updatedCount);
@@ -93,6 +109,37 @@ function waitForGalleryExportJob(jobId: string, onJob: (job: GalleryExportJobSta
         }
       },
       ['export']
+    );
+  });
+}
+
+function waitForGallerySyncJob(jobId: string, onJob: (job: GallerySyncJobStatus) => void): Promise<GallerySyncJobStatus> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let source: EventSource | null = null;
+    source = openJsonEventSource<GallerySyncJobStatus>(
+      `/api/gallery/sync-jobs/${encodeURIComponent(jobId)}/events`,
+      {
+        onEvent: ({ data }) => {
+          onJob(data);
+          if (data.status === 'success') {
+            settled = true;
+            source?.close();
+            resolve(data);
+          } else if (data.status === 'error') {
+            settled = true;
+            source?.close();
+            reject(new Error(data.error || data.message || get(t).messages.requestFailed));
+          }
+        },
+        onError: (error) => {
+          if (settled) return;
+          settled = true;
+          source?.close();
+          reject(error instanceof Error ? error : new Error(get(t).messages.requestFailed));
+        }
+      },
+      ['sync']
     );
   });
 }
@@ -287,6 +334,30 @@ export function createGalleryActions(deps: GalleryActionDeps) {
     }
   }
 
+  async function syncGallery(showToast?: (message: string) => void) {
+    const label = get(t).gallery.syncingR2;
+    deps.setOperationStatus({
+      kind: 'sync',
+      label,
+      detail: get(t).gallery.syncPreparing,
+      progress: 0
+    });
+    try {
+      const job = await apiFetch<GallerySyncJobStatus>('/api/gallery/sync-jobs', { method: 'POST' }, 'starting R2 gallery sync');
+      const finished = await waitForGallerySyncJob(job.job_id, (nextJob) => {
+        deps.setOperationStatus({
+          kind: 'sync',
+          label,
+          detail: syncJobDetail(nextJob),
+          progress: nextJob.progress
+        });
+      });
+      showToast?.(get(t).messages.r2SyncComplete(finished.uploaded_count, finished.skipped_existing_count, finished.missing_local_count));
+    } finally {
+      deps.setOperationStatus(null);
+    }
+  }
+
   async function deleteAll(
     showToast: (message: string, variant?: ToastVariant, options?: ToastOptions) => void,
     onDeleted?: () => void
@@ -352,6 +423,7 @@ export function createGalleryActions(deps: GalleryActionDeps) {
     batchDelete,
     batchDownload,
     exportArchive,
+    syncGallery,
     deleteAll,
     importArchive
   };

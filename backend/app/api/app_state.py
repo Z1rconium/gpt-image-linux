@@ -1,11 +1,14 @@
-from contextlib import asynccontextmanager
 import asyncio
 import logging
+from collections import OrderedDict
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
 
+from ..core import security as auth
 from ..core import settings as config
+from ..core import overall_config
 from ..repositories import storage
 
 
@@ -56,15 +59,29 @@ def cleanup_stale_gallery_export_files():
 async def lifespan(app: FastAPI):
     from . import jobs, presets
 
+    Path(config.IMAGES_DIR).mkdir(parents=True, exist_ok=True)
+    Path(config.THUMBNAILS_DIR).mkdir(parents=True, exist_ok=True)
+    Path(config.DATA_DIR).mkdir(parents=True, exist_ok=True)
+    rows = storage.sync_overall_config_env_values(overall_config.current_env_snapshot())
+    overall_config.apply_rows_to_config(
+        rows,
+        include_restart_required=True,
+        overrides_only=True,
+    )
+
     if not config.ACCESS_KEY and not config.ALLOW_UNAUTHENTICATED:
         raise RuntimeError(
             "ACCESS_KEY is required. Set ACCESS_KEY, or set "
             "ALLOW_UNAUTHENTICATED=true to explicitly run without authentication."
         )
+    if config.ALLOW_UNAUTHENTICATED and not config.ACCESS_KEY:
+        logger.warning(
+            "ALLOW_UNAUTHENTICATED=true and ACCESS_KEY is unset; all non-health API "
+            "routes are running without access-key authentication."
+        )
 
-    Path(config.IMAGES_DIR).mkdir(parents=True, exist_ok=True)
-    Path(config.THUMBNAILS_DIR).mkdir(parents=True, exist_ok=True)
-    Path(config.DATA_DIR).mkdir(parents=True, exist_ok=True)
+    auth.validate_proxy_config()
+
     cleanup_stale_edit_source_files()
     cleanup_stale_gallery_export_files()
     storage.verify_storage_writable()
@@ -77,20 +94,26 @@ async def lifespan(app: FastAPI):
             "Removed %s stale gallery entries for missing image files",
             removed_gallery_entries,
         )
-    try:
-        backfilled_gallery_bytes = storage.backfill_missing_gallery_bytes()
-    except Exception:
-        logger.warning("Failed to backfill legacy gallery byte sizes", exc_info=True)
-    else:
-        if backfilled_gallery_bytes:
-            logger.info(
-                "Backfilled byte sizes for %s legacy gallery entry record(s)",
-                backfilled_gallery_bytes,
-            )
+    async def _background_backfill_gallery_bytes():
+        await asyncio.sleep(1.0)
+        try:
+            updated = await asyncio.to_thread(storage.backfill_missing_gallery_bytes)
+            if updated:
+                logger.info(
+                    "Backfilled byte sizes for %s legacy gallery entry record(s)",
+                    updated,
+                )
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.warning("Failed to backfill legacy gallery byte sizes", exc_info=True)
+
+    app.state._backfill_task = asyncio.create_task(_background_backfill_gallery_bytes())
     presets.load_api_settings()
     app.state.generate_jobs = {}
     app.state.generate_job_tasks = {}
     app.state.generate_job_semaphore = asyncio.Semaphore(config.MAX_ACTIVE_GENERATE_JOBS)
+    app.state.upstream_request_semaphore = asyncio.Semaphore(config.MAX_ACTIVE_GENERATE_JOBS)
     app.state.generate_job_subscribers = {}
     app.state.generate_jobs_subscribers = set()
     app.state.generate_jobs_broadcast_task = None
@@ -100,22 +123,57 @@ async def lifespan(app: FastAPI):
     app.state.gallery_export_jobs = {}
     app.state.gallery_export_tasks = {}
     app.state.gallery_export_subscribers = {}
+    app.state.gallery_export_lock = asyncio.Lock()
+    app.state.gallery_export_direct_downloads = 0
+    app.state.gallery_sync_jobs = {}
+    app.state.gallery_sync_tasks = {}
+    app.state.gallery_sync_subscribers = {}
+    app.state.gallery_sync_lock = asyncio.Lock()
+    from .routers import gallery as gallery_router
+    app.state.gallery_export_gc_task = asyncio.create_task(gallery_router.gc_gallery_export_jobs())
+    app.state.gallery_r2_scheduled_sync_task = asyncio.create_task(
+        gallery_router.run_gallery_r2_scheduled_sync()
+    )
     app.state.pending_edit_source_bytes = 0
-    app.state.access_failures: dict[str, tuple[int, float]] = {}
+    app.state.access_failures: OrderedDict[str, tuple[int, float]] = OrderedDict()
     jobs.reconcile_active_generate_jobs_from_storage()
     try:
         yield
     finally:
+        backfill_task = getattr(app.state, "_backfill_task", None)
+        if backfill_task and not backfill_task.done():
+            backfill_task.cancel()
         broadcast_task = app.state.generate_jobs_broadcast_task
         if broadcast_task and not broadcast_task.done():
             broadcast_task.cancel()
+        gc_task = getattr(app.state, "gallery_export_gc_task", None)
+        if gc_task and not gc_task.done():
+            gc_task.cancel()
+        scheduled_sync_task = getattr(app.state, "gallery_r2_scheduled_sync_task", None)
+        if scheduled_sync_task and not scheduled_sync_task.done():
+            scheduled_sync_task.cancel()
         tasks = list(jobs.get_generate_job_tasks().values())
         gallery_export_tasks = list(getattr(app.state, "gallery_export_tasks", {}).values())
+        gallery_sync_tasks = list(getattr(app.state, "gallery_sync_tasks", {}).values())
         for task in gallery_export_tasks:
+            task.cancel()
+        for task in gallery_sync_tasks:
             task.cancel()
         for task in tasks:
             task.cancel()
-        awaitables = [task for task in (broadcast_task, *tasks, *gallery_export_tasks) if task]
+        awaitables = [
+            task
+            for task in (
+                backfill_task,
+                broadcast_task,
+                gc_task,
+                scheduled_sync_task,
+                *tasks,
+                *gallery_export_tasks,
+                *gallery_sync_tasks,
+            )
+            if task
+        ]
         if awaitables:
             await asyncio.gather(*awaitables, return_exceptions=True)
         for job in getattr(app.state, "gallery_export_jobs", {}).values():

@@ -40,7 +40,7 @@ def is_image_upload(upload: UploadFile) -> bool:
 
 def validate_upload_image_bytes(image_bytes: bytes, filename: str, content_type: str) -> str:
     try:
-        return storage.validate_image_bytes(
+        return storage.validate_image_header_bytes(
             image_bytes,
             filename=filename,
             content_type=content_type,
