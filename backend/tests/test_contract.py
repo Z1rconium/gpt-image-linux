@@ -19,6 +19,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from backend.app import main as backend_main
+from backend.app.api import app_state
 from backend.app.api import jobs
 from backend.app.api.routers import access as access_router
 from backend.app.api.routers import gallery as gallery_router
@@ -3367,6 +3368,29 @@ def test_gallery_export_job_persists_across_cleared_app_state(client):
     assert archive.status_code == 200
     with zipfile.ZipFile(io.BytesIO(archive.content)) as zf:
         assert "images/export-persist-1.png" in zf.namelist()
+
+
+def test_gallery_export_startup_cleanup_preserves_tracked_finished_zip(client):
+    _fake_gallery_entry("export-cleanup-1", "one", "1024x1024", "export-cleanup-1.png")
+
+    created = client.post("/api/gallery/export-jobs")
+    assert created.status_code == 202
+    finished = _wait_for_gallery_export_job(client, created.json()["job_id"])
+    assert finished["status"] == "success"
+
+    export_path = Path(config.DATA_DIR) / "exports" / f"{finished['job_id']}.zip"
+    orphan_path = Path(config.DATA_DIR) / "exports" / "orphan-export.zip"
+    orphan_path.write_bytes(b"orphan")
+
+    app_state.cleanup_stale_gallery_export_files()
+
+    assert export_path.exists()
+    assert not orphan_path.exists()
+
+    archive = client.get(finished["download_url"])
+    assert archive.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(archive.content)) as zf:
+        assert "images/export-cleanup-1.png" in zf.namelist()
 
 
 def test_gallery_tracked_jobs_allow_granian_multi_worker(client, monkeypatch):

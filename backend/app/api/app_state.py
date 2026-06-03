@@ -43,9 +43,17 @@ def cleanup_stale_gallery_export_files():
     if not temp_dir.exists():
         return
 
+    try:
+        known_export_ids = storage.list_gallery_job_ids_with_files("export")
+    except Exception:
+        logger.warning("Failed to load gallery export job records before temp cleanup", exc_info=True)
+        return
+
     removed = 0
-    for temp_path in temp_dir.glob("*"):
+    for temp_path in temp_dir.glob("*.zip"):
         if not temp_path.is_file():
+            continue
+        if temp_path.stem in known_export_ids:
             continue
         try:
             temp_path.unlink()
