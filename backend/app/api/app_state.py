@@ -3,6 +3,7 @@ import logging
 import os
 from collections import OrderedDict
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -18,6 +19,12 @@ FRONTEND_BUILD_DIR = config.PROJECT_ROOT / "frontend" / "build"
 MAX_GENERATE_JOBS = 100
 GENERATE_JOB_PERSIST_INTERVAL_SECONDS = 5.0
 GENERATE_JOBS_BROADCAST_DEBOUNCE_SECONDS = 0.35
+STARTUP_MAINTENANCE_LEASE_SECONDS = 600
+STARTUP_MAINTENANCE_COMPLETED_TTL_SECONDS = 600
+
+
+def _lease_expires_at(seconds: int) -> str:
+    return (datetime.now(timezone.utc) + timedelta(seconds=max(1, seconds))).isoformat()
 
 
 def cleanup_stale_edit_source_files():
@@ -68,6 +75,7 @@ def cleanup_stale_gallery_export_files():
 async def lifespan(app: FastAPI):
     from . import jobs, presets
 
+    app.state.worker_id = f"{os.getpid()}-{id(app)}"
     Path(config.IMAGES_DIR).mkdir(parents=True, exist_ok=True)
     Path(config.THUMBNAILS_DIR).mkdir(parents=True, exist_ok=True)
     Path(config.DATA_DIR).mkdir(parents=True, exist_ok=True)
@@ -91,16 +99,45 @@ async def lifespan(app: FastAPI):
 
     auth.validate_proxy_config()
 
-    cleanup_stale_edit_source_files()
-    cleanup_stale_gallery_export_files()
-    storage.verify_storage_writable()
+    startup_maintenance_owner = f"startup-maintenance:{app.state.worker_id}"
+    run_startup_maintenance = await asyncio.to_thread(
+        storage.acquire_background_lease,
+        name="startup_maintenance",
+        owner=startup_maintenance_owner,
+        lease_expires_at=_lease_expires_at(STARTUP_MAINTENANCE_LEASE_SECONDS),
+        completed_ttl_seconds=STARTUP_MAINTENANCE_COMPLETED_TTL_SECONDS,
+    )
+    if not run_startup_maintenance:
+        storage.verify_storage_writable()
+        logger.info("Skipping startup maintenance; another worker already owns it")
+    else:
+        try:
+            cleanup_stale_edit_source_files()
+            cleanup_stale_gallery_export_files()
+            storage.verify_storage_writable()
+        except Exception:
+            storage.release_background_lease(
+                name="startup_maintenance",
+                owner=startup_maintenance_owner,
+            )
+            raise
+
     logger.info("Image jobs resume through SQLite unit leases")
-    removed_gallery_entries = storage.sync_gallery_with_image_files()
-    if removed_gallery_entries:
-        logger.info(
-            "Removed %s stale gallery entries for missing image files",
-            removed_gallery_entries,
-        )
+    if run_startup_maintenance:
+        try:
+            removed_gallery_entries = storage.sync_gallery_with_image_files()
+            if removed_gallery_entries:
+                logger.info(
+                    "Removed %s stale gallery entries for missing image files",
+                    removed_gallery_entries,
+                )
+        except Exception:
+            storage.release_background_lease(
+                name="startup_maintenance",
+                owner=startup_maintenance_owner,
+            )
+            raise
+
     async def _background_backfill_gallery_bytes():
         await asyncio.sleep(1.0)
         try:
@@ -114,8 +151,18 @@ async def lifespan(app: FastAPI):
             pass
         except Exception:
             logger.warning("Failed to backfill legacy gallery byte sizes", exc_info=True)
+        finally:
+            await asyncio.to_thread(
+                storage.complete_background_lease,
+                name="startup_maintenance",
+                owner=startup_maintenance_owner,
+            )
 
-    app.state._backfill_task = asyncio.create_task(_background_backfill_gallery_bytes())
+    app.state._backfill_task = (
+        asyncio.create_task(_background_backfill_gallery_bytes())
+        if run_startup_maintenance
+        else None
+    )
     presets.load_api_settings()
     app.state.generate_jobs = {}
     app.state.generate_job_tasks = {}
@@ -128,7 +175,6 @@ async def lifespan(app: FastAPI):
     app.state.generate_job_sse_poller_task = None
     app.state.generate_job_webhooks = {}
     app.state.generate_job_last_persist_at = {}
-    app.state.worker_id = f"{os.getpid()}-{id(app)}"
     app.state.image_unit_dispatcher_kick = asyncio.Event()
     app.state.image_unit_dispatcher_task = asyncio.create_task(
         jobs.run_image_unit_dispatcher(app.state.worker_id)
@@ -143,9 +189,11 @@ async def lifespan(app: FastAPI):
     app.state.gallery_sync_dispatcher_task = asyncio.create_task(
         gallery_router.run_gallery_sync_dispatcher(app.state.worker_id)
     )
-    app.state.gallery_export_gc_task = asyncio.create_task(gallery_router.gc_gallery_export_jobs())
+    app.state.gallery_export_gc_task = asyncio.create_task(
+        gallery_router.gc_gallery_export_jobs(app.state.worker_id)
+    )
     app.state.gallery_r2_scheduled_sync_task = asyncio.create_task(
-        gallery_router.run_gallery_r2_scheduled_sync()
+        gallery_router.run_gallery_r2_scheduled_sync(app.state.worker_id)
     )
     app.state.access_failures: OrderedDict[str, tuple[int, float]] = OrderedDict()
     jobs.reconcile_active_generate_jobs_from_storage()

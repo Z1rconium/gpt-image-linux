@@ -158,6 +158,7 @@ def _configure_runtime(tmp_path: Path, *, access_key: str = "", allow_unauthenti
     config.ENABLE_NGINX_ACCEL_REDIRECT = False
     config.THUMBNAILS_DIR = str(images_dir / "thumbs")
     config.THUMBNAIL_MAX_SIDE = 512
+    config.THUMBNAIL_CPU_CONCURRENCY = 1
     config.PROMPT_OPTIMIZER_ENABLED = False
     config.PROMPT_OPTIMIZER_API_URL = ""
     config.PROMPT_OPTIMIZER_API_KEY = ""
@@ -2674,17 +2675,18 @@ def test_job_stage_timings_and_optional_metrics(client):
     assert job["stage_timings"]["upstream_wait"] == 1.25
     assert job["stage_timings"]["download_decode"] == 2.5
     assert job["stage_timings"]["validate"] == 0.75
-    assert "thumbnail" in job["stage_timings"]
     assert "db_insert" in job["stage_timings"]
 
     metrics_resp = client.get("/api/metrics")
     assert metrics_resp.status_code == 200
     body = metrics_resp.json()
     assert body["enabled"] is True
+    assert body["worker_id"]
     assert body["counters"]["image_jobs.generation.queued"] >= 1
     assert body["counters"]["image_jobs.generation.succeeded"] >= 1
     assert body["gauges"]["image_jobs.active"] == 0
     assert body["gauges"]["image_jobs.running_capacity"] == 2
+    assert body["gauges"]["sse.active_connections"] >= 0
     assert body["rates"]["image_jobs.generation.failure_ratio"] == 0
     assert body["timings_ms"]["job_stage.upstream_wait"]["count"] >= 1
 
@@ -3282,6 +3284,101 @@ def test_storage_claim_prefers_expired_running_unit_over_queued_unit(tmp_path):
     assert reclaimed["claimed_by"] == "worker-b"
 
 
+def test_storage_sse_slots_enforce_global_and_per_ip_leases(tmp_path):
+    _configure_runtime(tmp_path)
+    now = "2099-01-01T00:00:00+00:00"
+    expires = "2099-01-01T00:01:00+00:00"
+
+    assert storage.acquire_sse_slot(
+        client_ip="203.0.113.10",
+        connection_id="sse-1",
+        lease_expires_at=expires,
+        max_global=2,
+        max_per_ip=1,
+        now=now,
+    ) == (True, "acquired")
+    assert storage.acquire_sse_slot(
+        client_ip="203.0.113.10",
+        connection_id="sse-2",
+        lease_expires_at=expires,
+        max_global=2,
+        max_per_ip=1,
+        now=now,
+    ) == (False, "per_ip_limit")
+    assert storage.acquire_sse_slot(
+        client_ip="203.0.113.11",
+        connection_id="sse-3",
+        lease_expires_at=expires,
+        max_global=2,
+        max_per_ip=2,
+        now=now,
+    ) == (True, "acquired")
+    assert storage.acquire_sse_slot(
+        client_ip="203.0.113.12",
+        connection_id="sse-4",
+        lease_expires_at=expires,
+        max_global=2,
+        max_per_ip=2,
+        now=now,
+    ) == (False, "global_limit")
+
+    assert storage.count_active_sse_slots() == 2
+    assert storage.refresh_sse_slot(
+        connection_id="sse-1",
+        lease_expires_at="2099-01-01T00:02:00+00:00",
+        now=now,
+    )
+    assert storage.release_sse_slot("sse-3", now=now)
+    assert storage.count_active_sse_slots() == 1
+
+    assert storage.acquire_sse_slot(
+        client_ip="203.0.113.12",
+        connection_id="sse-4",
+        lease_expires_at="2099-01-01T00:04:00+00:00",
+        max_global=2,
+        max_per_ip=2,
+        now="2099-01-01T00:03:00+00:00",
+    ) == (True, "acquired")
+
+
+def test_storage_background_lease_completion_blocks_startup_storm(tmp_path):
+    _configure_runtime(tmp_path)
+
+    assert storage.acquire_background_lease(
+        name="startup_maintenance",
+        owner="worker-a",
+        lease_expires_at="2026-01-01T00:01:00+00:00",
+        now="2026-01-01T00:00:00+00:00",
+        completed_ttl_seconds=600,
+    )
+    assert not storage.acquire_background_lease(
+        name="startup_maintenance",
+        owner="worker-b",
+        lease_expires_at="2026-01-01T00:01:00+00:00",
+        now="2026-01-01T00:00:10+00:00",
+        completed_ttl_seconds=600,
+    )
+    assert storage.complete_background_lease(
+        name="startup_maintenance",
+        owner="worker-a",
+        now="2026-01-01T00:00:20+00:00",
+    )
+    assert not storage.acquire_background_lease(
+        name="startup_maintenance",
+        owner="worker-b",
+        lease_expires_at="2026-01-01T00:02:00+00:00",
+        now="2026-01-01T00:00:30+00:00",
+        completed_ttl_seconds=600,
+    )
+    assert storage.acquire_background_lease(
+        name="startup_maintenance",
+        owner="worker-b",
+        lease_expires_at="2026-01-01T00:12:00+00:00",
+        now="2026-01-01T00:11:00+00:00",
+        completed_ttl_seconds=600,
+    )
+
+
 def test_storage_edit_source_reservation_is_global_and_released_on_terminal(tmp_path):
     _configure_runtime(tmp_path)
     source_bytes = 600 * 1024
@@ -3327,7 +3424,7 @@ def test_storage_edit_source_reservation_is_global_and_released_on_terminal(tmp_
 def test_gallery_image_download_and_zip(client):
     entry = _fake_gallery_entry("gallery-zip", "zip me", "1024x1024", "gallery-zip.png")
     assert entry.bytes == len(PNG_BYTES)
-    assert entry.thumbnail_filename
+    assert entry.thumbnail_filename is None
     assert entry.thumbnail_url == "/api/thumb/gallery-zip.png"
 
     gallery = client.get("/api/gallery")
@@ -3358,6 +3455,7 @@ def test_gallery_image_download_and_zip(client):
     assert thumb.status_code == 200
     assert thumb.headers["content-type"].startswith("image/webp")
     assert thumb.headers["cache-control"].startswith("public")
+    assert storage.get_gallery_entry("gallery-zip").thumbnail_filename
 
     download = client.get("/api/download/gallery-zip.png")
     assert download.status_code == 200
@@ -3381,7 +3479,7 @@ def test_gallery_image_download_and_zip(client):
 def test_gallery_image_responses_use_x_accel_redirect_when_enabled(client):
     config.ENABLE_NGINX_ACCEL_REDIRECT = True
     entry = _fake_gallery_entry("gallery-accel", "accel", "1024x1024", "gallery accel.png")
-    assert entry.thumbnail_filename
+    assert entry.thumbnail_filename is None
 
     image = client.get("/api/image/gallery%20accel.png")
     assert image.status_code == 200
@@ -3390,13 +3488,13 @@ def test_gallery_image_responses_use_x_accel_redirect_when_enabled(client):
     assert image.headers["content-type"].startswith("image/png")
     assert image.content == b""
 
-    thumbnail_path = storage.safe_thumbnail_path(entry.thumbnail_filename)
-    assert thumbnail_path is not None
-    thumbnail_path.unlink()
-
     thumb = client.get("/api/thumb/gallery%20accel.png")
+    updated = storage.get_gallery_entry("gallery-accel")
+    assert updated.thumbnail_filename
+    thumbnail_path = storage.safe_thumbnail_path(updated.thumbnail_filename)
+    assert thumbnail_path is not None
     assert thumb.status_code == 200
-    assert thumb.headers["x-accel-redirect"] == f"/_protected/thumbs/{entry.thumbnail_filename}"
+    assert thumb.headers["x-accel-redirect"] == f"/_protected/thumbs/{updated.thumbnail_filename}"
     assert thumb.headers["cache-control"].startswith("public")
     assert thumb.headers["content-type"].startswith("image/webp")
     assert thumbnail_path.exists()
@@ -3990,7 +4088,7 @@ def test_import_archive(client):
     imported = storage.get_gallery_entry("import-1")
     assert imported is not None
     assert imported.bytes == len(PNG_BYTES)
-    assert imported.thumbnail_filename
+    assert imported.thumbnail_filename is None
     assert imported.thumbnail_url == "/api/thumb/import-1.png"
 
 
@@ -4028,14 +4126,15 @@ def test_import_gallery_entries_dedupes_existing_rows_at_commit(client):
     assert thumb.status_code == 200
 
 
-def test_thumbnail_endpoint_lazily_rebuilds_missing_file(client):
+def test_thumbnail_endpoint_lazily_creates_file(client):
     entry = _fake_gallery_entry("lazy-thumb", "lazy", "1024x1024", "lazy-thumb.png")
-    assert entry.thumbnail_filename
-    thumbnail_path = storage.safe_thumbnail_path(entry.thumbnail_filename)
-    assert thumbnail_path is not None
-    thumbnail_path.unlink()
+    assert entry.thumbnail_filename is None
 
     resp = client.get("/api/thumb/lazy-thumb.png")
+    updated = storage.get_gallery_entry("lazy-thumb")
+    assert updated.thumbnail_filename
+    thumbnail_path = storage.safe_thumbnail_path(updated.thumbnail_filename)
+    assert thumbnail_path is not None
 
     assert resp.status_code == 200
     assert thumbnail_path.exists()

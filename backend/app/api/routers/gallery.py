@@ -63,6 +63,8 @@ SYNC_JOB_TTL_SECONDS = 1800
 SCHEDULED_R2_SYNC_DISABLED_POLL_SECONDS = 60
 GALLERY_JOB_LEASE_SECONDS = 300
 GALLERY_JOB_DISPATCH_INTERVAL_SECONDS = 0.5
+GALLERY_JOB_DISPATCH_MAX_IDLE_BACKOFF_SECONDS = 5.0
+BACKGROUND_TASK_LEASE_SECONDS = 120
 GALLERY_PROGRESS_MIN_INTERVAL_SECONDS = 0.5
 GALLERY_PROGRESS_MIN_ITEMS = 50
 DIRECT_EXPORT_SLOT_LEASE_SECONDS = 6 * 3600
@@ -439,6 +441,7 @@ async def _poll_gallery_job_sse(kind: str) -> None:
                 kind,
                 set(subscribers_by_job),
             )
+            metrics.increment(f"sse.poll_queries.gallery_{kind}")
             for job_id in set(subscribers_by_job) - set(current_edges):
                 for queue in subscribers_by_job[job_id]:
                     publish_queue(queue, {"event": "_missing", "data": None})
@@ -480,6 +483,32 @@ def _gallery_job_lease_expires_at() -> str:
 
 def _direct_export_slot_expires_at() -> str:
     return (datetime.now(timezone.utc) + timedelta(seconds=DIRECT_EXPORT_SLOT_LEASE_SECONDS)).isoformat()
+
+
+def _background_task_lease_expires_at() -> str:
+    return (datetime.now(timezone.utc) + timedelta(seconds=BACKGROUND_TASK_LEASE_SECONDS)).isoformat()
+
+
+async def _sleep_while_renewing_background_lease(
+    *,
+    name: str,
+    owner: str,
+    delay_seconds: float,
+) -> bool:
+    deadline = time.monotonic() + max(0.0, float(delay_seconds or 0))
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return True
+        await asyncio.sleep(min(remaining, max(1.0, BACKGROUND_TASK_LEASE_SECONDS / 2)))
+        renewed = await asyncio.to_thread(
+            storage.acquire_background_lease,
+            name=name,
+            owner=owner,
+            lease_expires_at=_background_task_lease_expires_at(),
+        )
+        if not renewed:
+            return False
 
 
 def _claim_counted_gallery_kinds(kind: str) -> tuple[str, ...]:
@@ -790,9 +819,11 @@ async def _run_gallery_sync_job(job: dict) -> None:
 async def _run_gallery_job_dispatcher(kind: str, worker_id: str, running_limit: int) -> None:
     active_tasks: set[asyncio.Task] = set()
     runner = _run_gallery_export_job if kind == "export" else _run_gallery_sync_job
+    idle_delay = GALLERY_JOB_DISPATCH_INTERVAL_SECONDS
     while True:
         try:
             active_tasks = {task for task in active_tasks if not task.done()}
+            claimed_count = 0
             while len(active_tasks) < running_limit:
                 now = utc_now()
                 job = await asyncio.to_thread(
@@ -807,7 +838,16 @@ async def _run_gallery_job_dispatcher(kind: str, worker_id: str, running_limit: 
                 if not job:
                     break
                 active_tasks.add(asyncio.create_task(runner(job)))
-            await asyncio.sleep(GALLERY_JOB_DISPATCH_INTERVAL_SECONDS)
+                claimed_count += 1
+            if claimed_count:
+                idle_delay = GALLERY_JOB_DISPATCH_INTERVAL_SECONDS
+            elif len(active_tasks) < running_limit:
+                metrics.increment(f"gallery.{kind}.claim_miss")
+                idle_delay = min(
+                    GALLERY_JOB_DISPATCH_MAX_IDLE_BACKOFF_SECONDS,
+                    max(GALLERY_JOB_DISPATCH_INTERVAL_SECONDS, idle_delay * 2),
+                )
+            await asyncio.sleep(idle_delay)
         except asyncio.CancelledError:
             for task in active_tasks:
                 task.cancel()
@@ -892,55 +932,101 @@ async def _run_scheduled_gallery_r2_sync_once() -> dict[str, object]:
     return {"started": True, "job_id": job["job_id"]}
 
 
-async def run_gallery_r2_scheduled_sync() -> None:
+async def run_gallery_r2_scheduled_sync(worker_id: str) -> None:
+    lease_name = "gallery_r2_scheduled_sync"
     while True:
-        delay_seconds = await _scheduled_gallery_r2_sync_delay_seconds()
-        await asyncio.sleep(delay_seconds)
         try:
-            await _run_scheduled_gallery_r2_sync_once()
+            acquired = await asyncio.to_thread(
+                storage.acquire_background_lease,
+                name=lease_name,
+                owner=worker_id,
+                lease_expires_at=_background_task_lease_expires_at(),
+            )
+            if not acquired:
+                await asyncio.sleep(SCHEDULED_R2_SYNC_DISABLED_POLL_SECONDS)
+                continue
+            delay_seconds = await _scheduled_gallery_r2_sync_delay_seconds()
+            try:
+                still_leader = await _sleep_while_renewing_background_lease(
+                    name=lease_name,
+                    owner=worker_id,
+                    delay_seconds=delay_seconds,
+                )
+                if not still_leader:
+                    continue
+                await _run_scheduled_gallery_r2_sync_once()
+            finally:
+                await asyncio.to_thread(
+                    storage.release_background_lease,
+                    name=lease_name,
+                    owner=worker_id,
+                )
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.warning("Scheduled R2 gallery sync failed before job creation", exc_info=True)
 
 
-async def gc_gallery_export_jobs() -> None:
+async def gc_gallery_export_jobs(worker_id: str) -> None:
     """Periodically clean up completed export/sync jobs and orphan ZIP files."""
+    lease_name = "gallery_export_gc"
     while True:
         try:
-            await asyncio.sleep(EXPORT_JOB_GC_INTERVAL_SECONDS)
-            stale_exports = await asyncio.to_thread(
-                storage.cleanup_stale_gallery_jobs,
-                "export",
-                EXPORT_JOB_TTL_SECONDS,
+            acquired = await asyncio.to_thread(
+                storage.acquire_background_lease,
+                name=lease_name,
+                owner=worker_id,
+                lease_expires_at=_background_task_lease_expires_at(),
             )
-            stale_syncs = await asyncio.to_thread(
-                storage.cleanup_stale_gallery_jobs,
-                "sync",
-                SYNC_JOB_TTL_SECONDS,
-            )
-            expired_direct_slots = await asyncio.to_thread(
-                storage.cleanup_expired_gallery_jobs,
-                "export_direct",
-            )
-            for job in stale_exports:
-                path = job.get("path")
-                if path:
-                    Path(str(path)).unlink(missing_ok=True)
-            if stale_exports or stale_syncs or expired_direct_slots:
-                logger.info(
-                    "GC cleaned up %d gallery export job(s), %d sync job(s), and %d direct export slot(s)",
-                    len(stale_exports),
-                    len(stale_syncs),
-                    len(expired_direct_slots),
+            if not acquired:
+                await asyncio.sleep(EXPORT_JOB_GC_INTERVAL_SECONDS)
+                continue
+            try:
+                still_leader = await _sleep_while_renewing_background_lease(
+                    name=lease_name,
+                    owner=worker_id,
+                    delay_seconds=EXPORT_JOB_GC_INTERVAL_SECONDS,
                 )
-            exports_dir = Path(config.DATA_DIR) / "exports"
-            if exports_dir.exists():
-                known_ids = await asyncio.to_thread(storage.list_gallery_job_ids_with_files, "export")
-                for zip_path in exports_dir.glob("*.zip"):
-                    if zip_path.stem not in known_ids:
-                        zip_path.unlink(missing_ok=True)
-                        logger.info("GC removed orphan export file: %s", zip_path.name)
+                if not still_leader:
+                    continue
+                stale_exports = await asyncio.to_thread(
+                    storage.cleanup_stale_gallery_jobs,
+                    "export",
+                    EXPORT_JOB_TTL_SECONDS,
+                )
+                stale_syncs = await asyncio.to_thread(
+                    storage.cleanup_stale_gallery_jobs,
+                    "sync",
+                    SYNC_JOB_TTL_SECONDS,
+                )
+                expired_direct_slots = await asyncio.to_thread(
+                    storage.cleanup_expired_gallery_jobs,
+                    "export_direct",
+                )
+                for job in stale_exports:
+                    path = job.get("path")
+                    if path:
+                        Path(str(path)).unlink(missing_ok=True)
+                if stale_exports or stale_syncs or expired_direct_slots:
+                    logger.info(
+                        "GC cleaned up %d gallery export job(s), %d sync job(s), and %d direct export slot(s)",
+                        len(stale_exports),
+                        len(stale_syncs),
+                        len(expired_direct_slots),
+                    )
+                exports_dir = Path(config.DATA_DIR) / "exports"
+                if exports_dir.exists():
+                    known_ids = await asyncio.to_thread(storage.list_gallery_job_ids_with_files, "export")
+                    for zip_path in exports_dir.glob("*.zip"):
+                        if zip_path.stem not in known_ids:
+                            zip_path.unlink(missing_ok=True)
+                            logger.info("GC removed orphan export file: %s", zip_path.name)
+            finally:
+                await asyncio.to_thread(
+                    storage.release_background_lease,
+                    name=lease_name,
+                    owner=worker_id,
+                )
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -1123,11 +1209,13 @@ async def _stream_gallery_job(
         raise HTTPException(status_code=404, detail=not_found_detail)
 
     client_ip = auth.get_client_ip(request)
-    if not await sse_limiter.acquire(client_ip):
+    sse_lease = await sse_limiter.acquire(client_ip)
+    if not sse_lease:
         raise HTTPException(status_code=429, detail="Too many SSE connections")
 
     async def event_stream():
         start = time.monotonic()
+        last_refresh_at = start
         last_updated_at: str | None = None
         last_sent = 0.0
         queue: asyncio.Queue = asyncio.Queue(maxsize=GALLERY_JOB_SSE_QUEUE_MAXSIZE)
@@ -1149,6 +1237,13 @@ async def _stream_gallery_job(
                 if await request.is_disconnected():
                     break
                 now = time.monotonic()
+                refreshed_at = await sse_limiter.refresh_if_needed(
+                    sse_lease,
+                    last_refresh_at,
+                )
+                if refreshed_at is None:
+                    break
+                last_refresh_at = refreshed_at
                 if now - start > config.SSE_CONNECTION_TTL_SECONDS:
                     break
                 if now - last_sent >= 15:
@@ -1183,7 +1278,7 @@ async def _stream_gallery_job(
             subscribers.discard(queue)
             if not subscribers:
                 _get_gallery_job_subscribers(kind).pop(job_id, None)
-            await sse_limiter.release(client_ip)
+            await sse_limiter.release(sse_lease)
 
     return StreamingResponse(
         event_stream(),

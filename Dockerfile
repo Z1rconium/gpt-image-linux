@@ -40,7 +40,12 @@ ENV GRANIAN_INTERFACE=asgi \
     GRANIAN_LOOP=uvloop \
     GRANIAN_RUNTIME_THREADS=2 \
     GRANIAN_RUNTIME_MODE=auto \
-    GRANIAN_WORKERS=1
+    GRANIAN_WORKERS=1 \
+    GRANIAN_BACKPRESSURE=100 \
+    GRANIAN_BACKLOG=2048 \
+    GRANIAN_STATIC_PATH_ROUTE=/_app/immutable \
+    GRANIAN_STATIC_PATH_MOUNT=/app/frontend/build/_app/immutable \
+    GRANIAN_STATIC_PATH_EXPIRES=31536000
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:9090/health')" || exit 1

@@ -178,7 +178,7 @@ An external GPT-compatible image API is required for actual image generation.
 
 ### Docker
 
-Direct Docker runs expose the FastAPI/Granian process without nginx. This path keeps image responses on normal `FileResponse` and is useful for simple local deployments.
+Direct Docker runs expose the FastAPI/Granian process without nginx. The runtime image configures Granian static serving for public SvelteKit immutable assets under `/_app/immutable`; protected gallery image/thumbnail/download bytes still go through backend authorization and normal `FileResponse`.
 
 ```bash
 docker build -t gpt-image-panel .
@@ -216,7 +216,9 @@ PYTHON_BASE_IMAGE=docker.m.daocloud.io/library/python:3.11-slim
 NODE_BASE_IMAGE=docker.m.daocloud.io/library/node:24-alpine
 ```
 
-`GRANIAN_RUNTIME_THREADS` defaults to `2`. On machines with more available CPU, `GRANIAN_RUNTIME_THREADS=4` is a reasonable first bump. `GRANIAN_WORKERS>1` is supported for generation/edit fan-out plus tracked Gallery export/R2 sync jobs: workers claim SQLite-backed work, direct ZIP downloads share SQLite-backed export capacity slots, SSE polls SQLite state, and cancellation marks pending/running generation units without forcibly killing another process.
+Size Granian to the app capacity instead of CPU count alone. For generation throughput, keep `GRANIAN_WORKERS <= MAX_ACTIVE_GENERATE_JOBS`; `2-4` workers is usually enough. When nginx is in front and traffic is mostly HTTP/1, `GRANIAN_WORKERS>=2` can start with `GRANIAN_RUNTIME_THREADS=1`; raise it back to `2` for heavy SSE, uploads, or direct-download traffic. `GRANIAN_BACKPRESSURE` limits how many slow requests each worker lets into Python before Granian pushes back.
+
+`GRANIAN_WORKERS>1` is supported for generation/edit fan-out plus tracked Gallery export/R2 sync jobs: workers claim SQLite-backed work, direct ZIP downloads share SQLite-backed export capacity slots, SSE subscribers use SQLite global leases, startup maintenance runs once per worker group, GC/scheduled sync use background leader leases, and cancellation marks pending/running generation units without forcibly killing another process.
 
 ### Local development
 
@@ -440,18 +442,26 @@ All variables listed in `.env.example` are also tracked in SQLite for Overall Co
 | `IMPORT_MAX_UNCOMPRESSED_MB` | `1024` | Max total uncompressed size in MB across all files in an import archive |
 | `IMPORT_MAX_METADATA_BYTES` | `2097152` | Max `metadata.json` size in bytes for an import archive |
 | `IMPORT_MAX_COMPRESSION_RATIO` | `100` | Max allowed uncompressed/compressed ratio for any imported file |
-| `GRANIAN_WORKERS` | `1` | Granian worker processes; values `>1` share generation/edit image units through SQLite |
+| `GRANIAN_WORKERS` | `1` | Granian worker processes; keep `<= MAX_ACTIVE_GENERATE_JOBS` for generation throughput |
+| `GRANIAN_RUNTIME_THREADS` | `2` | Granian Rust runtime threads per worker; try `1` first when using multiple workers behind nginx/HTTP/1 |
+| `GRANIAN_LOOP` | `uvloop` | Granian event loop implementation |
+| `GRANIAN_BACKPRESSURE` | `100` | Per-worker request backpressure before slow requests stop entering Python |
+| `GRANIAN_BACKLOG` | `2048` | Socket listen backlog for pending connections |
+| `GRANIAN_STATIC_PATH_ROUTE` | `/_app/immutable` | Direct-Docker public immutable asset route served by Granian |
+| `GRANIAN_STATIC_PATH_MOUNT` | `/app/frontend/build/_app/immutable` | Direct-Docker immutable asset directory mounted into Granian static serving |
+| `GRANIAN_STATIC_PATH_EXPIRES` | `31536000` | Granian static asset max-age seconds |
 | `MAX_ACTIVE_GENERATE_JOBS` | `2` | Max number of generation/edit image units running globally |
 | `MAX_QUEUED_GENERATE_JOBS` | `20` | Max additional queued generation/edit image units before new requests are rejected with `429` |
 | `IMAGE_JOB_UNIT_LEASE_SECONDS` | `120` | SQLite claim lease for a running image unit before another worker may retry it |
 | `IMAGE_JOB_UNIT_POLL_INTERVAL_SECONDS` | `0.35` | Minimum SQLite polling interval for image-unit dispatch and generation SSE; dispatchers back off when the queue is empty |
 | `MAX_PENDING_EDIT_SOURCE_MB` | `200` | Global SQLite-reserved pending edit source image bytes in MB; set `0` to disable this byte cap |
-| `MAX_SSE_SUBSCRIBERS_GLOBAL` | `200` | Max active SSE subscribers across the process |
+| `MAX_SSE_SUBSCRIBERS_GLOBAL` | `200` | Max active SSE subscribers across all Granian workers via SQLite slot leases |
 | `MAX_SSE_SUBSCRIBERS_PER_IP` | `10` | Max active SSE subscribers per client IP |
 | `SSE_CONNECTION_TTL_SECONDS` | `3600` | Maximum lifetime for one SSE connection |
 | `IMAGES_DIR` | `./images` | Directory for saved images |
 | `THUMBNAILS_DIR` | `./images/thumbs` | Directory for generated gallery thumbnails |
 | `THUMBNAIL_MAX_SIDE` | `512` | Max thumbnail width/height in pixels |
+| `THUMBNAIL_CPU_CONCURRENCY` | `1` | Global SQLite-limited thumbnail generation concurrency across workers |
 | `DATA_DIR` | `./data` | Directory for SQLite runtime data |
 | `DATABASE_FILE` | `./data/app.sqlite3` | SQLite database for gallery metadata and API presets |
 | `PYTHON_BASE_IMAGE` | `python:3.11-slim` | Docker build base image; override when Docker Hub is slow or blocked |
@@ -524,11 +534,13 @@ All variables listed in `.env.example` are also tracked in SQLite for Overall Co
 - SQLite repository operations use short-lived connections with WAL enabled at startup; `DATA_DIR` is chmodded to `0700`, the SQLite DB/sidecars are chmodded to `0600`, and app shutdown/tests call the storage close hook so connection lifecycle stays explicit
 - generation and edit share one SQLite queue measured in image units (`MAX_ACTIVE_GENERATE_JOBS` + `MAX_QUEUED_GENERATE_JOBS`); enqueue capacity, parent job creation, unit insertion, and edit-source byte reservation are committed atomically in SQLite. Edit source images are staged under `DATA_DIR/edit-sources`, globally capped by `MAX_PENDING_EDIT_SOURCE_MB`, released on terminal/cancelled jobs, support cancellation, and persist terminal history including `completed_at`
 - batch generation/edit (`n > 1`) consumes `n` queue units; the parent job aggregates successful unit results into `images[]`, Gallery metadata keeps the user-requested `n`, and units can be claimed by different Granian workers
-- tracked Gallery export jobs and manual/scheduled R2 sync jobs persist in SQLite, so create/query/SSE/download work across `GRANIAN_WORKERS>1`; workers claim queued or expired running jobs with SQLite leases while export ZIP files live under shared `DATA_DIR/exports`, and direct ZIP downloads reserve the same global export capacity through short-lived SQLite slot rows
+- tracked Gallery export jobs and manual/scheduled R2 sync jobs persist in SQLite, so create/query/SSE/download work across `GRANIAN_WORKERS>1`; workers claim queued or expired running jobs with SQLite leases, empty dispatchers back off, GC/scheduled sync use background leader leases, export ZIP files live under shared `DATA_DIR/exports`, and direct ZIP downloads reserve the same global export capacity through short-lived SQLite slot rows
+- SSE subscriber limits are enforced through SQLite `sse_slots`, so `MAX_SSE_SUBSCRIBERS_GLOBAL` is no longer multiplied by Granian worker count; stale slots expire if a worker dies before release
+- Gallery thumbnails are lazy: image save and DB insert finish before Pillow thumbnail work, and `/api/thumb/{filename}` generates missing thumbnails under the global `THUMBNAIL_CPU_CONCURRENCY` slot limit
 - Prompt Optimizer uses its own server-side Chat Completions-compatible endpoint config and user-configurable request timeout/response-size cap, resolves API key env refs on the backend, stores its editable system prompt in `DATA_DIR/prompt_optimizer_system_prompt.md`, and does not consume generation/edit queue capacity.
 - R2 Backup uses boto3 against a Cloudflare R2 S3-compatible endpoint under `asyncio.to_thread`; sync jobs list only the configured prefix, retain only keys that match local gallery filenames, fall back to per-file `HeadObject` checks for very large prefixes, upload missing local gallery filenames, and never serve, overwrite, or delete gallery images from R2.
 - SSE is the primary progress channel; `/api/generate/jobs` provides list/history (`include_finished=true`, optional `limit`/`offset`, optional `failed_only=true`), `/api/generate/jobs/history` clears terminal history, and `/api/generate/jobs/events` streams SQLite-backed live job-list changes with sub-second polling
-- terminal job history includes `stage_timings` for `upstream_wait`, `download_decode`, `validate`, `thumbnail`, and `db_insert`; slow gallery queries are logged with prompt presence/length/hash plus other filters and totals and counted in metrics; optional metrics include queue depth, running jobs, failure ratios, job-stage latencies, and slow SQLite query counters; terminal job statuses distinguish `cancelled`, `interrupted`, and `upstream_error` in addition to the generic `error`
+- terminal job history includes `stage_timings` for `upstream_wait`, `download_decode`, `validate`, and `db_insert`; slow gallery queries are logged with prompt presence/length/hash plus other filters and totals and counted in metrics; optional metrics include `worker_id`, recent worker snapshots, queue depth, running jobs, failure ratios, job-stage latencies, SQLite busy/slow counters, SSE poll query counters, claim misses, active SSE slots, and worker heartbeat age; terminal job statuses distinguish `cancelled`, `interrupted`, and `upstream_error` in addition to the generic `error`
 - upstream JSON/SSE bodies are read with a `MAX_UPSTREAM_JSON_MB` cap before parsing, JSON request bodies are capped by `MAX_JSON_BODY_MB`, and upstream image URL downloads are revalidated (SSRF-aware, no blind redirect follow), fully decoded with Pillow, pixel-limited by `MAX_IMAGE_PIXELS`, and bounded by `MAX_FILE_SIZE_MB`
 - `/api/import` enforces ZIP safety/size/count/compression checks; `/api/download-all` keeps the low-memory streaming path with global SQLite-backed direct export slots, while tracked export jobs write temp ZIP files so UI progress can cover both packing and transfer. ZIP metadata uses stored `sha256`/`bytes` when available and does not re-read image files only to backfill missing hashes during export.
 - gallery stores byte-size metadata and thumbnails (`THUMBNAILS_DIR`), with lazy thumbnail and opt-in byte-size backfill for older images; with Compose, nginx serves immutable frontend assets directly and serves image/thumb/download file bytes only after FastAPI returns an authorized `X-Accel-Redirect`
@@ -752,7 +764,7 @@ data/
 
 ### Docker
 
-直接 `docker run` 暴露的是 FastAPI/Granian 进程，不经过 nginx。这个路径仍由后端 `FileResponse` 返回图片，适合简单本地部署。
+直接 `docker run` 暴露的是 FastAPI/Granian 进程，不经过 nginx。runtime 镜像会让 Granian 直接服务 `/_app/immutable` 下的公开 SvelteKit immutable assets；受保护的 Gallery 图片/缩略图/下载字节仍由后端鉴权后通过普通 `FileResponse` 返回。
 
 ```bash
 docker build -t gpt-image-panel .
@@ -790,7 +802,9 @@ PYTHON_BASE_IMAGE=docker.m.daocloud.io/library/python:3.11-slim
 NODE_BASE_IMAGE=docker.m.daocloud.io/library/node:24-alpine
 ```
 
-`GRANIAN_RUNTIME_THREADS` 默认是 `2`。CPU 资源更充足时，可以先试 `GRANIAN_RUNTIME_THREADS=4`。`GRANIAN_WORKERS>1` 已支持生成/编辑 fan-out，以及可跟踪 Gallery export/R2 sync job：worker 通过 SQLite 认领任务，direct ZIP 下载共享 SQLite 里的 export 容量 slot，SSE 轮询 SQLite 状态，取消会标记未完成的生成 unit，但不会跨进程强杀正在等待上游的调用。
+Granian 要按应用容量调，不要只按 CPU 数量加 worker。生成吞吐优先保持 `GRANIAN_WORKERS <= MAX_ACTIVE_GENERATE_JOBS`；通常 `2-4` 个 worker 就够。nginx 在前且主要是 HTTP/1 流量时，`GRANIAN_WORKERS>=2` 可以先用 `GRANIAN_RUNTIME_THREADS=1`；大量 SSE、上传或直连下载时再调回 `2`。`GRANIAN_BACKPRESSURE` 用来限制每个 worker 同时进入 Python 的慢请求数量。
+
+`GRANIAN_WORKERS>1` 已支持生成/编辑 fan-out，以及可跟踪 Gallery export/R2 sync job：worker 通过 SQLite 认领任务，direct ZIP 下载共享 SQLite 里的 export 容量 slot，SSE 订阅使用 SQLite 全局 lease，启动维护只在同批 worker 中运行一次，GC/定时同步使用后台 leader lease，取消会标记未完成的生成 unit，但不会跨进程强杀正在等待上游的调用。
 
 ### 本地开发
 
@@ -1012,18 +1026,26 @@ curl http://localhost:9090/health
 | `IMPORT_MAX_UNCOMPRESSED_MB` | `1024` | 导入归档内所有文件解压后的最大总体积（MB） |
 | `IMPORT_MAX_METADATA_BYTES` | `2097152` | 导入归档中 `metadata.json` 的最大字节数 |
 | `IMPORT_MAX_COMPRESSION_RATIO` | `100` | 单个导入文件允许的最大解压/压缩体积比 |
-| `GRANIAN_WORKERS` | `1` | Granian worker 进程数；设为 `>1` 时通过 SQLite 共享生成/编辑 image units |
+| `GRANIAN_WORKERS` | `1` | Granian worker 进程数；生成吞吐建议保持 `<= MAX_ACTIVE_GENERATE_JOBS` |
+| `GRANIAN_RUNTIME_THREADS` | `2` | 每个 worker 的 Granian Rust runtime 线程数；多 worker + nginx/HTTP/1 时可先试 `1` |
+| `GRANIAN_LOOP` | `uvloop` | Granian event loop 实现 |
+| `GRANIAN_BACKPRESSURE` | `100` | 每个 worker 的请求 backpressure；慢请求超过后不再继续进入 Python |
+| `GRANIAN_BACKLOG` | `2048` | socket listen backlog，控制待接受连接积压 |
+| `GRANIAN_STATIC_PATH_ROUTE` | `/_app/immutable` | 直接 Docker 模式下由 Granian 服务的公开 immutable asset 路由 |
+| `GRANIAN_STATIC_PATH_MOUNT` | `/app/frontend/build/_app/immutable` | 直接 Docker 模式下挂给 Granian static 的 immutable asset 目录 |
+| `GRANIAN_STATIC_PATH_EXPIRES` | `31536000` | Granian static asset 的 max-age 秒数 |
 | `MAX_ACTIVE_GENERATE_JOBS` | `2` | 全局允许同时运行的生成/编辑 image unit 数量 |
 | `MAX_QUEUED_GENERATE_JOBS` | `20` | 超出并发后允许继续排队的 image unit 数量；超过后新请求返回 `429` |
 | `IMAGE_JOB_UNIT_LEASE_SECONDS` | `120` | running image unit 的 SQLite claim lease，过期后其他 worker 可重试 |
 | `IMAGE_JOB_UNIT_POLL_INTERVAL_SECONDS` | `0.35` | image-unit 调度和生成 SSE 的最小 SQLite 轮询间隔（秒）；队列为空时调度器会退避 |
 | `MAX_PENDING_EDIT_SOURCE_MB` | `200` | SQLite 全局预留的待处理编辑源图总字节上限（MB）；设为 `0` 可关闭该字节上限 |
-| `MAX_SSE_SUBSCRIBERS_GLOBAL` | `200` | 全进程允许的最大活跃 SSE 订阅数 |
+| `MAX_SSE_SUBSCRIBERS_GLOBAL` | `200` | 通过 SQLite slot lease 跨所有 Granian worker 限制的最大活跃 SSE 订阅数 |
 | `MAX_SSE_SUBSCRIBERS_PER_IP` | `10` | 单个客户端 IP 允许的最大活跃 SSE 订阅数 |
 | `SSE_CONNECTION_TTL_SECONDS` | `3600` | 单条 SSE 连接的最长生命周期（秒） |
 | `IMAGES_DIR` | `./images` | 图片存储目录 |
 | `THUMBNAILS_DIR` | `./images/thumbs` | Gallery 缩略图生成目录 |
 | `THUMBNAIL_MAX_SIDE` | `512` | 缩略图最大宽/高像素 |
+| `THUMBNAIL_CPU_CONCURRENCY` | `1` | 通过 SQLite 限制的跨 worker 全局缩略图生成并发 |
 | `ALLOW_PLAINTEXT_SECRETS` | `false` | 是否允许把 API Key / SOCKS5 代理 URL / Webhook URL / R2 凭据明文持久化到 SQLite；默认要求 `${ENV_VAR_NAME}` 引用 |
 | `DATA_DIR` | `./data` | SQLite 运行时数据目录；启动时会收紧到 `0700` |
 | `DATABASE_FILE` | `./data/app.sqlite3` | 保存 Gallery 元数据和 API 预设的 SQLite 数据库；启动时会收紧到 `0600` |
@@ -1095,11 +1117,13 @@ curl http://localhost:9090/health
 - SQLite 仓储操作使用短连接，并在启动时启用 WAL；`DATA_DIR` 会 chmod 为 `0700`，SQLite 数据库和 sidecar 文件会 chmod 为 `0600`；应用 shutdown 和测试 reset 会调用 storage close hook，连接生命周期保持显式
 - 生成与编辑共用按 image units 计量的 SQLite 队列（`MAX_ACTIVE_GENERATE_JOBS` + `MAX_QUEUED_GENERATE_JOBS`）；入队容量检查、父任务创建、unit 插入和编辑源字节预留会在 SQLite 里原子提交；所有编辑源图先落到 `DATA_DIR/edit-sources`，并额外受 `MAX_PENDING_EDIT_SOURCE_MB` 全局限制，任务终态/取消时释放；支持取消，并持久化终态历史（含 `completed_at`）
 - 批量生成/编辑（`n > 1`）会占用 `n` 个队列单位；父任务会把成功 unit 结果聚合到 `images[]`，Gallery 元数据保留用户请求的 `n`，不同 unit 可被不同 Granian worker 认领执行
-- 可跟踪 Gallery export job 和手动/定时 R2 sync job 持久化在 SQLite；`GRANIAN_WORKERS>1` 下创建、查询、SSE、下载都可跨进程工作；worker 通过 SQLite lease 认领 queued 或 lease 过期的 running job，导出 ZIP 存在共享 `DATA_DIR/exports`，direct ZIP 下载也会通过短生命周期 SQLite slot 行占用同一个全局 export 容量
+- 可跟踪 Gallery export job 和手动/定时 R2 sync job 持久化在 SQLite；`GRANIAN_WORKERS>1` 下创建、查询、SSE、下载都可跨进程工作；worker 通过 SQLite lease 认领 queued 或 lease 过期的 running job，空队列 dispatcher 会退避，GC/定时同步使用后台 leader lease，导出 ZIP 存在共享 `DATA_DIR/exports`，direct ZIP 下载也会通过短生命周期 SQLite slot 行占用同一个全局 export 容量
+- SSE 订阅上限通过 SQLite `sse_slots` 执行，所以 `MAX_SSE_SUBSCRIBERS_GLOBAL` 不再随 Granian worker 数量倍增；worker 异常退出时 stale slot 会过期释放
+- Gallery 缩略图是懒生成：图片保存和 DB insert 不再等待 Pillow，`/api/thumb/{filename}` 会在缺失时按 `THUMBNAIL_CPU_CONCURRENCY` 全局 slot 限制生成缩略图
 - 提示词优化器使用独立的服务端 Chat Completions 兼容 endpoint 配置和用户可配置请求超时/响应体积上限，在后端解析 API Key 环境变量引用，不占用生成/编辑任务队列容量。
 - R2 Backup 通过 boto3 访问 Cloudflare R2 S3 兼容 endpoint，并用 `asyncio.to_thread` 隔离阻塞调用；同步任务只列出配置的 prefix，只保留匹配本地 Gallery filename 的远端 key，远端 prefix 极大时会降级为按文件 `HeadObject` 检查，只上传缺失的本地 Gallery filename，不会从 R2 服务、覆盖或删除 Gallery 图片。
 - SSE 是主进度通道；`/api/generate/jobs` 提供列表/历史（`include_finished=true`，可选 `limit`/`offset`，可选 `failed_only=true`），`/api/generate/jobs/history` 清空终态历史，`/api/generate/jobs/events` 通过 SQLite 亚秒级轮询推送实时任务列表变化
-- 任务终态历史包含 `stage_timings`：`upstream_wait`、`download_decode`、`validate`、`thumbnail`、`db_insert`；慢 Gallery 查询日志只记录提示词是否存在/长度/hash，以及其他筛选条件与 total，并计入 metrics；可选 metrics 包含队列深度、运行中任务数、失败率、任务分段耗时和慢 SQLite 查询数；终态状态区分 `cancelled`、`interrupted` 和 `upstream_error`，同时保留通用 `error`
+- 任务终态历史包含 `stage_timings`：`upstream_wait`、`download_decode`、`validate`、`db_insert`；慢 Gallery 查询日志只记录提示词是否存在/长度/hash，以及其他筛选条件与 total，并计入 metrics；可选 metrics 包含 `worker_id`、最近 worker snapshots、队列深度、运行中任务数、失败率、任务分段耗时、SQLite busy/慢查询数、SSE poll 查询数、claim miss、活跃 SSE slots 和 worker heartbeat age；终态状态区分 `cancelled`、`interrupted` 和 `upstream_error`，同时保留通用 `error`
 - 上游 JSON/SSE 响应会在解析前受 `MAX_UPSTREAM_JSON_MB` 限制，JSON 请求体受 `MAX_JSON_BODY_MB` 限制；上游图片 URL 下载会做 SSRF/重定向目标复核，并会经过 Pillow 完整解码、`MAX_IMAGE_PIXELS` 像素限制和 `MAX_FILE_SIZE_MB` 体积限制
 - `/api/import` 做 ZIP 安全与体积校验；`/api/download-all` 保留低内存流式导出，并使用 SQLite 里的全局 direct export slot；带进度的导出任务会写入临时 ZIP，让 UI 同时展示打包和传输进度。ZIP metadata 会使用已保存的 `sha256`/`bytes`，导出时不会为了补缺失 hash 额外完整读取图片文件。
 - Gallery 持久化图片字节数和缩略图（`THUMBNAILS_DIR`），旧图按需懒补缩略图；使用 Compose 时，nginx 会直接返回 immutable 前端资源，并且只在 FastAPI 返回已授权的 `X-Accel-Redirect` 后发送图片/缩略图/下载文件字节

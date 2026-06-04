@@ -25,6 +25,7 @@ from ...core import security as auth
 from ...core import settings as config
 from ...core.api_paths import normalize_api_path
 from ...core.constants import ACTIVE_GENERATE_JOB_STATUSES, ERROR_GENERATE_JOB_STATUSES
+from ...core.observability import metrics
 from ...core.utils import utc_now
 from ...repositories import storage
 from ...schemas.models import (
@@ -75,6 +76,7 @@ async def _poll_generate_jobs_sse() -> None:
                 storage.get_generate_jobs_list_updated_at_edge,
                 statuses=ACTIVE_GENERATE_JOB_STATUSES,
             )
+            metrics.increment("sse.poll_queries.generate_jobs")
             if edge != last_edge:
                 last_edge = edge
                 jobs = await asyncio.to_thread(
@@ -112,6 +114,7 @@ async def _poll_generate_job_sse() -> None:
                 storage.get_generate_jobs_updated_at_edges,
                 job_ids=set(subscribers_by_job),
             )
+            metrics.increment("sse.poll_queries.generate_job")
             for job_id in set(subscribers_by_job) - set(current_edges):
                 for queue in subscribers_by_job[job_id]:
                     publish_queue(queue, {"event": "_missing", "data": None})
@@ -195,11 +198,13 @@ async def list_generate_jobs(
 @router.get("/api/generate/jobs/events")
 async def stream_generate_jobs(request: Request):
     client_ip = auth.get_client_ip(request)
-    if not await sse_limiter.acquire(client_ip):
+    sse_lease = await sse_limiter.acquire(client_ip)
+    if not sse_lease:
         raise HTTPException(status_code=429, detail="Too many SSE connections")
 
     async def event_stream():
         start = time.monotonic()
+        last_refresh_at = start
         last_payload = None
         last_sent = 0.0
         queue: asyncio.Queue = asyncio.Queue(maxsize=SSE_QUEUE_MAXSIZE)
@@ -220,6 +225,13 @@ async def stream_generate_jobs(request: Request):
                 if await request.is_disconnected():
                     break
                 now = time.monotonic()
+                refreshed_at = await sse_limiter.refresh_if_needed(
+                    sse_lease,
+                    last_refresh_at,
+                )
+                if refreshed_at is None:
+                    break
+                last_refresh_at = refreshed_at
                 if now - start > config.SSE_CONNECTION_TTL_SECONDS:
                     break
                 if now - last_sent >= 15:
@@ -246,7 +258,7 @@ async def stream_generate_jobs(request: Request):
                 yield serialize_sse_event("jobs", jobs)
         finally:
             subscribers.discard(queue)
-            await sse_limiter.release(client_ip)
+            await sse_limiter.release(sse_lease)
 
     return StreamingResponse(
         event_stream(),
@@ -288,11 +300,13 @@ async def stream_generate_job(job_id: str, request: Request):
         raise HTTPException(status_code=404, detail="Generation job not found")
 
     client_ip = auth.get_client_ip(request)
-    if not await sse_limiter.acquire(client_ip):
+    sse_lease = await sse_limiter.acquire(client_ip)
+    if not sse_lease:
         raise HTTPException(status_code=429, detail="Too many SSE connections")
 
     async def event_stream():
         start = time.monotonic()
+        last_refresh_at = start
         last_payload = None
         last_sent = 0.0
         queue: asyncio.Queue = asyncio.Queue(maxsize=SSE_QUEUE_MAXSIZE)
@@ -315,6 +329,13 @@ async def stream_generate_job(job_id: str, request: Request):
                 if await request.is_disconnected():
                     break
                 now = time.monotonic()
+                refreshed_at = await sse_limiter.refresh_if_needed(
+                    sse_lease,
+                    last_refresh_at,
+                )
+                if refreshed_at is None:
+                    break
+                last_refresh_at = refreshed_at
                 if now - start > config.SSE_CONNECTION_TTL_SECONDS:
                     break
                 if now - last_sent >= 15:
@@ -349,7 +370,7 @@ async def stream_generate_job(job_id: str, request: Request):
             subscribers.discard(queue)
             if not subscribers:
                 get_job_subscribers().pop(job_id, None)
-            await sse_limiter.release(client_ip)
+            await sse_limiter.release(sse_lease)
 
     return StreamingResponse(
         event_stream(),

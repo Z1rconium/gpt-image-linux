@@ -104,6 +104,7 @@ IMAGE_JOB_UNIT_POLL_INTERVAL_SECONDS = max(
 IMAGES_DIR = os.getenv("IMAGES_DIR", "./images")
 THUMBNAILS_DIR = os.getenv("THUMBNAILS_DIR", os.path.join(IMAGES_DIR, "thumbs"))
 THUMBNAIL_MAX_SIDE = max(1, int(os.getenv("THUMBNAIL_MAX_SIDE", "512")))
+THUMBNAIL_CPU_CONCURRENCY = max(1, int(os.getenv("THUMBNAIL_CPU_CONCURRENCY", "1")))
 DATA_DIR = os.getenv("DATA_DIR", "./data")
 DATABASE_FILE = os.getenv("DATABASE_FILE", os.path.join(DATA_DIR, "app.sqlite3"))
 

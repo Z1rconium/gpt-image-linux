@@ -1455,6 +1455,7 @@ async def run_image_unit_dispatcher(worker_id: str):
                 heartbeat_if_needed(force=True)
                 idle_delay = config.IMAGE_JOB_UNIT_POLL_INTERVAL_SECONDS
             elif len(active_tasks) < config.MAX_ACTIVE_GENERATE_JOBS:
+                metrics.increment("image_jobs.claim_miss")
                 idle_delay = min(
                     IMAGE_DISPATCHER_MAX_IDLE_BACKOFF_SECONDS,
                     max(config.IMAGE_JOB_UNIT_POLL_INTERVAL_SECONDS, idle_delay * 2),

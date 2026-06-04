@@ -155,6 +155,33 @@ def format_prometheus_metrics(
             lines.append(f"# TYPE {metric_name} gauge")
             lines.append(f"{metric_name} {_format_metric_value(summary.get(field, 0.0))}")
 
+    for worker in snapshot.get("workers", []):
+        if not isinstance(worker, dict):
+            continue
+        worker_id = str(worker.get("worker_id") or "")
+        worker_snapshot = worker.get("snapshot")
+        if not worker_id or not isinstance(worker_snapshot, dict):
+            continue
+        label = f'worker_id="{_metric_label_value(worker_id)}"'
+        age_metric_name = f"{namespace}_worker_snapshot_age_seconds"
+        lines.append(f"# TYPE {age_metric_name} gauge")
+        lines.append(
+            f"{age_metric_name}{{{label}}} "
+            f"{_format_metric_value(worker.get('age_seconds') or 0)}"
+        )
+        for name, value in sorted(worker_snapshot.get("counters", {}).items()):
+            metric_name = f"{namespace}_worker_{_metric_name(name)}_total"
+            lines.append(f"# TYPE {metric_name} counter")
+            lines.append(f"{metric_name}{{{label}}} {int(value)}")
+        for name, value in sorted(worker_snapshot.get("gauges", {}).items()):
+            metric_name = f"{namespace}_worker_{_metric_name(name)}"
+            lines.append(f"# TYPE {metric_name} gauge")
+            lines.append(f"{metric_name}{{{label}}} {_format_metric_value(value)}")
+        for name, value in sorted(worker_snapshot.get("rates", {}).items()):
+            metric_name = f"{namespace}_worker_{_metric_name(name)}"
+            lines.append(f"# TYPE {metric_name} gauge")
+            lines.append(f"{metric_name}{{{label}}} {_format_metric_value(value)}")
+
     return "\n".join(lines) + "\n"
 
 
@@ -193,6 +220,10 @@ def _format_metric_value(value: int | float) -> str:
     if isinstance(value, int):
         return str(value)
     return f"{float(value):.6f}".rstrip("0").rstrip(".")
+
+
+def _metric_label_value(value: str) -> str:
+    return str(value).replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
 
 
 metrics = MetricsStore()
