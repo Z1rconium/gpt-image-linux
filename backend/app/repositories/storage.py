@@ -689,8 +689,8 @@ def _connect() -> Iterator[sqlite3.Connection]:
         raise
     finally:
         _thread_local.connection_depth = depth
-        if depth == 0 and conn.in_transaction:
-            conn.rollback()
+        if depth == 0:
+            _close_thread_connection()
 
 
 def _get_thread_connection() -> sqlite3.Connection:
@@ -727,7 +727,7 @@ def _close_thread_connection():
 
 
 def close_database_connections():
-    """Close this thread's cached SQLite connection and clear storage caches."""
+    """Close this thread's active SQLite connection and clear storage caches."""
     _close_thread_connection()
     _clear_verified_thumbnails()
     _invalidate_filter_options_cache()

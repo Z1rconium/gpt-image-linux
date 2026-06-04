@@ -2719,7 +2719,7 @@ def test_gallery_slow_query_logs_filters_page_and_total(client, caplog):
     assert metrics.snapshot()["counters"]["sqlite.slow_queries"] == 1
 
 
-def test_storage_connect_reuses_thread_local_sqlite_handle_until_closed(tmp_path, monkeypatch):
+def test_storage_connect_reuses_nested_sqlite_handle_and_closes_on_exit(tmp_path, monkeypatch):
     _configure_runtime(tmp_path)
     closed_paths: list[str] = []
     real_connect = sqlite3.connect
@@ -2738,15 +2738,20 @@ def test_storage_connect_reuses_thread_local_sqlite_handle_until_closed(tmp_path
     with storage._connect() as conn:
         first_conn = conn
         assert conn.execute("SELECT 1").fetchone()[0] == 1
+        with storage._connect() as nested_conn:
+            assert nested_conn is first_conn
+            assert nested_conn.execute("SELECT 1").fetchone()[0] == 1
+        assert closed_paths == []
+
+    assert closed_paths == [config.DATABASE_FILE]
+    with pytest.raises(sqlite3.ProgrammingError):
+        first_conn.execute("SELECT 1")
 
     with storage._connect() as conn:
-        assert conn is first_conn
+        assert conn is not first_conn
         assert conn.execute("SELECT 1").fetchone()[0] == 1
 
-    assert closed_paths == []
-
-    storage.close_database_connections()
-    assert closed_paths == [config.DATABASE_FILE]
+    assert closed_paths == [config.DATABASE_FILE, config.DATABASE_FILE]
 
 
 def test_generate_and_edit_default_size_is_auto(client):
