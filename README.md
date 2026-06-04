@@ -444,8 +444,8 @@ All variables listed in `.env.example` are also tracked in SQLite for Overall Co
 | `MAX_ACTIVE_GENERATE_JOBS` | `2` | Max number of generation/edit image units running globally |
 | `MAX_QUEUED_GENERATE_JOBS` | `20` | Max additional queued generation/edit image units before new requests are rejected with `429` |
 | `IMAGE_JOB_UNIT_LEASE_SECONDS` | `120` | SQLite claim lease for a running image unit before another worker may retry it |
-| `IMAGE_JOB_UNIT_POLL_INTERVAL_SECONDS` | `0.35` | SQLite polling interval for image-unit dispatch and generation SSE |
-| `MAX_PENDING_EDIT_SOURCE_MB` | `200` | Max total pending edit source image bytes in MB; set `0` to disable this byte cap |
+| `IMAGE_JOB_UNIT_POLL_INTERVAL_SECONDS` | `0.35` | Minimum SQLite polling interval for image-unit dispatch and generation SSE; dispatchers back off when the queue is empty |
+| `MAX_PENDING_EDIT_SOURCE_MB` | `200` | Global SQLite-reserved pending edit source image bytes in MB; set `0` to disable this byte cap |
 | `MAX_SSE_SUBSCRIBERS_GLOBAL` | `200` | Max active SSE subscribers across the process |
 | `MAX_SSE_SUBSCRIBERS_PER_IP` | `10` | Max active SSE subscribers per client IP |
 | `SSE_CONNECTION_TTL_SECONDS` | `3600` | Maximum lifetime for one SSE connection |
@@ -522,7 +522,7 @@ All variables listed in `.env.example` are also tracked in SQLite for Overall Co
 - when an upstream SOCKS5 proxy is configured, the backend still validates the upstream URL before connecting and logs a warning if the hostname resolves locally to private/internal IPs, but the SOCKS5 proxy is the trust boundary for remote DNS and network reachability
 - presets, prompt snippets, and gallery/job data persist only in `DATABASE_FILE`
 - SQLite repository operations use short-lived connections with WAL enabled at startup; `DATA_DIR` is chmodded to `0700`, the SQLite DB/sidecars are chmodded to `0600`, and app shutdown/tests call the storage close hook so connection lifecycle stays explicit
-- generation and edit share one SQLite queue measured in image units (`MAX_ACTIVE_GENERATE_JOBS` + `MAX_QUEUED_GENERATE_JOBS`), all edit source images are staged under `DATA_DIR/edit-sources` and additionally capped by `MAX_PENDING_EDIT_SOURCE_MB`, support cancellation, and persist terminal history including `completed_at`
+- generation and edit share one SQLite queue measured in image units (`MAX_ACTIVE_GENERATE_JOBS` + `MAX_QUEUED_GENERATE_JOBS`); enqueue capacity, parent job creation, unit insertion, and edit-source byte reservation are committed atomically in SQLite. Edit source images are staged under `DATA_DIR/edit-sources`, globally capped by `MAX_PENDING_EDIT_SOURCE_MB`, released on terminal/cancelled jobs, support cancellation, and persist terminal history including `completed_at`
 - batch generation/edit (`n > 1`) consumes `n` queue units; the parent job aggregates successful unit results into `images[]`, Gallery metadata keeps the user-requested `n`, and units can be claimed by different Granian workers
 - tracked Gallery export jobs and manual/scheduled R2 sync jobs persist in SQLite, so create/query/SSE/download work across `GRANIAN_WORKERS>1`; workers claim queued or expired running jobs with SQLite leases while export ZIP files live under shared `DATA_DIR/exports`, and direct ZIP downloads reserve the same global export capacity through short-lived SQLite slot rows
 - Prompt Optimizer uses its own server-side Chat Completions-compatible endpoint config and user-configurable request timeout/response-size cap, resolves API key env refs on the backend, stores its editable system prompt in `DATA_DIR/prompt_optimizer_system_prompt.md`, and does not consume generation/edit queue capacity.
@@ -1016,8 +1016,8 @@ curl http://localhost:9090/health
 | `MAX_ACTIVE_GENERATE_JOBS` | `2` | 全局允许同时运行的生成/编辑 image unit 数量 |
 | `MAX_QUEUED_GENERATE_JOBS` | `20` | 超出并发后允许继续排队的 image unit 数量；超过后新请求返回 `429` |
 | `IMAGE_JOB_UNIT_LEASE_SECONDS` | `120` | running image unit 的 SQLite claim lease，过期后其他 worker 可重试 |
-| `IMAGE_JOB_UNIT_POLL_INTERVAL_SECONDS` | `0.35` | image-unit 调度和生成 SSE 的 SQLite 轮询间隔（秒） |
-| `MAX_PENDING_EDIT_SOURCE_MB` | `200` | 待处理编辑源图的总字节上限（MB）；设为 `0` 可关闭该字节上限 |
+| `IMAGE_JOB_UNIT_POLL_INTERVAL_SECONDS` | `0.35` | image-unit 调度和生成 SSE 的最小 SQLite 轮询间隔（秒）；队列为空时调度器会退避 |
+| `MAX_PENDING_EDIT_SOURCE_MB` | `200` | SQLite 全局预留的待处理编辑源图总字节上限（MB）；设为 `0` 可关闭该字节上限 |
 | `MAX_SSE_SUBSCRIBERS_GLOBAL` | `200` | 全进程允许的最大活跃 SSE 订阅数 |
 | `MAX_SSE_SUBSCRIBERS_PER_IP` | `10` | 单个客户端 IP 允许的最大活跃 SSE 订阅数 |
 | `SSE_CONNECTION_TTL_SECONDS` | `3600` | 单条 SSE 连接的最长生命周期（秒） |
@@ -1093,7 +1093,7 @@ curl http://localhost:9090/health
 - 配置上游 SOCKS5 代理时，后端仍会在连接前验证上游 URL，并在主机名本地解析到私有/内部 IP 时记录 warning；但远端 DNS 和网络可达性由 SOCKS5 代理决定，代理本身就是信任边界
 - 预设、提示词收藏夹和 Gallery/Job 数据只保存在 `DATABASE_FILE`
 - SQLite 仓储操作使用短连接，并在启动时启用 WAL；`DATA_DIR` 会 chmod 为 `0700`，SQLite 数据库和 sidecar 文件会 chmod 为 `0600`；应用 shutdown 和测试 reset 会调用 storage close hook，连接生命周期保持显式
-- 生成与编辑共用按 image units 计量的 SQLite 队列（`MAX_ACTIVE_GENERATE_JOBS` + `MAX_QUEUED_GENERATE_JOBS`）；所有编辑源图先落到 `DATA_DIR/edit-sources` 并额外受 `MAX_PENDING_EDIT_SOURCE_MB` 总量限制；支持取消，并持久化终态历史（含 `completed_at`）
+- 生成与编辑共用按 image units 计量的 SQLite 队列（`MAX_ACTIVE_GENERATE_JOBS` + `MAX_QUEUED_GENERATE_JOBS`）；入队容量检查、父任务创建、unit 插入和编辑源字节预留会在 SQLite 里原子提交；所有编辑源图先落到 `DATA_DIR/edit-sources`，并额外受 `MAX_PENDING_EDIT_SOURCE_MB` 全局限制，任务终态/取消时释放；支持取消，并持久化终态历史（含 `completed_at`）
 - 批量生成/编辑（`n > 1`）会占用 `n` 个队列单位；父任务会把成功 unit 结果聚合到 `images[]`，Gallery 元数据保留用户请求的 `n`，不同 unit 可被不同 Granian worker 认领执行
 - 可跟踪 Gallery export job 和手动/定时 R2 sync job 持久化在 SQLite；`GRANIAN_WORKERS>1` 下创建、查询、SSE、下载都可跨进程工作；worker 通过 SQLite lease 认领 queued 或 lease 过期的 running job，导出 ZIP 存在共享 `DATA_DIR/exports`，direct ZIP 下载也会通过短生命周期 SQLite slot 行占用同一个全局 export 容量
 - 提示词优化器使用独立的服务端 Chat Completions 兼容 endpoint 配置和用户可配置请求超时/响应体积上限，在后端解析 API Key 环境变量引用，不占用生成/编辑任务队列容量。

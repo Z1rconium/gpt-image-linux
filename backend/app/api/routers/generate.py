@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import time
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -7,8 +8,13 @@ from fastapi.responses import StreamingResponse
 
 from ..app_state import app
 from ..jobs import (
+    cleanup_parent_edit_sources,
+    get_job_subscribers,
+    get_jobs_subscribers,
     get_generate_job_webhooks,
+    publish_queue,
     queue_image_job,
+    reconcile_active_generate_jobs,
     run_generate_job,
     serialize_sse_event,
     store_generate_job,
@@ -30,10 +36,111 @@ from ...schemas.models import (
 
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+SSE_IDLE_CHECK_SECONDS = 1.0
+SSE_QUEUE_MAXSIZE = 20
 
 
 def json_payload_key(payload: dict | list) -> str:
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _start_generate_jobs_sse_poller() -> None:
+    task = getattr(app.state, "generate_jobs_sse_poller_task", None)
+    if task and not task.done():
+        return
+    app.state.generate_jobs_sse_poller_task = asyncio.create_task(
+        _poll_generate_jobs_sse()
+    )
+
+
+def _start_generate_job_sse_poller() -> None:
+    task = getattr(app.state, "generate_job_sse_poller_task", None)
+    if task and not task.done():
+        return
+    app.state.generate_job_sse_poller_task = asyncio.create_task(
+        _poll_generate_job_sse()
+    )
+
+
+async def _poll_generate_jobs_sse() -> None:
+    last_edge: tuple[int, str] | None = None
+    try:
+        while True:
+            subscribers = list(get_jobs_subscribers())
+            if not subscribers:
+                break
+
+            edge = await asyncio.to_thread(
+                storage.get_generate_jobs_list_updated_at_edge,
+                statuses=ACTIVE_GENERATE_JOB_STATUSES,
+            )
+            if edge != last_edge:
+                last_edge = edge
+                jobs = await asyncio.to_thread(
+                    storage.list_generate_jobs,
+                    statuses=ACTIVE_GENERATE_JOB_STATUSES,
+                )
+                jobs = reconcile_active_generate_jobs(jobs)
+                event = {"event": "jobs", "data": jobs}
+                for queue in subscribers:
+                    publish_queue(queue, event)
+
+            await asyncio.sleep(config.IMAGE_JOB_UNIT_POLL_INTERVAL_SECONDS)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.warning("Generate jobs SSE poller stopped after error", exc_info=True)
+    finally:
+        if getattr(app.state, "generate_jobs_sse_poller_task", None) is asyncio.current_task():
+            app.state.generate_jobs_sse_poller_task = None
+
+
+async def _poll_generate_job_sse() -> None:
+    last_edges: dict[str, str] = {}
+    try:
+        while True:
+            subscribers_by_job = {
+                job_id: list(subscribers)
+                for job_id, subscribers in get_job_subscribers().items()
+                if subscribers
+            }
+            if not subscribers_by_job:
+                break
+
+            current_edges = await asyncio.to_thread(
+                storage.get_generate_jobs_updated_at_edges,
+                job_ids=set(subscribers_by_job),
+            )
+            for job_id in set(subscribers_by_job) - set(current_edges):
+                for queue in subscribers_by_job[job_id]:
+                    publish_queue(queue, {"event": "_missing", "data": None})
+                last_edges.pop(job_id, None)
+
+            changed_job_ids = [
+                job_id
+                for job_id, updated_at in current_edges.items()
+                if last_edges.get(job_id) != updated_at
+            ]
+            for job_id in changed_job_ids:
+                job = await asyncio.to_thread(storage.get_generate_job, job_id)
+                event = (
+                    {"event": "job", "data": job}
+                    if job
+                    else {"event": "_missing", "data": None}
+                )
+                for queue in subscribers_by_job.get(job_id, []):
+                    publish_queue(queue, event)
+            last_edges = current_edges
+
+            await asyncio.sleep(config.IMAGE_JOB_UNIT_POLL_INTERVAL_SECONDS)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.warning("Generate job SSE poller stopped after error", exc_info=True)
+    finally:
+        if getattr(app.state, "generate_job_sse_poller_task", None) is asyncio.current_task():
+            app.state.generate_job_sse_poller_task = None
 
 
 @router.post("/api/generate", response_model=GenerateJobResponse, status_code=202)
@@ -95,27 +202,50 @@ async def stream_generate_jobs(request: Request):
         start = time.monotonic()
         last_payload = None
         last_sent = 0.0
+        queue: asyncio.Queue = asyncio.Queue(maxsize=SSE_QUEUE_MAXSIZE)
+        subscribers = get_jobs_subscribers()
+        subscribers.add(queue)
+        _start_generate_jobs_sse_poller()
         try:
+            jobs = await asyncio.to_thread(
+                storage.list_generate_jobs,
+                statuses=ACTIVE_GENERATE_JOB_STATUSES,
+            )
+            jobs = reconcile_active_generate_jobs(jobs)
+            last_payload = json_payload_key(jobs)
+            last_sent = time.monotonic()
+            yield serialize_sse_event("jobs", jobs)
+
             while True:
                 if await request.is_disconnected():
                     break
-                if time.monotonic() - start > config.SSE_CONNECTION_TTL_SECONDS:
-                    break
-                jobs = await asyncio.to_thread(
-                    storage.list_generate_jobs,
-                    statuses=ACTIVE_GENERATE_JOB_STATUSES,
-                )
-                payload = json_payload_key(jobs)
                 now = time.monotonic()
-                if payload != last_payload:
-                    last_payload = payload
-                    last_sent = now
-                    yield serialize_sse_event("jobs", jobs)
-                elif now - last_sent >= 15:
+                if now - start > config.SSE_CONNECTION_TTL_SECONDS:
+                    break
+                if now - last_sent >= 15:
                     last_sent = now
                     yield ": keep-alive\n\n"
-                await asyncio.sleep(config.IMAGE_JOB_UNIT_POLL_INTERVAL_SECONDS)
+                    continue
+                wait_seconds = min(
+                    SSE_IDLE_CHECK_SECONDS,
+                    max(0.1, 15 - (now - last_sent)),
+                    max(0.1, config.SSE_CONNECTION_TTL_SECONDS - (now - start)),
+                )
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=wait_seconds)
+                except asyncio.TimeoutError:
+                    continue
+                if event.get("event") != "jobs":
+                    continue
+                jobs = event.get("data") or []
+                payload = json_payload_key(jobs)
+                if payload == last_payload:
+                    continue
+                last_payload = payload
+                last_sent = time.monotonic()
+                yield serialize_sse_event("jobs", jobs)
         finally:
+            subscribers.discard(queue)
             await sse_limiter.release(client_ip)
 
     return StreamingResponse(
@@ -139,7 +269,10 @@ async def clear_generate_job_history():
 
 @router.get("/api/generate/{job_id}", response_model=GenerateJobStatus)
 async def get_generate_job(job_id: str):
-    job = app.state.generate_jobs.get(job_id) or await asyncio.to_thread(storage.get_generate_job, job_id)
+    job = getattr(app.state, "generate_jobs", {}).get(job_id) or await asyncio.to_thread(
+        storage.get_generate_job,
+        job_id,
+    )
     if not job:
         raise HTTPException(status_code=404, detail="Generation job not found")
     return GenerateJobStatus(**job)
@@ -147,7 +280,10 @@ async def get_generate_job(job_id: str):
 
 @router.get("/api/generate/{job_id}/events")
 async def stream_generate_job(job_id: str, request: Request):
-    job = app.state.generate_jobs.get(job_id) or await asyncio.to_thread(storage.get_generate_job, job_id)
+    job = getattr(app.state, "generate_jobs", {}).get(job_id) or await asyncio.to_thread(
+        storage.get_generate_job,
+        job_id,
+    )
     if not job:
         raise HTTPException(status_code=404, detail="Generation job not found")
 
@@ -159,28 +295,60 @@ async def stream_generate_job(job_id: str, request: Request):
         start = time.monotonic()
         last_payload = None
         last_sent = 0.0
+        queue: asyncio.Queue = asyncio.Queue(maxsize=SSE_QUEUE_MAXSIZE)
+        subscribers = get_job_subscribers().setdefault(job_id, set())
+        subscribers.add(queue)
+        _start_generate_job_sse_poller()
         try:
+            current = getattr(app.state, "generate_jobs", {}).get(job_id)
+            if not current:
+                current = await asyncio.to_thread(storage.get_generate_job, job_id)
+            if not current:
+                return
+            last_payload = json_payload_key(current)
+            last_sent = time.monotonic()
+            yield serialize_sse_event("job", current)
+            if current.get("status") not in ACTIVE_GENERATE_JOB_STATUSES:
+                return
+
             while True:
                 if await request.is_disconnected():
                     break
-                if time.monotonic() - start > config.SSE_CONNECTION_TTL_SECONDS:
+                now = time.monotonic()
+                if now - start > config.SSE_CONNECTION_TTL_SECONDS:
                     break
-                current = await asyncio.to_thread(storage.get_generate_job, job_id)
+                if now - last_sent >= 15:
+                    last_sent = now
+                    yield ": keep-alive\n\n"
+                    continue
+                wait_seconds = min(
+                    SSE_IDLE_CHECK_SECONDS,
+                    max(0.1, 15 - (now - last_sent)),
+                    max(0.1, config.SSE_CONNECTION_TTL_SECONDS - (now - start)),
+                )
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=wait_seconds)
+                except asyncio.TimeoutError:
+                    continue
+                if event.get("event") == "_missing":
+                    break
+                if event.get("event") != "job":
+                    continue
+                current = event.get("data")
                 if not current:
                     break
                 payload = json_payload_key(current)
-                now = time.monotonic()
-                if payload != last_payload:
-                    last_payload = payload
-                    last_sent = now
-                    yield serialize_sse_event("job", current)
-                    if current.get("status") not in ACTIVE_GENERATE_JOB_STATUSES:
-                        break
-                elif now - last_sent >= 15:
-                    last_sent = now
-                    yield ": keep-alive\n\n"
-                await asyncio.sleep(config.IMAGE_JOB_UNIT_POLL_INTERVAL_SECONDS)
+                if payload == last_payload:
+                    continue
+                last_payload = payload
+                last_sent = time.monotonic()
+                yield serialize_sse_event("job", current)
+                if current.get("status") not in ACTIVE_GENERATE_JOB_STATUSES:
+                    break
         finally:
+            subscribers.discard(queue)
+            if not subscribers:
+                get_job_subscribers().pop(job_id, None)
             await sse_limiter.release(client_ip)
 
     return StreamingResponse(
@@ -195,12 +363,16 @@ async def stream_generate_job(job_id: str, request: Request):
 
 @router.delete("/api/generate/{job_id}", response_model=MessageResponse)
 async def cancel_generate_job(job_id: str):
-    job = app.state.generate_jobs.get(job_id) or await asyncio.to_thread(storage.get_generate_job, job_id)
+    job = getattr(app.state, "generate_jobs", {}).get(job_id) or await asyncio.to_thread(
+        storage.get_generate_job,
+        job_id,
+    )
     if not job:
         raise HTTPException(status_code=404, detail="Generation job not found")
     if job.get("status") not in {"queued", "running"}:
         raise HTTPException(status_code=409, detail="Generation job already finished")
 
+    aggregate = await asyncio.to_thread(storage.aggregate_image_job_units, job_id)
     cancel_message = (
         "Image edit job cancelled"
         if job.get("operation") == "edit"
@@ -219,6 +391,12 @@ async def cancel_generate_job(job_id: str):
     )
     await asyncio.to_thread(storage.cancel_image_job_units, job_id)
     await asyncio.to_thread(trim_generate_jobs)
+
+    if job.get("operation") == "edit":
+        if int(aggregate.get("running_count") or 0) > 0:
+            await asyncio.to_thread(storage.release_edit_source_reservation, job_id)
+        else:
+            await asyncio.to_thread(cleanup_parent_edit_sources, job_id)
 
     get_generate_job_webhooks().pop(job_id, None)
 

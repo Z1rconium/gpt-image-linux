@@ -22,7 +22,7 @@ from ..gallery_archive import (
     stream_upload_to_tempfile,
     write_gallery_zip_file,
 )
-from ..jobs import serialize_sse_event
+from ..jobs import publish_queue, serialize_sse_event
 from ..sse_limiter import sse_limiter
 from ...core import security as auth
 from ...core import settings as config
@@ -66,6 +66,8 @@ GALLERY_JOB_DISPATCH_INTERVAL_SECONDS = 0.5
 GALLERY_PROGRESS_MIN_INTERVAL_SECONDS = 0.5
 GALLERY_PROGRESS_MIN_ITEMS = 50
 DIRECT_EXPORT_SLOT_LEASE_SECONDS = 6 * 3600
+GALLERY_JOB_SSE_IDLE_CHECK_SECONDS = 1.0
+GALLERY_JOB_SSE_QUEUE_MAXSIZE = 20
 
 
 class GalleryProgressThrottler:
@@ -366,6 +368,112 @@ def _gallery_sync_payload(job: dict) -> dict:
     return {key: job.get(key) for key in keys}
 
 
+def _gallery_job_event_name(kind: str) -> str:
+    return "sync" if kind == "sync" else "export"
+
+
+def _gallery_job_payload(kind: str, job: dict) -> dict:
+    if kind == "sync":
+        return _gallery_sync_payload(job)
+    return _gallery_export_payload(job)
+
+
+def _get_gallery_job_subscribers(kind: str) -> dict[str, set[asyncio.Queue]]:
+    all_subscribers = getattr(app.state, "gallery_job_subscribers", None)
+    if not isinstance(all_subscribers, dict):
+        all_subscribers = {}
+        app.state.gallery_job_subscribers = all_subscribers
+    subscribers = all_subscribers.get(kind)
+    if not isinstance(subscribers, dict):
+        subscribers = {}
+        all_subscribers[kind] = subscribers
+    return subscribers
+
+
+def _get_gallery_job_sse_poller_tasks() -> dict[str, asyncio.Task]:
+    tasks = getattr(app.state, "gallery_job_sse_poller_tasks", None)
+    if not isinstance(tasks, dict):
+        tasks = {}
+        app.state.gallery_job_sse_poller_tasks = tasks
+    return tasks
+
+
+def _publish_gallery_job_sse(job: dict) -> None:
+    kind = str(job.get("kind") or "")
+    job_id = str(job.get("job_id") or "")
+    if not kind or not job_id:
+        return
+    subscribers = _get_gallery_job_subscribers(kind).get(job_id, set())
+    if not subscribers:
+        return
+    event = {
+        "event": _gallery_job_event_name(kind),
+        "data": _gallery_job_payload(kind, job),
+    }
+    for queue in list(subscribers):
+        publish_queue(queue, event)
+
+
+def _start_gallery_job_sse_poller(kind: str) -> None:
+    tasks = _get_gallery_job_sse_poller_tasks()
+    task = tasks.get(kind)
+    if task and not task.done():
+        return
+    tasks[kind] = asyncio.create_task(_poll_gallery_job_sse(kind))
+
+
+async def _poll_gallery_job_sse(kind: str) -> None:
+    last_edges: dict[str, str] = {}
+    try:
+        while True:
+            subscribers_by_job = {
+                job_id: list(subscribers)
+                for job_id, subscribers in _get_gallery_job_subscribers(kind).items()
+                if subscribers
+            }
+            if not subscribers_by_job:
+                break
+
+            current_edges = await asyncio.to_thread(
+                storage.get_gallery_jobs_updated_at_edges,
+                kind,
+                set(subscribers_by_job),
+            )
+            for job_id in set(subscribers_by_job) - set(current_edges):
+                for queue in subscribers_by_job[job_id]:
+                    publish_queue(queue, {"event": "_missing", "data": None})
+                last_edges.pop(job_id, None)
+
+            changed_job_ids = [
+                job_id
+                for job_id, updated_at in current_edges.items()
+                if last_edges.get(job_id) != updated_at
+            ]
+            for job_id in changed_job_ids:
+                job = await asyncio.to_thread(storage.get_gallery_job, kind, job_id)
+                event = (
+                    {
+                        "event": _gallery_job_event_name(kind),
+                        "data": _gallery_job_payload(kind, job),
+                    }
+                    if job
+                    else {"event": "_missing", "data": None}
+                )
+                for queue in subscribers_by_job.get(job_id, []):
+                    publish_queue(queue, event)
+            last_edges = current_edges
+
+            await asyncio.sleep(GALLERY_JOB_DISPATCH_INTERVAL_SECONDS)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.warning("Gallery %s SSE poller stopped after error", kind, exc_info=True)
+    finally:
+        tasks = _get_gallery_job_sse_poller_tasks()
+        if tasks.get(kind) is asyncio.current_task():
+            tasks.pop(kind, None)
+
+
 def _gallery_job_lease_expires_at() -> str:
     return (datetime.now(timezone.utc) + timedelta(seconds=GALLERY_JOB_LEASE_SECONDS)).isoformat()
 
@@ -392,7 +500,10 @@ def _progress_item_count(updates: dict) -> int:
 
 
 def _publish_gallery_job(job_id: str, updates: dict) -> dict | None:
-    return storage.update_gallery_job(job_id, updates)
+    job = storage.update_gallery_job(job_id, updates)
+    if job:
+        _publish_gallery_job_sse(job)
+    return job
 
 
 def _publish_gallery_job_progress(job_id: str, updates: dict) -> bool:
@@ -1018,26 +1129,60 @@ async def _stream_gallery_job(
     async def event_stream():
         start = time.monotonic()
         last_updated_at: str | None = None
+        last_sent = 0.0
+        queue: asyncio.Queue = asyncio.Queue(maxsize=GALLERY_JOB_SSE_QUEUE_MAXSIZE)
+        subscribers = _get_gallery_job_subscribers(kind).setdefault(job_id, set())
+        subscribers.add(queue)
+        _start_gallery_job_sse_poller(kind)
         try:
+            current_job = await asyncio.to_thread(storage.get_gallery_job, kind, job_id)
+            if not current_job:
+                return
+            payload = payload_builder(current_job)
+            last_updated_at = str(payload.get("updated_at") or "")
+            last_sent = time.monotonic()
+            yield serialize_sse_event(event_name, payload)
+            if payload.get("status") in terminal_statuses:
+                return
+
             while True:
                 if await request.is_disconnected():
                     break
-                if time.monotonic() - start > config.SSE_CONNECTION_TTL_SECONDS:
+                now = time.monotonic()
+                if now - start > config.SSE_CONNECTION_TTL_SECONDS:
                     break
-                current = await asyncio.to_thread(storage.get_gallery_job, kind, job_id)
-                if not current:
+                if now - last_sent >= 15:
+                    last_sent = now
+                    yield ": keep-alive\n\n"
+                    continue
+                wait_seconds = min(
+                    GALLERY_JOB_SSE_IDLE_CHECK_SECONDS,
+                    max(0.1, 15 - (now - last_sent)),
+                    max(0.1, config.SSE_CONNECTION_TTL_SECONDS - (now - start)),
+                )
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=wait_seconds)
+                except asyncio.TimeoutError:
+                    continue
+                if event.get("event") == "_missing":
                     break
-                updated_at = str(current.get("updated_at") or "")
-                if updated_at != last_updated_at:
-                    last_updated_at = updated_at
-                    payload = payload_builder(current)
-                    yield serialize_sse_event(event_name, payload)
-                    if payload.get("status") in terminal_statuses:
-                        break
-                await asyncio.sleep(0.5)
-            else:
-                yield ": keep-alive\n\n"
+                if event.get("event") != event_name:
+                    continue
+                payload = event.get("data")
+                if not isinstance(payload, dict):
+                    break
+                updated_at = str(payload.get("updated_at") or "")
+                if updated_at == last_updated_at:
+                    continue
+                last_updated_at = updated_at
+                last_sent = time.monotonic()
+                yield serialize_sse_event(event_name, payload)
+                if payload.get("status") in terminal_statuses:
+                    break
         finally:
+            subscribers.discard(queue)
+            if not subscribers:
+                _get_gallery_job_subscribers(kind).pop(job_id, None)
             await sse_limiter.release(client_ip)
 
     return StreamingResponse(

@@ -3204,6 +3204,126 @@ def test_edit_queue_capacity_counts_multiple_source_bytes(tmp_path):
         assert not list((tmp_path / "data" / "edit-sources").glob("edit-source-*"))
 
 
+def test_storage_enqueue_image_job_rejects_queue_full_atomically(tmp_path):
+    _configure_runtime(tmp_path)
+
+    storage.enqueue_image_job(
+        parent_job={"job_id": "capacity-parent", "status": "queued"},
+        operation="generation",
+        request={"prompt": "fills queue", "n": 2},
+        image_units=2,
+        api_preset_id="default",
+        api_preset_name="Default",
+        api_path="/v1/images/generations",
+        max_active_generate_jobs=1,
+        max_queued_generate_jobs=1,
+        max_pending_edit_source_bytes=1024 * 1024,
+    )
+
+    with pytest.raises(storage.ImageJobQueueFullError):
+        storage.enqueue_image_job(
+            parent_job={"job_id": "overflow-parent", "status": "queued"},
+            operation="generation",
+            request={"prompt": "overflow", "n": 1},
+            image_units=1,
+            api_preset_id="default",
+            api_preset_name="Default",
+            api_path="/v1/images/generations",
+            max_active_generate_jobs=1,
+            max_queued_generate_jobs=1,
+            max_pending_edit_source_bytes=1024 * 1024,
+        )
+
+    assert storage.get_generate_job("overflow-parent") is None
+    assert storage.count_pending_image_job_units() == (0, 2)
+
+
+def test_storage_claim_prefers_expired_running_unit_over_queued_unit(tmp_path):
+    _configure_runtime(tmp_path)
+
+    _parent, units = storage.enqueue_image_job(
+        parent_job={"job_id": "claim-parent", "status": "queued"},
+        operation="generation",
+        request={"prompt": "claim order", "n": 2},
+        image_units=2,
+        api_preset_id="default",
+        api_preset_name="Default",
+        api_path="/v1/images/generations",
+        max_active_generate_jobs=2,
+        max_queued_generate_jobs=2,
+        max_pending_edit_source_bytes=1024 * 1024,
+    )
+
+    first = storage.claim_next_image_job_unit(
+        worker_id="worker-a",
+        lease_expires_at="2099-01-01T00:00:00+00:00",
+        now="2026-01-01T00:00:00+00:00",
+        running_limit=2,
+    )
+    assert first is not None
+    assert first["unit_id"] == units[0]["unit_id"]
+
+    storage.update_image_job_unit_progress(
+        str(first["unit_id"]),
+        stage="waiting_for_api",
+        message="expired lease",
+        claim_expires_at="2026-01-01T00:00:01+00:00",
+    )
+
+    reclaimed = storage.claim_next_image_job_unit(
+        worker_id="worker-b",
+        lease_expires_at="2099-01-01T00:00:00+00:00",
+        now="2026-01-01T00:00:02+00:00",
+        running_limit=2,
+    )
+
+    assert reclaimed is not None
+    assert reclaimed["unit_id"] == first["unit_id"]
+    assert reclaimed["claimed_by"] == "worker-b"
+
+
+def test_storage_edit_source_reservation_is_global_and_released_on_terminal(tmp_path):
+    _configure_runtime(tmp_path)
+    source_bytes = 600 * 1024
+    max_pending_bytes = 1024 * 1024
+
+    storage.enqueue_image_job(
+        parent_job={"job_id": "edit-parent", "status": "queued"},
+        operation="edit",
+        request={"prompt": "edit", "n": 1},
+        image_units=1,
+        api_preset_id="default",
+        api_preset_name="Default",
+        api_path="/v1/images/edits",
+        pending_edit_source_bytes=source_bytes,
+        max_active_generate_jobs=1,
+        max_queued_generate_jobs=20,
+        max_pending_edit_source_bytes=max_pending_bytes,
+    )
+
+    with pytest.raises(storage.EditSourceQueueFullError):
+        storage.enqueue_image_job(
+            parent_job={"job_id": "edit-overflow", "status": "queued"},
+            operation="edit",
+            request={"prompt": "overflow", "n": 1},
+            image_units=1,
+            api_preset_id="default",
+            api_preset_name="Default",
+            api_path="/v1/images/edits",
+            pending_edit_source_bytes=source_bytes,
+            max_active_generate_jobs=1,
+            max_queued_generate_jobs=20,
+            max_pending_edit_source_bytes=max_pending_bytes,
+        )
+
+    assert storage.get_pending_edit_source_bytes() == source_bytes
+    assert storage.get_generate_job("edit-overflow") is None
+
+    storage.upsert_generate_job({"job_id": "edit-parent", "status": "cancelled"})
+
+    assert storage.get_pending_edit_source_bytes() == 0
+
+
 def test_gallery_image_download_and_zip(client):
     entry = _fake_gallery_entry("gallery-zip", "zip me", "1024x1024", "gallery-zip.png")
     assert entry.bytes == len(PNG_BYTES)
@@ -4688,7 +4808,12 @@ def test_chat_completions_sse_markdown_image_url_is_saved(tmp_path, monkeypatch)
 def test_running_progress_persists_only_terminal_states(tmp_path, monkeypatch):
     _configure_runtime(tmp_path)
     upserted: list[dict] = []
+    real_enqueue = storage.enqueue_image_job
     real_upsert = storage.upsert_generate_job
+
+    def tracking_enqueue(**kwargs):
+        upserted.append(kwargs["parent_job"].copy())
+        return real_enqueue(**kwargs)
 
     def tracking_upsert(job):
         upserted.append(job.copy())
@@ -4718,6 +4843,7 @@ def test_running_progress_persists_only_terminal_states(tmp_path, monkeypatch):
         )
         return [entry]
 
+    monkeypatch.setattr(storage, "enqueue_image_job", tracking_enqueue)
     monkeypatch.setattr(storage, "upsert_generate_job", tracking_upsert)
     monkeypatch.setattr(backend_main.proxy, "call_image_generation_api", noisy_generation_api)
 

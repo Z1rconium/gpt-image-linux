@@ -37,6 +37,8 @@ from ..services import webhook_service as webhooks
 
 
 logger = logging.getLogger(__name__)
+IMAGE_DISPATCHER_HEARTBEAT_INTERVAL_SECONDS = 5.0
+IMAGE_DISPATCHER_MAX_IDLE_BACKOFF_SECONDS = 2.0
 
 
 @dataclass(frozen=True)
@@ -55,11 +57,19 @@ class ImageJobOutcome:
 
 
 def get_job_subscribers() -> dict[str, set[asyncio.Queue]]:
-    return app.state.generate_job_subscribers
+    subscribers = getattr(app.state, "generate_job_subscribers", None)
+    if not isinstance(subscribers, dict):
+        subscribers = {}
+        app.state.generate_job_subscribers = subscribers
+    return subscribers
 
 
 def get_jobs_subscribers() -> set[asyncio.Queue]:
-    return app.state.generate_jobs_subscribers
+    subscribers = getattr(app.state, "generate_jobs_subscribers", None)
+    if not isinstance(subscribers, set):
+        subscribers = set()
+        app.state.generate_jobs_subscribers = subscribers
+    return subscribers
 
 
 def serialize_sse_event(event: str, data: dict | list) -> str:
@@ -102,24 +112,34 @@ def sort_generate_jobs(jobs: list[dict]) -> list[dict]:
 
 
 def snapshot_active_generate_jobs_from_memory() -> list[dict]:
+    generate_jobs = getattr(app.state, "generate_jobs", {})
     jobs = [
         job.copy()
-        for job in app.state.generate_jobs.values()
+        for job in generate_jobs.values()
         if job.get("status") in ACTIVE_GENERATE_JOB_STATUSES
     ]
     return sort_generate_jobs(jobs)
 
 
-def reconcile_active_generate_jobs_from_storage() -> list[dict]:
-    jobs_by_id = {
-        job["job_id"]: job
-        for job in storage.list_generate_jobs(statuses=ACTIVE_GENERATE_JOB_STATUSES)
-    }
-    for job_id, job in app.state.generate_jobs.items():
-        if job.get("status") in ACTIVE_GENERATE_JOB_STATUSES:
+def reconcile_active_generate_jobs(storage_jobs: list[dict]) -> list[dict]:
+    jobs_by_id = {job["job_id"]: job for job in storage_jobs}
+    local_jobs = getattr(app.state, "generate_jobs", {})
+    for job_id, job in local_jobs.items():
+        if job.get("status") not in ACTIVE_GENERATE_JOB_STATUSES:
+            continue
+        if job_id not in jobs_by_id:
+            continue
+        storage_job = jobs_by_id[job_id]
+        if str(job.get("updated_at") or "") >= str(storage_job.get("updated_at") or ""):
             jobs_by_id[job_id] = job
     app.state.generate_jobs = jobs_by_id
     return snapshot_active_generate_jobs_from_memory()
+
+
+def reconcile_active_generate_jobs_from_storage() -> list[dict]:
+    return reconcile_active_generate_jobs(
+        storage.list_generate_jobs(statuses=ACTIVE_GENERATE_JOB_STATUSES)
+    )
 
 
 def list_active_generate_jobs(*, reconcile: bool = False) -> list[dict]:
@@ -285,26 +305,31 @@ def get_upstream_request_semaphore() -> asyncio.Semaphore:
 
 
 def get_pending_edit_source_bytes() -> int:
-    return max(0, int(getattr(app.state, "pending_edit_source_bytes", 0) or 0))
+    return storage.get_pending_edit_source_bytes()
 
 
 def get_max_pending_edit_source_bytes() -> int:
     return max(0, config.MAX_PENDING_EDIT_SOURCE_MB) * 1024 * 1024
 
 
-def reserve_pending_edit_source_bytes(byte_count: int):
-    if byte_count <= 0:
+def release_pending_edit_source_bytes(job_id: str):
+    if not job_id:
         return
-    app.state.pending_edit_source_bytes = get_pending_edit_source_bytes() + byte_count
+    storage.release_edit_source_reservation(job_id)
 
 
-def release_pending_edit_source_bytes(byte_count: int):
-    if byte_count <= 0:
-        return
-    app.state.pending_edit_source_bytes = max(
-        0,
-        get_pending_edit_source_bytes() - byte_count,
-    )
+def get_image_unit_dispatcher_kick_event() -> asyncio.Event:
+    event = getattr(app.state, "image_unit_dispatcher_kick", None)
+    if event is None:
+        event = asyncio.Event()
+        app.state.image_unit_dispatcher_kick = event
+    return event
+
+
+def kick_image_unit_dispatcher():
+    event = getattr(app.state, "image_unit_dispatcher_kick", None)
+    if event is not None:
+        event.set()
 
 
 def count_active_jobs() -> int:
@@ -369,27 +394,6 @@ def snapshot_queue_metrics() -> dict[str, int]:
             counts[f"image_jobs.{operation}.{status}.current"] += 1
 
     return counts
-
-
-def ensure_job_queue_capacity(
-    extra_pending_edit_source_bytes: int = 0,
-    image_units: int = 1,
-):
-    capacity = config.MAX_ACTIVE_GENERATE_JOBS + config.MAX_QUEUED_GENERATE_JOBS
-    requested_units = max(1, int(image_units or 1))
-    running_units, queued_units = storage.count_pending_image_job_units()
-    if running_units + queued_units + requested_units > capacity:
-        metrics.increment("image_jobs.rejected.queue_full")
-        raise HTTPException(status_code=429, detail="Generation job queue is full")
-    max_pending_edit_source_bytes = get_max_pending_edit_source_bytes()
-    if (
-        extra_pending_edit_source_bytes > 0
-        and max_pending_edit_source_bytes > 0
-        and get_pending_edit_source_bytes() + extra_pending_edit_source_bytes
-        > max_pending_edit_source_bytes
-    ):
-        metrics.increment("image_jobs.rejected.edit_source_full")
-        raise HTTPException(status_code=429, detail="Edit source queue is full")
 
 
 def track_generate_job_task(job_id: str, task: asyncio.Task):
@@ -506,19 +510,14 @@ def get_preset_for_unit(unit: dict) -> dict | None:
 def cleanup_parent_edit_sources(parent_job_id: str):
     aggregate = storage.aggregate_image_job_units(parent_job_id)
     paths: set[str] = set()
-    total_bytes = 0
     for unit in aggregate.get("units", []):
         for source in unit.get("edit_sources") or []:
             path = str(source.get("temp_path") or "")
             if path:
                 paths.add(path)
-            try:
-                total_bytes += int(source.get("byte_size") or 0)
-            except (TypeError, ValueError):
-                pass
     for path in paths:
         Path(path).unlink(missing_ok=True)
-    release_pending_edit_source_bytes(total_bytes)
+    release_pending_edit_source_bytes(parent_job_id)
 
 
 def summarize_unit_failures(failures: list[dict], total: int, operation: str) -> str:
@@ -736,38 +735,29 @@ def queue_image_job(
             detail="API URL not configured. Please set it in Settings.",
         )
     try:
-        api_url = ssrf.normalize_upstream_base_url(api_url)
+        ssrf.normalize_upstream_base_url(api_url)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
-    api_key = get_effective_preset_api_key(active_preset)
-    socks5_proxy = get_upstream_socks5_proxy()
+    get_effective_preset_api_key(active_preset)
+    get_upstream_socks5_proxy()
 
     webhook_url = validate_job_webhook_url(req.webhook_url or get_webhook_url())
     image_units = request_image_units(req)
-    ensure_job_queue_capacity(
-        pending_edit_source_bytes,
+    job_id = str(uuid.uuid4())
+    pending_job = build_pending_job(
+        job_id=job_id,
+        req=req,
+        operation=operation,
+        message=queued_message,
+        api_path=resolved_api_path,
+        api_preset_name=api_preset_name,
         image_units=image_units,
     )
-    job_id = str(uuid.uuid4())
-    reserved_edit_source_bytes = 0
+    if webhook_url:
+        get_generate_job_webhooks()[job_id] = webhook_url
     try:
-        if pending_edit_source_bytes > 0:
-            reserve_pending_edit_source_bytes(pending_edit_source_bytes)
-            reserved_edit_source_bytes = pending_edit_source_bytes
-        if webhook_url:
-            get_generate_job_webhooks()[job_id] = webhook_url
-        pending_job = build_pending_job(
-            job_id=job_id,
-            req=req,
-            operation=operation,
-            message=queued_message,
-            api_path=resolved_api_path,
-            api_preset_name=api_preset_name,
-            image_units=image_units,
-        )
-        store_generate_job(job_id, pending_job)
-        storage.create_image_job_units(
-            parent_job_id=job_id,
+        stored_job, _units = storage.enqueue_image_job(
+            parent_job=pending_job,
             operation=operation,
             request=build_request_payload(req),
             image_units=image_units,
@@ -775,15 +765,28 @@ def queue_image_job(
             api_preset_name=api_preset_name,
             api_path=resolved_api_path,
             edit_sources=edit_sources_payload,
+            pending_edit_source_bytes=pending_edit_source_bytes,
+            max_active_generate_jobs=config.MAX_ACTIVE_GENERATE_JOBS,
+            max_queued_generate_jobs=config.MAX_QUEUED_GENERATE_JOBS,
+            max_pending_edit_source_bytes=get_max_pending_edit_source_bytes(),
         )
-        metrics.increment(f"image_jobs.{operation}.queued")
-        publish_generate_jobs(debounce=False, reconcile=True)
-    except BaseException:
-        release_pending_edit_source_bytes(reserved_edit_source_bytes)
+    except storage.ImageJobQueueFullError as e:
         get_generate_job_webhooks().pop(job_id, None)
-        app.state.generate_jobs.pop(job_id, None)
-        app.state.generate_job_last_persist_at.pop(job_id, None)
+        metrics.increment("image_jobs.rejected.queue_full")
+        raise HTTPException(status_code=429, detail="Generation job queue is full") from e
+    except storage.EditSourceQueueFullError as e:
+        get_generate_job_webhooks().pop(job_id, None)
+        metrics.increment("image_jobs.rejected.edit_source_full")
+        raise HTTPException(status_code=429, detail="Edit source queue is full") from e
+    except Exception:
+        get_generate_job_webhooks().pop(job_id, None)
         raise
+
+    app.state.generate_jobs[job_id] = stored_job
+    app.state.generate_job_last_persist_at.pop(job_id, None)
+    metrics.increment(f"image_jobs.{operation}.queued")
+    publish_generate_job(stored_job, list_debounce=False, list_reconcile=True)
+    kick_image_unit_dispatcher()
 
     return GenerateJobResponse(
         job_id=job_id,
@@ -1208,7 +1211,7 @@ async def run_edit_job(
     finally:
         for source in image_sources:
             source.temp_path.unlink(missing_ok=True)
-        release_pending_edit_source_bytes(image_source_bytes)
+        release_pending_edit_source_bytes(job_id)
 
 
 def image_unit_lease_expires_at() -> str:
@@ -1390,13 +1393,52 @@ async def run_claimed_image_unit(unit: dict, worker_id: str):
         aggregate_parent_image_job(parent_job_id, force_publish=True)
 
 
+async def wait_for_image_dispatcher_wakeup(
+    delay_seconds: float,
+    active_tasks: set[asyncio.Task],
+) -> bool:
+    kick_event = get_image_unit_dispatcher_kick_event()
+    kick_task = asyncio.create_task(kick_event.wait())
+    wait_tasks = {*active_tasks, kick_task}
+    done, _pending = await asyncio.wait(
+        wait_tasks,
+        timeout=max(0.0, delay_seconds),
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+    kicked = kick_task in done and kick_event.is_set()
+    if kicked:
+        kick_event.clear()
+    if not kick_task.done():
+        kick_task.cancel()
+        await asyncio.gather(kick_task, return_exceptions=True)
+    return kicked
+
+
 async def run_image_unit_dispatcher(worker_id: str):
     logger.info("Image unit dispatcher started: worker_id=%s", worker_id)
     active_tasks: set[asyncio.Task] = set()
+    last_heartbeat_at = 0.0
+    last_heartbeat_active_units: int | None = None
+    idle_delay = config.IMAGE_JOB_UNIT_POLL_INTERVAL_SECONDS
+
+    def heartbeat_if_needed(*, force: bool = False):
+        nonlocal last_heartbeat_active_units, last_heartbeat_at
+        active_units = len(active_tasks)
+        now = time.monotonic()
+        if (
+            force
+            or active_units != last_heartbeat_active_units
+            or now - last_heartbeat_at >= IMAGE_DISPATCHER_HEARTBEAT_INTERVAL_SECONDS
+        ):
+            storage.mark_worker_heartbeat(worker_id, active_units)
+            last_heartbeat_active_units = active_units
+            last_heartbeat_at = now
+
     try:
         while True:
             active_tasks = {task for task in active_tasks if not task.done()}
-            storage.mark_worker_heartbeat(worker_id, len(active_tasks))
+            heartbeat_if_needed()
+            claimed_count = 0
             while len(active_tasks) < config.MAX_ACTIVE_GENERATE_JOBS:
                 unit = storage.claim_next_image_job_unit(
                     worker_id=worker_id,
@@ -1408,7 +1450,27 @@ async def run_image_unit_dispatcher(worker_id: str):
                     break
                 task = asyncio.create_task(run_claimed_image_unit(unit, worker_id))
                 active_tasks.add(task)
-            await asyncio.sleep(config.IMAGE_JOB_UNIT_POLL_INTERVAL_SECONDS)
+                claimed_count += 1
+            if claimed_count > 0:
+                heartbeat_if_needed(force=True)
+                idle_delay = config.IMAGE_JOB_UNIT_POLL_INTERVAL_SECONDS
+            elif len(active_tasks) < config.MAX_ACTIVE_GENERATE_JOBS:
+                idle_delay = min(
+                    IMAGE_DISPATCHER_MAX_IDLE_BACKOFF_SECONDS,
+                    max(config.IMAGE_JOB_UNIT_POLL_INTERVAL_SECONDS, idle_delay * 2),
+                )
+
+            if active_tasks:
+                next_heartbeat_in = max(
+                    0.0,
+                    IMAGE_DISPATCHER_HEARTBEAT_INTERVAL_SECONDS
+                    - (time.monotonic() - last_heartbeat_at),
+                )
+                sleep_for = min(idle_delay, next_heartbeat_in or idle_delay)
+            else:
+                sleep_for = idle_delay
+            if await wait_for_image_dispatcher_wakeup(sleep_for, active_tasks):
+                idle_delay = config.IMAGE_JOB_UNIT_POLL_INTERVAL_SECONDS
     except asyncio.CancelledError:
         for task in active_tasks:
             task.cancel()

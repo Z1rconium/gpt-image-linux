@@ -107,7 +107,7 @@ OVERALL_CONFIG_REGISTRY: tuple[OverallConfigSpec, ...] = (
     _spec("IMPORT_MAX_COMPRESSION_RATIO", "float", "100", "Limits", "Max import compression ratio.", min_value=1),
     _spec("MAX_ACTIVE_GENERATE_JOBS", "int", "2", "Job Queue / SSE", "Concurrent generation/edit jobs.", restart_required=True, min_value=1),
     _spec("MAX_QUEUED_GENERATE_JOBS", "int", "20", "Job Queue / SSE", "Additional queued jobs before 429.", restart_required=True, min_value=0),
-    _spec("MAX_PENDING_EDIT_SOURCE_MB", "int", "200", "Job Queue / SSE", "Pending edit source memory cap.", min_value=0),
+    _spec("MAX_PENDING_EDIT_SOURCE_MB", "int", "200", "Job Queue / SSE", "SQLite global pending edit source byte cap.", min_value=0),
     _spec("MAX_SSE_SUBSCRIBERS_GLOBAL", "int", "200", "Job Queue / SSE", "Global active SSE subscriber cap.", min_value=1),
     _spec("MAX_SSE_SUBSCRIBERS_PER_IP", "int", "10", "Job Queue / SSE", "Per-IP active SSE subscriber cap.", min_value=1),
     _spec("SSE_CONNECTION_TTL_SECONDS", "int", "3600", "Job Queue / SSE", "Maximum SSE connection lifetime.", min_value=60),

@@ -60,6 +60,15 @@ from .thumbnails import (
 
 logger = logging.getLogger(__name__)
 
+
+class ImageJobQueueFullError(RuntimeError):
+    """Raised when the SQLite-backed image unit queue has no remaining capacity."""
+
+
+class EditSourceQueueFullError(RuntimeError):
+    """Raised when pending edit source byte reservations exceed the configured cap."""
+
+
 __all__ = [
     "IMAGE_CONTENT_TYPE_FORMATS",
     "IMAGE_EXTENSION_FORMATS",
@@ -93,6 +102,7 @@ __all__ = [
     "get_gallery_total_bytes",
     "create_gallery_job",
     "get_gallery_job",
+    "get_gallery_jobs_updated_at_edges",
     "update_gallery_job",
     "update_gallery_job_progress",
     "count_active_gallery_jobs",
@@ -103,6 +113,9 @@ __all__ = [
     "delete_gallery_job",
     "list_gallery_job_ids_with_files",
     "get_generate_job",
+    "get_generate_job_updated_at_edge",
+    "get_generate_jobs_list_updated_at_edge",
+    "get_generate_jobs_updated_at_edges",
     "aggregate_image_job_units",
     "cancel_image_job_units",
     "claim_next_image_job_unit",
@@ -110,10 +123,14 @@ __all__ = [
     "create_image_job_units",
     "count_active_image_job_units",
     "count_pending_image_job_units",
+    "enqueue_image_job",
+    "EditSourceQueueFullError",
     "fail_image_job_unit",
+    "get_pending_edit_source_bytes",
     "get_image_job_unit",
     "get_image_dimensions",
     "import_gallery_entries",
+    "ImageJobQueueFullError",
     "iter_gallery_export_rows",
     "list_generate_jobs",
     "load_prompt_optimizer_settings",
@@ -123,6 +140,7 @@ __all__ = [
     "list_prompt_snippets",
     "mark_active_generate_jobs_interrupted",
     "mark_worker_heartbeat",
+    "release_edit_source_reservation",
     "create_prompt_snippet",
     "delete_prompt_snippet",
     "safe_image_path",
@@ -944,8 +962,16 @@ def _ensure_database():
                     UNIQUE(parent_job_id, unit_index)
                 );
 
-                CREATE INDEX IF NOT EXISTS idx_image_job_units_claim
-                    ON image_job_units(status, claim_expires_at, created_at, unit_index);
+                DROP INDEX IF EXISTS idx_image_job_units_claim;
+                CREATE INDEX IF NOT EXISTS idx_image_job_units_claim_queued
+                    ON image_job_units(created_at, unit_index)
+                    WHERE status = 'queued';
+                CREATE INDEX IF NOT EXISTS idx_image_job_units_claim_running_expired
+                    ON image_job_units(claim_expires_at, created_at, unit_index)
+                    WHERE status = 'running' AND claim_expires_at IS NOT NULL;
+                CREATE INDEX IF NOT EXISTS idx_image_job_units_running_count
+                    ON image_job_units(status)
+                    WHERE status = 'running';
                 CREATE INDEX IF NOT EXISTS idx_image_job_units_parent
                     ON image_job_units(parent_job_id, unit_index);
                 CREATE INDEX IF NOT EXISTS idx_image_job_units_worker
@@ -997,6 +1023,13 @@ def _ensure_database():
                     worker_id TEXT PRIMARY KEY,
                     last_seen_at TEXT NOT NULL,
                     active_units INTEGER NOT NULL DEFAULT 0
+                );
+
+                CREATE TABLE IF NOT EXISTS edit_source_reservations (
+                    job_id TEXT PRIMARY KEY,
+                    byte_count INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
                 );
 
                 CREATE TABLE IF NOT EXISTS prompt_snippets (
@@ -1674,6 +1707,29 @@ def _normalize_generate_job(job: dict[str, Any]) -> dict[str, Any]:
 
 def _generate_job_values(job: dict[str, Any]) -> tuple[Any, ...]:
     return tuple(job.get(column) for column in GENERATE_JOB_COLUMNS)
+
+
+def _upsert_generate_job_on_conn(conn: sqlite3.Connection, job: dict[str, Any]) -> None:
+    columns_sql = ", ".join(GENERATE_JOB_COLUMNS)
+    placeholders_sql = ", ".join("?" for _ in GENERATE_JOB_COLUMNS)
+    updates_sql = ", ".join(
+        f"{column} = excluded.{column}"
+        for column in GENERATE_JOB_COLUMNS
+        if column != "job_id"
+    )
+    conn.execute(
+        f"""
+        INSERT INTO generate_jobs ({columns_sql})
+        VALUES ({placeholders_sql})
+        ON CONFLICT(job_id) DO UPDATE SET {updates_sql}
+        """,
+        _generate_job_values(job),
+    )
+    if job.get("status") not in ACTIVE_GENERATE_JOB_STATUSES:
+        conn.execute(
+            "DELETE FROM edit_source_reservations WHERE job_id = ?",
+            (job["job_id"],),
+        )
 
 
 def _generate_job_from_row(row: sqlite3.Row) -> dict[str, Any]:
@@ -2968,24 +3024,10 @@ def update_gallery_entries_favorite(image_ids: list[str], favorite: bool) -> int
 def upsert_generate_job(job: dict[str, Any]) -> dict[str, Any]:
     _ensure_database()
     normalized = _normalize_generate_job(job)
-    columns_sql = ", ".join(GENERATE_JOB_COLUMNS)
-    placeholders_sql = ", ".join("?" for _ in GENERATE_JOB_COLUMNS)
-    updates_sql = ", ".join(
-        f"{column} = excluded.{column}"
-        for column in GENERATE_JOB_COLUMNS
-        if column != "job_id"
-    )
 
     with _connect() as conn:
         with _transaction(conn):
-            conn.execute(
-                f"""
-                INSERT INTO generate_jobs ({columns_sql})
-                VALUES ({placeholders_sql})
-                ON CONFLICT(job_id) DO UPDATE SET {updates_sql}
-                """,
-                _generate_job_values(normalized),
-            )
+            _upsert_generate_job_on_conn(conn, normalized)
     return normalized
 
 
@@ -3003,6 +3045,60 @@ def get_generate_job(job_id: str) -> dict[str, Any] | None:
     if not row:
         return None
     return _generate_job_from_row(row)
+
+
+def get_generate_job_updated_at_edge(job_id: str) -> str | None:
+    _ensure_database()
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT updated_at FROM generate_jobs WHERE job_id = ?",
+            (job_id,),
+        ).fetchone()
+    return str(row["updated_at"]) if row else None
+
+
+def get_generate_jobs_list_updated_at_edge(
+    *,
+    statuses: set[str] | None = None,
+) -> tuple[int, str]:
+    _ensure_database()
+    params: list[Any] = []
+    sql = "SELECT COUNT(*) AS row_count, MAX(updated_at) AS updated_at FROM generate_jobs"
+    if statuses:
+        placeholders = ", ".join("?" for _ in statuses)
+        sql += f" WHERE status IN ({placeholders})"
+        params.extend(sorted(statuses))
+    with _connect() as conn:
+        row = conn.execute(sql, params).fetchone()
+    if not row:
+        return 0, ""
+    return int(row["row_count"] or 0), str(row["updated_at"] or "")
+
+
+def get_generate_jobs_updated_at_edges(
+    *,
+    statuses: set[str] | None = None,
+    job_ids: set[str] | None = None,
+) -> dict[str, str]:
+    _ensure_database()
+    params: list[Any] = []
+    where: list[str] = []
+    if statuses:
+        placeholders = ", ".join("?" for _ in statuses)
+        where.append(f"status IN ({placeholders})")
+        params.extend(sorted(statuses))
+    if job_ids is not None:
+        if not job_ids:
+            return {}
+        placeholders = ", ".join("?" for _ in job_ids)
+        where.append(f"job_id IN ({placeholders})")
+        params.extend(sorted(job_ids))
+    sql = "SELECT job_id, updated_at FROM generate_jobs"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    with _connect() as conn:
+        rows = conn.execute(sql, params).fetchall()
+    return {str(row["job_id"]): str(row["updated_at"]) for row in rows}
 
 
 def create_gallery_job(**job: Any) -> dict[str, Any]:
@@ -3031,6 +3127,23 @@ def get_gallery_job(kind: str, job_id: str) -> dict[str, Any] | None:
             (kind, job_id),
         ).fetchone()
     return _gallery_job_from_row(row) if row else None
+
+
+def get_gallery_jobs_updated_at_edges(kind: str, job_ids: set[str]) -> dict[str, str]:
+    _ensure_database()
+    if not job_ids:
+        return {}
+    placeholders = ", ".join("?" for _ in job_ids)
+    with _connect() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT job_id, updated_at
+            FROM gallery_jobs
+            WHERE kind = ? AND job_id IN ({placeholders})
+            """,
+            (kind, *sorted(job_ids)),
+        ).fetchall()
+    return {str(row["job_id"]): str(row["updated_at"]) for row in rows}
 
 
 def update_gallery_job(job_id: str, updates: dict[str, Any]) -> dict[str, Any] | None:
@@ -3395,6 +3508,32 @@ def count_pending_image_job_units() -> tuple[int, int]:
     return int(row["running_count"] or 0), int(row["queued_count"] or 0)
 
 
+def get_pending_edit_source_bytes() -> int:
+    _ensure_database()
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(byte_count), 0) FROM edit_source_reservations"
+        ).fetchone()
+    return int(row[0] or 0) if row else 0
+
+
+def release_edit_source_reservation(job_id: str) -> int:
+    _ensure_database()
+    with _connect() as conn:
+        with _transaction(conn):
+            row = conn.execute(
+                "SELECT byte_count FROM edit_source_reservations WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+            if not row:
+                return 0
+            conn.execute(
+                "DELETE FROM edit_source_reservations WHERE job_id = ?",
+                (job_id,),
+            )
+    return int(row["byte_count"] or 0)
+
+
 def mark_worker_heartbeat(worker_id: str, active_units: int = 0) -> None:
     _ensure_database()
     now = utc_now()
@@ -3412,7 +3551,7 @@ def mark_worker_heartbeat(worker_id: str, active_units: int = 0) -> None:
             )
 
 
-def create_image_job_units(
+def _build_image_job_units(
     *,
     parent_job_id: str,
     operation: str,
@@ -3423,9 +3562,8 @@ def create_image_job_units(
     api_path: str,
     edit_sources: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    _ensure_database()
     now = utc_now()
-    units = [
+    return [
         {
             "unit_id": str(uuid.uuid4()),
             "parent_job_id": parent_job_id,
@@ -3444,6 +3582,133 @@ def create_image_job_units(
         }
         for index in range(max(1, int(image_units or 1)))
     ]
+
+
+def enqueue_image_job(
+    *,
+    parent_job: dict[str, Any],
+    operation: str,
+    request: dict[str, Any],
+    image_units: int,
+    api_preset_id: str,
+    api_preset_name: str,
+    api_path: str,
+    edit_sources: list[dict[str, Any]] | None = None,
+    pending_edit_source_bytes: int = 0,
+    max_active_generate_jobs: int,
+    max_queued_generate_jobs: int,
+    max_pending_edit_source_bytes: int,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    _ensure_database()
+    normalized_job = _normalize_generate_job(parent_job)
+    units = _build_image_job_units(
+        parent_job_id=str(normalized_job["job_id"]),
+        operation=operation,
+        request=request,
+        image_units=image_units,
+        api_preset_id=api_preset_id,
+        api_preset_name=api_preset_name,
+        api_path=api_path,
+        edit_sources=edit_sources,
+    )
+    requested_units = len(units)
+    capacity = max(1, int(max_active_generate_jobs or 1)) + max(
+        0,
+        int(max_queued_generate_jobs or 0),
+    )
+    reserved_bytes = max(0, int(pending_edit_source_bytes or 0))
+    max_reserved_bytes = max(0, int(max_pending_edit_source_bytes or 0))
+    unit_columns_sql = ", ".join(IMAGE_JOB_UNIT_COLUMNS)
+    unit_placeholders_sql = ", ".join("?" for _ in IMAGE_JOB_UNIT_COLUMNS)
+    now = utc_now()
+
+    with _connect() as conn:
+        with _transaction(conn):
+            row = conn.execute(
+                """
+                SELECT
+                    COALESCE(SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END), 0) AS running_count,
+                    COALESCE(SUM(CASE WHEN status = 'queued' THEN 1 ELSE 0 END), 0) AS queued_count
+                FROM image_job_units
+                WHERE status IN ('queued', 'running')
+                """
+            ).fetchone()
+            running_count = int(row["running_count"] or 0) if row else 0
+            queued_count = int(row["queued_count"] or 0) if row else 0
+            if running_count + queued_count + requested_units > capacity:
+                raise ImageJobQueueFullError("Generation job queue is full")
+
+            existing_reservation = conn.execute(
+                "SELECT byte_count FROM edit_source_reservations WHERE job_id = ?",
+                (normalized_job["job_id"],),
+            ).fetchone()
+            existing_bytes = (
+                int(existing_reservation["byte_count"] or 0)
+                if existing_reservation
+                else 0
+            )
+            pending_row = conn.execute(
+                "SELECT COALESCE(SUM(byte_count), 0) AS byte_count FROM edit_source_reservations"
+            ).fetchone()
+            current_reserved_bytes = (
+                int(pending_row["byte_count"] or 0) if pending_row else 0
+            )
+            if (
+                reserved_bytes > 0
+                and max_reserved_bytes > 0
+                and current_reserved_bytes - existing_bytes + reserved_bytes > max_reserved_bytes
+            ):
+                raise EditSourceQueueFullError("Edit source queue is full")
+
+            _upsert_generate_job_on_conn(conn, normalized_job)
+            if reserved_bytes > 0:
+                conn.execute(
+                    """
+                    INSERT INTO edit_source_reservations (job_id, byte_count, created_at, updated_at)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(job_id) DO UPDATE SET
+                        byte_count = excluded.byte_count,
+                        updated_at = excluded.updated_at
+                    """,
+                    (normalized_job["job_id"], reserved_bytes, now, now),
+                )
+            elif existing_bytes > 0:
+                conn.execute(
+                    "DELETE FROM edit_source_reservations WHERE job_id = ?",
+                    (normalized_job["job_id"],),
+                )
+            conn.executemany(
+                f"""
+                INSERT INTO image_job_units ({unit_columns_sql})
+                VALUES ({unit_placeholders_sql})
+                """,
+                [_image_job_unit_values(unit) for unit in units],
+            )
+    return normalized_job, units
+
+
+def create_image_job_units(
+    *,
+    parent_job_id: str,
+    operation: str,
+    request: dict[str, Any],
+    image_units: int,
+    api_preset_id: str,
+    api_preset_name: str,
+    api_path: str,
+    edit_sources: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    _ensure_database()
+    units = _build_image_job_units(
+        parent_job_id=parent_job_id,
+        operation=operation,
+        request=request,
+        image_units=image_units,
+        api_preset_id=api_preset_id,
+        api_preset_name=api_preset_name,
+        api_path=api_path,
+        edit_sources=edit_sources,
+    )
     columns_sql = ", ".join(IMAGE_JOB_UNIT_COLUMNS)
     placeholders_sql = ", ".join("?" for _ in IMAGE_JOB_UNIT_COLUMNS)
     with _connect() as conn:
@@ -3479,53 +3744,59 @@ def claim_next_image_job_unit(
     _ensure_database()
     with _connect() as conn:
         with _transaction(conn):
-            running_row = conn.execute(
-                "SELECT COUNT(*) FROM image_job_units WHERE status = 'running'"
-            ).fetchone()
-            if int(running_row[0] or 0) >= max(1, int(running_limit or 1)):
-                return None
-
             row = conn.execute(
                 f"""
-                SELECT {", ".join(IMAGE_JOB_UNIT_COLUMNS)}
-                FROM image_job_units
-                WHERE status = 'queued'
-                    OR (status = 'running' AND claim_expires_at IS NOT NULL AND claim_expires_at <= ?)
-                ORDER BY
-                    CASE WHEN status = 'running' THEN 0 ELSE 1 END,
-                    created_at ASC,
-                    unit_index ASC
-                LIMIT 1
-                """,
-                (now,),
-            ).fetchone()
-            if not row:
-                return None
-
-            started_at = row["started_at"] or now
-            conn.execute(
-                """
+                WITH
+                    running_count(value) AS (
+                        SELECT COUNT(*)
+                        FROM image_job_units
+                        WHERE status = 'running'
+                    ),
+                    expired_candidate(unit_id, priority) AS (
+                        SELECT unit_id, 0
+                        FROM image_job_units
+                        WHERE status = 'running'
+                            AND claim_expires_at IS NOT NULL
+                            AND claim_expires_at <= ?
+                        ORDER BY claim_expires_at ASC, created_at ASC, unit_index ASC
+                        LIMIT 1
+                    ),
+                    queued_candidate(unit_id, priority) AS (
+                        SELECT unit_id, 1
+                        FROM image_job_units
+                        WHERE status = 'queued'
+                        ORDER BY created_at ASC, unit_index ASC
+                        LIMIT 1
+                    ),
+                    candidate(unit_id, priority) AS (
+                        SELECT unit_id, priority FROM expired_candidate
+                        UNION ALL
+                        SELECT unit_id, priority FROM queued_candidate
+                        ORDER BY priority ASC
+                        LIMIT 1
+                    )
                 UPDATE image_job_units
                 SET status = 'running',
                     claimed_by = ?,
                     claim_expires_at = ?,
                     stage = COALESCE(NULLIF(stage, 'queued'), stage),
                     message = COALESCE(message, 'Running image unit'),
-                    started_at = ?,
+                    started_at = COALESCE(started_at, ?),
                     updated_at = ?
-                WHERE unit_id = ?
+                WHERE unit_id = (SELECT unit_id FROM candidate)
+                    AND (SELECT value FROM running_count) < ?
+                RETURNING {", ".join(IMAGE_JOB_UNIT_COLUMNS)}
                 """,
-                (worker_id, lease_expires_at, started_at, now, row["unit_id"]),
-            )
-            claimed = conn.execute(
-                f"""
-                SELECT {", ".join(IMAGE_JOB_UNIT_COLUMNS)}
-                FROM image_job_units
-                WHERE unit_id = ?
-                """,
-                (row["unit_id"],),
+                (
+                    now,
+                    worker_id,
+                    lease_expires_at,
+                    now,
+                    now,
+                    max(1, int(running_limit or 1)),
+                ),
             ).fetchone()
-    return _image_job_unit_from_row(claimed) if claimed else None
+    return _image_job_unit_from_row(row) if row else None
 
 
 def update_image_job_unit_progress(
@@ -3779,6 +4050,10 @@ def clear_generate_job_history() -> int:
             if not rows:
                 return 0
             conn.executemany(
+                "DELETE FROM edit_source_reservations WHERE job_id = ?",
+                [(row["job_id"],) for row in rows],
+            )
+            conn.executemany(
                 "DELETE FROM image_job_units WHERE parent_job_id = ?",
                 [(row["job_id"],) for row in rows],
             )
@@ -3809,6 +4084,10 @@ def mark_active_generate_jobs_interrupted() -> int:
             if not rows:
                 return 0
             job_ids = [row["job_id"] for row in rows]
+            conn.executemany(
+                "DELETE FROM edit_source_reservations WHERE job_id = ?",
+                [(job_id,) for job_id in job_ids],
+            )
             conn.executemany(
                 "DELETE FROM image_job_units WHERE parent_job_id = ?",
                 [(job_id,) for job_id in job_ids],
@@ -3852,6 +4131,10 @@ def trim_generate_jobs(max_jobs: int):
             ).fetchall()
             if not rows:
                 return
+            conn.executemany(
+                "DELETE FROM edit_source_reservations WHERE job_id = ?",
+                [(row["job_id"],) for row in rows],
+            )
             conn.executemany(
                 "DELETE FROM image_job_units WHERE parent_job_id = ?",
                 [(row["job_id"],) for row in rows],

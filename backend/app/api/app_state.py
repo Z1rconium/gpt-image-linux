@@ -124,13 +124,18 @@ async def lifespan(app: FastAPI):
     app.state.generate_jobs_subscribers = set()
     app.state.generate_jobs_broadcast_task = None
     app.state.generate_jobs_broadcast_reconcile = False
+    app.state.generate_jobs_sse_poller_task = None
+    app.state.generate_job_sse_poller_task = None
     app.state.generate_job_webhooks = {}
     app.state.generate_job_last_persist_at = {}
     app.state.worker_id = f"{os.getpid()}-{id(app)}"
+    app.state.image_unit_dispatcher_kick = asyncio.Event()
     app.state.image_unit_dispatcher_task = asyncio.create_task(
         jobs.run_image_unit_dispatcher(app.state.worker_id)
     )
     app.state.gallery_export_lock = asyncio.Lock()
+    app.state.gallery_job_subscribers = {"export": {}, "sync": {}}
+    app.state.gallery_job_sse_poller_tasks = {}
     from .routers import gallery as gallery_router
     app.state.gallery_export_dispatcher_task = asyncio.create_task(
         gallery_router.run_gallery_export_dispatcher(app.state.worker_id)
@@ -142,7 +147,6 @@ async def lifespan(app: FastAPI):
     app.state.gallery_r2_scheduled_sync_task = asyncio.create_task(
         gallery_router.run_gallery_r2_scheduled_sync()
     )
-    app.state.pending_edit_source_bytes = 0
     app.state.access_failures: OrderedDict[str, tuple[int, float]] = OrderedDict()
     jobs.reconcile_active_generate_jobs_from_storage()
     try:
@@ -154,6 +158,20 @@ async def lifespan(app: FastAPI):
         broadcast_task = getattr(app.state, "generate_jobs_broadcast_task", None)
         if broadcast_task and not broadcast_task.done():
             broadcast_task.cancel()
+        generate_jobs_sse_poller_task = getattr(
+            app.state,
+            "generate_jobs_sse_poller_task",
+            None,
+        )
+        if generate_jobs_sse_poller_task and not generate_jobs_sse_poller_task.done():
+            generate_jobs_sse_poller_task.cancel()
+        generate_job_sse_poller_task = getattr(
+            app.state,
+            "generate_job_sse_poller_task",
+            None,
+        )
+        if generate_job_sse_poller_task and not generate_job_sse_poller_task.done():
+            generate_job_sse_poller_task.cancel()
         dispatcher_task = getattr(app.state, "image_unit_dispatcher_task", None)
         if dispatcher_task and not dispatcher_task.done():
             dispatcher_task.cancel()
@@ -169,6 +187,12 @@ async def lifespan(app: FastAPI):
         scheduled_sync_task = getattr(app.state, "gallery_r2_scheduled_sync_task", None)
         if scheduled_sync_task and not scheduled_sync_task.done():
             scheduled_sync_task.cancel()
+        gallery_job_sse_poller_tasks = list(
+            getattr(app.state, "gallery_job_sse_poller_tasks", {}).values()
+        )
+        for task in gallery_job_sse_poller_tasks:
+            if task and not task.done():
+                task.cancel()
         tasks = list(getattr(app.state, "generate_job_tasks", {}).values())
         for task in tasks:
             task.cancel()
@@ -177,11 +201,14 @@ async def lifespan(app: FastAPI):
             for task in (
                 backfill_task,
                 broadcast_task,
+                generate_jobs_sse_poller_task,
+                generate_job_sse_poller_task,
                 dispatcher_task,
                 gallery_export_dispatcher_task,
                 gallery_sync_dispatcher_task,
                 gc_task,
                 scheduled_sync_task,
+                *gallery_job_sse_poller_tasks,
                 *tasks,
             )
             if task
