@@ -8,6 +8,8 @@ import { formatBytes } from '$lib/utils/format';
 import type { GalleryBatchResponse, GalleryExportJobStatus, GalleryResponse, GallerySyncJobStatus } from '$lib/api/types';
 import type { GalleryOperationStatus, GalleryState } from '$lib/stores/gallery';
 
+const STREAMING_ZIP_DOWNLOAD_BYTES_THRESHOLD = 64 * 1024 * 1024;
+
 type GalleryActionDeps = {
   getState: () => GalleryState;
   loadGallery: (page?: number, includeTotalBytes?: boolean) => Promise<void>;
@@ -26,6 +28,30 @@ function downloadBlob(blob: Blob, filename: string) {
   link.remove();
   URL.revokeObjectURL(url);
 }
+
+function startNativeDownload(url: string, filename?: string) {
+  const link = document.createElement('a');
+  link.href = url;
+  if (filename) link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+}
+
+function canUseFileSystemAccess() {
+  return typeof window !== 'undefined' && typeof (window as unknown as { showSaveFilePicker?: unknown }).showSaveFilePicker === 'function';
+}
+
+type FileSystemWritableLike = {
+  write: (chunk: Uint8Array) => Promise<void>;
+  close: () => Promise<void>;
+  abort?: () => Promise<void>;
+};
+
+type SaveFilePicker = (options?: {
+  suggestedName?: string;
+  types?: Array<{ description: string; accept: Record<string, string[]> }>;
+}) => Promise<{ createWritable: () => Promise<FileSystemWritableLike> }>;
 
 function parseHeaderInt(headers: Headers, name: string) {
   const parsed = Number.parseInt(headers.get(name) || '', 10);
@@ -183,6 +209,51 @@ export function createGalleryActions(deps: GalleryActionDeps) {
     return new Blob(chunks, { type: response.headers.get('Content-Type') || 'application/zip' });
   }
 
+  async function saveResponseStreamToFile(
+    response: Response,
+    kind: GalleryOperationStatus['kind'],
+    label: string,
+    initialDetail: string,
+    fallbackFilename: string,
+    progressRange: { start: number; end: number } = { start: 0, end: 100 }
+  ) {
+    const picker = (window as unknown as { showSaveFilePicker?: SaveFilePicker }).showSaveFilePicker;
+    if (!picker || !response.body) return false;
+
+    const filename = filenameFromContentDisposition(response.headers.get('Content-Disposition'), fallbackFilename);
+    const handle = await picker({
+      suggestedName: filename,
+      types: [{ description: 'ZIP archive', accept: { 'application/zip': ['.zip'] } }]
+    });
+    const writable = await handle.createWritable();
+    const reader = response.body.getReader();
+    const total = Number.parseInt(response.headers.get('Content-Length') || '0', 10);
+    let loaded = 0;
+    deps.setOperationStatus({ kind, label, detail: initialDetail, progress: total > 0 ? progressRange.start : null });
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (!value) continue;
+        await writable.write(value);
+        loaded += value.byteLength;
+        deps.setOperationStatus({
+          kind,
+          label,
+          detail: operationProgressDetail(loaded, total) || initialDetail,
+          progress: total > 0 ? operationProgress((loaded / total) * 100, progressRange.start, progressRange.end) : null
+        });
+      }
+      await writable.close();
+      deps.setOperationStatus({ kind, label, detail: operationProgressDetail(loaded, total) || initialDetail, progress: progressRange.end });
+      return true;
+    } catch (error) {
+      await writable.abort?.();
+      throw error;
+    }
+  }
+
   async function batchFavorite(favorite: boolean, showToast: (message: string) => void, onAffected?: (ids: string[], favorite: boolean) => void) {
     const state = deps.getState();
     const ids = [...state.selectedIds];
@@ -240,9 +311,12 @@ export function createGalleryActions(deps: GalleryActionDeps) {
   }
 
   async function batchDownload(showToast?: (message: string) => void) {
-    const ids = [...deps.getState().selectedIds];
+    const state = deps.getState();
+    const ids = [...state.selectedIds];
     if (!ids.length) return;
     const label = get(t).gallery.downloadingSelected;
+    const selectedEntries = state.gallery?.images.filter((image) => ids.includes(image.id)) || [];
+    const selectedBytes = selectedEntries.reduce((sum, image) => sum + (image.bytes || 0), 0);
     deps.setOperationStatus({
       kind: 'download',
       label,
@@ -250,6 +324,22 @@ export function createGalleryActions(deps: GalleryActionDeps) {
       progress: 0
     });
     try {
+      if (selectedBytes >= STREAMING_ZIP_DOWNLOAD_BYTES_THRESHOLD && canUseFileSystemAccess()) {
+        const response = await fetch('/api/gallery/batch/download', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json', Accept: 'application/zip' },
+          body: JSON.stringify({ ids })
+        });
+        if (!response.ok) throw new Error(get(t).messages.requestFailed);
+        await saveResponseStreamToFile(response, 'download', label, get(t).gallery.browserSavingDownload, 'gpt-images-selected.zip');
+        const requestedCount = parseHeaderInt(response.headers, 'X-Gallery-Requested-Count') || ids.length;
+        const exportedCount = parseHeaderInt(response.headers, 'X-Gallery-Exported-Count') || requestedCount;
+        const missingCount = parseHeaderInt(response.headers, 'X-Gallery-Missing-Count');
+        showToast?.(get(t).messages.selectedImagesDownloaded(exportedCount, missingCount));
+        return;
+      }
+
       const job = await apiFetch<GalleryExportJobStatus>(
         '/api/gallery/export-jobs',
         {
@@ -273,12 +363,23 @@ export function createGalleryActions(deps: GalleryActionDeps) {
         detail: get(t).gallery.browserSavingDownload,
         progress: 50
       });
-      const response = await fetch(readyJob.download_url || `/api/gallery/export-jobs/${encodeURIComponent(readyJob.job_id)}/download`, {
+      const downloadUrl = readyJob.download_url || `/api/gallery/export-jobs/${encodeURIComponent(readyJob.job_id)}/download`;
+      if (readyJob.bytes_total >= STREAMING_ZIP_DOWNLOAD_BYTES_THRESHOLD) {
+        startNativeDownload(downloadUrl, 'gpt-images-selected.zip');
+        const requestedCount = readyJob.requested_count || ids.length;
+        const exportedCount = readyJob.exported_count || requestedCount;
+        const missingCount = readyJob.missing_count || 0;
+        showToast?.(get(t).messages.selectedImagesDownloaded(exportedCount, missingCount));
+        return;
+      }
+
+      const response = await fetch(downloadUrl, {
         method: 'GET',
         credentials: 'same-origin',
         headers: { Accept: 'application/zip' }
       });
       if (!response.ok) throw new Error(get(t).messages.requestFailed);
+
       const blob = await downloadResponseBlob(
         response,
         'download',
@@ -305,6 +406,27 @@ export function createGalleryActions(deps: GalleryActionDeps) {
       progress: 0
     });
     try {
+      let totalBytes = deps.getState().gallery?.total_bytes || 0;
+      if (totalBytes <= 0) {
+        const stats = await apiFetch<GalleryResponse>(
+          '/api/gallery?page=1&page_size=1&include_total_bytes=true',
+          {},
+          'loading gallery export size'
+        );
+        totalBytes = stats.total_bytes || 0;
+      }
+      if (totalBytes >= STREAMING_ZIP_DOWNLOAD_BYTES_THRESHOLD) {
+        deps.setOperationStatus({
+          kind: 'export',
+          label,
+          detail: get(t).gallery.browserSavingDownload,
+          progress: null
+        });
+        startNativeDownload('/api/download-all', 'gpt-images.zip');
+        showToast?.(get(t).messages.exportReady);
+        return;
+      }
+
       const job = await apiFetch<GalleryExportJobStatus>('/api/gallery/export-jobs', { method: 'POST' }, 'preparing gallery export');
       const readyJob = await waitForGalleryExportJob(job.job_id, (nextJob) => {
         deps.setOperationStatus({
@@ -320,7 +442,14 @@ export function createGalleryActions(deps: GalleryActionDeps) {
         detail: get(t).gallery.browserSavingDownload,
         progress: 50
       });
-      const response = await fetch(readyJob.download_url || `/api/gallery/export-jobs/${encodeURIComponent(readyJob.job_id)}/download`, {
+      const downloadUrl = readyJob.download_url || `/api/gallery/export-jobs/${encodeURIComponent(readyJob.job_id)}/download`;
+      if (readyJob.bytes_total >= STREAMING_ZIP_DOWNLOAD_BYTES_THRESHOLD) {
+        startNativeDownload(downloadUrl, 'gpt-images.zip');
+        showToast?.(get(t).messages.exportReady);
+        return;
+      }
+
+      const response = await fetch(downloadUrl, {
         method: 'GET',
         credentials: 'same-origin',
         headers: { Accept: 'application/zip' }

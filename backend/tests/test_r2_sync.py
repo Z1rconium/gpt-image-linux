@@ -4,6 +4,7 @@ import pytest
 
 from backend.app.core import settings as config
 from backend.app.integrations import r2_sync
+from backend.app.repositories import storage
 
 
 PNG_BYTES = b"\x89PNG\r\n\x1a\nfake"
@@ -24,6 +25,13 @@ class FakePaginator:
         }
 
 
+class FakeNotFoundError(Exception):
+    response = {
+        "Error": {"Code": "404"},
+        "ResponseMetadata": {"HTTPStatusCode": 404},
+    }
+
+
 class FakeS3Client:
     def __init__(self, keys=None, fail_upload_keys=None, fail_delete=False):
         self.keys = set(keys or [])
@@ -33,6 +41,7 @@ class FakeS3Client:
         self.put_objects: list[str] = []
         self.deleted: list[str] = []
         self.paginated: list[tuple[str, str]] = []
+        self.headed: list[str] = []
 
     def head_bucket(self, *, Bucket):
         assert Bucket
@@ -48,6 +57,13 @@ class FakeS3Client:
         assert ContentType == "text/plain"
         self.keys.add(Key)
         self.put_objects.append(Key)
+
+    def head_object(self, *, Bucket, Key):
+        assert Bucket
+        self.headed.append(Key)
+        if Key not in self.keys:
+            raise FakeNotFoundError()
+        return {}
 
     def delete_object(self, *, Bucket, Key):
         assert Bucket
@@ -91,10 +107,88 @@ def image_dir(tmp_path, monkeypatch):
     return images
 
 
+@pytest.fixture()
+def storage_runtime(tmp_path, monkeypatch):
+    images = tmp_path / "images"
+    data = tmp_path / "data"
+    images.mkdir()
+    monkeypatch.setattr(config, "IMAGES_DIR", str(images))
+    monkeypatch.setattr(config, "THUMBNAILS_DIR", str(images / "thumbs"))
+    monkeypatch.setattr(config, "DATA_DIR", str(data))
+    monkeypatch.setattr(config, "DATABASE_FILE", str(data / "app.sqlite3"))
+    storage.close_database_connections()
+    storage._db_initialized = False
+    storage._dirs_initialized = False
+    yield
+    storage.close_database_connections()
+    storage._db_initialized = False
+    storage._dirs_initialized = False
+
+
 def write_image(image_dir: Path, filename: str, data: bytes = PNG_BYTES):
     path = image_dir / filename
     path.write_bytes(data)
     return path
+
+
+def insert_gallery_row(image_id: str, filename: str, *, byte_size: int, sha256: str):
+    storage._ensure_database()
+    with storage._connect() as conn:
+        with storage._transaction(conn):
+            conn.execute(
+                """
+                INSERT INTO gallery_entries (
+                    id, prompt, size, filename, created_at, bytes, sha256
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (image_id, "prompt", "1024x1024", filename, "2026-06-05T00:00:00Z", byte_size, sha256),
+            )
+
+
+def test_r2_sync_state_filters_incremental_candidates(storage_runtime):
+    insert_gallery_row("image-a", "a.png", byte_size=4, sha256="sha-a")
+
+    assert storage.count_gallery_r2_sync_rows(key_prefix="gallery/") == 1
+    assert [
+        row["filename"]
+        for row in storage.iter_gallery_r2_sync_rows(key_prefix="gallery/")
+    ] == ["a.png"]
+
+    storage.mark_gallery_r2_sync_state(
+        [
+            {
+                "filename": "a.png",
+                "sha256": "sha-a",
+                "bytes": 4,
+                "key": "gallery/a.png",
+            }
+        ]
+    )
+
+    assert storage.count_gallery_r2_sync_rows(key_prefix="gallery/") == 0
+    assert list(storage.iter_gallery_r2_sync_rows(key_prefix="gallery/")) == []
+    assert storage.count_gallery_r2_sync_rows(key_prefix="other/") == 1
+    assert storage.count_gallery_r2_sync_rows(
+        key_prefix="gallery/",
+        full_reconcile=True,
+    ) == 1
+
+    with storage._connect() as conn:
+        with storage._transaction(conn):
+            conn.execute(
+                """
+                UPDATE gallery_entries
+                SET sha256 = ?
+                WHERE id = ?
+                """,
+                ("sha-b", "image-a"),
+            )
+
+    rows = list(storage.iter_gallery_r2_sync_rows(key_prefix="gallery/"))
+    assert len(rows) == 1
+    assert rows[0]["filename"] == "a.png"
+    assert rows[0]["sha256"] == "sha-b"
 
 
 def test_r2_health_probe_success_and_cleanup_warning():

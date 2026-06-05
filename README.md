@@ -355,7 +355,8 @@ The panel supports these upstream paths. The API base URL may either omit or inc
 - R2 Backup is an incremental backup path, not remote gallery storage.
 - Configure it in `.env` with `R2_BACKUP_ENABLED=true` plus the other `R2_*` variables, or in Web Settings. When SQLite has no saved R2 settings yet, startup persists the current `.env` R2 values so they appear in Web Settings. Later Web Settings saves take precedence. Web Settings accepts `${ENV_VAR_NAME}` refs for credentials; literal stored credentials require `ALLOW_PLAINTEXT_SECRETS=true`.
 - Test R2 in Settings runs `HeadBucket`, a prefix-scoped `ListObjectsV2`, and a small probe object write; probe cleanup failure is reported as a warning.
-- The Gallery Sync button uploads only local gallery filenames missing from `R2_KEY_PREFIX`; existing bucket objects are skipped, and bucket-only objects are never deleted or overwritten.
+- The Gallery Sync button records confirmed uploads in SQLite and normally only compares local filenames that are new or changed for the current `R2_KEY_PREFIX`; existing bucket objects are skipped, and bucket-only objects are never deleted or overwritten. Full reconcile mode rechecks local filenames against R2 for cases such as remote manual deletion.
+- `R2_SYNC_CONCURRENCY` controls bounded concurrent R2 `HEAD`/upload workers; the default is `4`, which is usually better for many small images than fully serial sync.
 - Set `R2_SYNC_INTERVAL_HOURS` or the Web Settings interval to a positive integer to run the same incremental sync periodically. `0` disables automatic sync, and startup waits one full interval before the first scheduled run.
 
 ## Image size modes
@@ -409,6 +410,7 @@ All variables listed in `.env.example` are also tracked in SQLite for Overall Co
 | `R2_REGION` | `auto` | S3 client region name for R2 |
 | `R2_KEY_PREFIX` | `gallery/` | Object key prefix for gallery backups; use a dedicated prefix such as `gallery-test/` for validation |
 | `R2_SYNC_INTERVAL_HOURS` | `0` | Scheduled Gallery Sync interval in hours; `0` disables automatic sync |
+| `R2_SYNC_CONCURRENCY` | `4` | Concurrent R2 `HEAD`/upload workers used by Gallery Sync |
 | `R2_ACCESS_KEY_ID` | empty | R2 access key ID used by env-ref credentials |
 | `R2_SECRET_ACCESS_KEY` | empty | R2 secret access key used by env-ref credentials |
 | `APP_VERSION` | `VERSION` file | Override the app version shown in the UI and returned by `/api/version`; read on each request |
@@ -940,7 +942,8 @@ curl http://localhost:9090/health
 - R2 Backup 是增量备份路径，不是远端 Gallery 存储。
 - 可以用 `.env` 的 `R2_BACKUP_ENABLED=true` 加其他 `R2_*` 变量配置，也可以在 Web Settings 中保存配置。当 SQLite 里还没有保存过 R2 settings 时，启动会把当前 `.env` R2 值持久化进去，所以 Web Settings 会直接显示这些值；之后 Web Settings 保存的值优先。Web Settings 的凭据字段支持 `${ENV_VAR_NAME}` 引用；直接保存明文凭据需要 `ALLOW_PLAINTEXT_SECRETS=true`。
 - Settings 里的测试 R2 会执行 `HeadBucket`、带 prefix 的 `ListObjectsV2`，并写入一个很小的 probe object；probe 清理失败会作为 warning 返回。
-- Gallery 的同步按钮只上传 `R2_KEY_PREFIX` 下缺失的本地 Gallery filename；已存在对象会跳过，bucket 中额外对象不会删除或覆盖。
+- Gallery 的同步按钮会把确认上传的对象记录到 SQLite，通常只比较当前 `R2_KEY_PREFIX` 下本地新增或变更的 filename；已存在对象会跳过，bucket 中额外对象不会删除或覆盖。远端被手动删除这类情况可用 full reconcile 模式重新核对本地 filename 和 R2。
+- `R2_SYNC_CONCURRENCY` 控制有界并发的 R2 `HEAD`/上传 worker；默认 `4`，大量小图通常比完全串行同步更快。
 - 将 `R2_SYNC_INTERVAL_HOURS` 或 Web Settings 里的同步间隔设为正整数，可按相同增量逻辑定时同步。`0` 表示关闭自动同步，服务启动后会等待完整间隔再执行第一次定时同步。
 
 ## 图像尺寸模式
@@ -993,6 +996,7 @@ curl http://localhost:9090/health
 | `R2_REGION` | `auto` | R2 使用的 S3 client region name |
 | `R2_KEY_PREFIX` | `gallery/` | Gallery 备份对象 key prefix；手动验证建议使用 `gallery-test/` 这类独立 prefix |
 | `R2_SYNC_INTERVAL_HOURS` | `0` | Gallery Sync 定时同步间隔，单位小时；`0` 表示关闭自动同步 |
+| `R2_SYNC_CONCURRENCY` | `4` | Gallery Sync 使用的并发 R2 `HEAD`/上传 worker 数 |
 | `R2_ACCESS_KEY_ID` | 空 | env-ref 凭据解析使用的 R2 access key ID |
 | `R2_SECRET_ACCESS_KEY` | 空 | env-ref 凭据解析使用的 R2 secret access key |
 | `APP_VERSION` | `VERSION` 文件 | 覆盖界面显示和 `/api/version` 返回的当前应用版本；每次请求实时读取 |

@@ -563,6 +563,10 @@ class GalleryExportRequest(StrictRequestModel):
         return ids
 
 
+class GallerySyncRequest(StrictRequestModel):
+    full_reconcile: bool = False
+
+
 class GalleryExportJobStatus(BaseModel):
     job_id: str
     status: GalleryExportJobStatusValue

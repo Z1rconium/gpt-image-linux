@@ -86,6 +86,7 @@ OVERALL_CONFIG_REGISTRY: tuple[OverallConfigSpec, ...] = (
     _spec("R2_ACCESS_KEY_ID", "secret", "", "R2 Backup", "R2 access key ID.", secret=True, exposed_in_settings=True),
     _spec("R2_SECRET_ACCESS_KEY", "secret", "", "R2 Backup", "R2 secret access key.", secret=True, exposed_in_settings=True),
     _spec("R2_SYNC_INTERVAL_HOURS", "int", "0", "R2 Backup", "Scheduled R2 sync interval in hours; 0 disables automatic sync.", exposed_in_settings=True, min_value=0),
+    _spec("R2_SYNC_CONCURRENCY", "int", "4", "R2 Backup", "Concurrent R2 HEAD/upload workers.", min_value=1),
     _spec("ACCESS_KEY", "secret", "", "Access / Security", "Access gate key.", secret=True),
     _spec("ALLOW_UNAUTHENTICATED", "bool", "false", "Access / Security", "Allow startup without access key; logs a warning because non-health APIs are unauthenticated.", restart_required=True),
     _spec("ACCESS_KEY_COOKIE_NAME", "string", "gpt_image_access", "Access / Security", "Access cookie name.", restart_required=True),
