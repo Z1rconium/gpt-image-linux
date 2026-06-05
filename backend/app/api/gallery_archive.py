@@ -6,7 +6,7 @@ import tempfile
 import time
 import uuid
 import zipfile
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Generator, Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -151,13 +151,30 @@ def unique_export_name(path: Path, used_names: set[str]) -> str:
 def iter_gallery_zip_chunks(
     entries: Iterable[GalleryEntry | dict[str, Any]],
     skipped: Iterable[dict[str, Any]] | None = None,
-) -> Iterator[bytes]:
+    *,
+    requested_count: int = 0,
+    progress: GalleryZipProgressCallback | None = None,
+) -> Generator[bytes, None, GalleryZipFileResult]:
     used_names: set[str] = set()
-    exported_entries: list[GalleryEntry | dict[str, Any]] = []
+    metadata_images: list[dict[str, Any]] = []
     skipped_entries: list[dict[str, Any]] = list(skipped or [])
-    zs = ZipStream(compress_type=zipfile.ZIP_STORED)
+    initial_skipped_count = len(skipped_entries)
+    processed_count = 0
+    zs = ZipStream(compress_type=zipfile.ZIP_STORED, sized=True)
+    last_emit_at = 0.0
+
+    _emit_zip_progress(
+        progress,
+        status="running",
+        stage="preparing",
+        message="Preparing gallery ZIP entries",
+        progress=0,
+        processed_count=0,
+        requested_count=requested_count,
+    )
 
     for entry in entries:
+        processed_count += 1
         path = storage.safe_image_path(_entry_filename(entry))
         if not path or not path.exists():
             skipped_entries.append(
@@ -167,23 +184,74 @@ def iter_gallery_zip_chunks(
                     "reason": "image_file_missing",
                 }
             )
-            continue
-
-        name = unique_export_name(path, used_names)
-        if isinstance(entry, dict):
-            exported_entries.append({**entry, "filename": name})
         else:
-            exported_entries.append(entry.model_copy(update={"filename": name}))
-        zs.add_path(path, arcname=f"images/{name}")
+            name = unique_export_name(path, used_names)
+            metadata_entry = _resolve_export_metadata_for_entry(entry, path)
+            metadata_entry["filename"] = name
+            metadata_images.append(metadata_entry)
+            zs.add_path(path, arcname=f"images/{name}")
 
-    metadata = build_gallery_export_metadata(exported_entries, skipped_entries)
+        denominator = max(requested_count, processed_count, 1)
+        prepared_units = min(denominator, processed_count + initial_skipped_count)
+        if processed_count == 1 or processed_count % 10 == 0 or prepared_units >= denominator:
+            _emit_zip_progress(
+                progress,
+                status="running",
+                stage="preparing",
+                message="Preparing gallery ZIP entries",
+                progress=min(20, round((prepared_units / denominator) * 20)),
+                processed_count=prepared_units,
+                requested_count=denominator,
+                exported_count=len(metadata_images),
+                missing_count=len(skipped_entries),
+            )
+
+    metadata = _build_export_metadata_from_rows(metadata_images, skipped_entries)
     zs.add(
         json.dumps(metadata, ensure_ascii=False, indent=2).encode("utf-8"),
         arcname="metadata.json",
-        compress_type=zipfile.ZIP_DEFLATED,
     )
 
-    yield from zs
+    bytes_total = len(zs)
+    bytes_written = 0
+    _emit_zip_progress(
+        progress,
+        status="running",
+        stage="streaming",
+        message="Streaming ZIP archive",
+        progress=20,
+        bytes_total=bytes_total,
+        bytes_written=0,
+        exported_count=len(metadata_images),
+        missing_count=len(skipped_entries),
+    )
+
+    for chunk in zs:
+        if not chunk:
+            continue
+        bytes_written += len(chunk)
+        now = time.monotonic()
+        if now - last_emit_at >= 0.1 or bytes_written >= bytes_total:
+            last_emit_at = now
+            _emit_zip_progress(
+                progress,
+                status="running",
+                stage="streaming",
+                message="Streaming ZIP archive",
+                progress=20 + round((bytes_written / max(bytes_total, 1)) * 80),
+                bytes_total=bytes_total,
+                bytes_written=bytes_written,
+                exported_count=len(metadata_images),
+                missing_count=len(skipped_entries),
+            )
+        yield chunk
+
+    return GalleryZipFileResult(
+        requested_count=max(requested_count, processed_count + initial_skipped_count),
+        exported_count=len(metadata_images),
+        missing_count=len(skipped_entries),
+        bytes_total=bytes_total,
+    )
 
 
 def _emit_zip_progress(

@@ -513,7 +513,10 @@ All variables listed in `.env.example` are also tracked in SQLite for Overall Co
 | `GET` | `/api/thumb/{filename}` | Serve or lazily create a WebP gallery thumbnail |
 | `GET` | `/api/download/{filename}` | Download image as attachment |
 | `DELETE` | `/api/gallery/{id}` | Delete gallery entry and its server image file |
-| `GET` | `/api/download-all` | Download all gallery images plus `metadata.json` as a ZIP file |
+| `GET` | `/api/download-all` | Download all gallery images plus `metadata.json` as a low-memory streaming ZIP file; accepts `export_job_id` from a direct export job |
+| `POST` | `/api/gallery/direct-export-jobs` | Reserve a direct streaming ZIP export job for the full gallery and return its `download_url` |
+| `GET` | `/api/gallery/direct-export-jobs/{job_id}` | Get direct streaming ZIP export job status |
+| `GET` | `/api/gallery/direct-export-jobs/{job_id}/events` | Stream direct ZIP prepare/output progress over SSE |
 | `POST` | `/api/gallery/export-jobs` | Start a tracked gallery ZIP export job; optionally pass `ids` for selected images |
 | `GET` | `/api/gallery/export-jobs/{job_id}` | Get tracked ZIP export job status |
 | `GET` | `/api/gallery/export-jobs/{job_id}/events` | Stream ZIP export pack progress over SSE |
@@ -544,7 +547,7 @@ All variables listed in `.env.example` are also tracked in SQLite for Overall Co
 - SSE is the primary progress channel; `/api/generate/jobs` provides list/history (`include_finished=true`, optional `limit`/`offset`, optional `failed_only=true`), `/api/generate/jobs/history` clears terminal history, and `/api/generate/jobs/events` streams SQLite-backed live job-list changes with sub-second polling
 - terminal job history includes `stage_timings` for `upstream_wait`, `download_decode`, `validate`, and `db_insert`; slow gallery queries are logged with prompt presence/length/hash plus other filters and totals and counted in metrics; optional metrics include `worker_id`, recent worker snapshots, queue depth, running jobs, failure ratios, job-stage latencies, SQLite busy/slow counters, SSE poll query counters, claim misses, active SSE slots, and worker heartbeat age; terminal job statuses distinguish `cancelled`, `interrupted`, and `upstream_error` in addition to the generic `error`
 - upstream JSON/SSE bodies are read with a `MAX_UPSTREAM_JSON_MB` cap before parsing, JSON request bodies are capped by `MAX_JSON_BODY_MB`, and upstream image URL downloads are revalidated (SSRF-aware, no blind redirect follow), fully decoded with Pillow, pixel-limited by `MAX_IMAGE_PIXELS`, and bounded by `MAX_FILE_SIZE_MB`
-- `/api/import` enforces ZIP safety/size/count/compression checks; `/api/download-all` keeps the low-memory streaming path with global SQLite-backed direct export slots, while tracked export jobs write temp ZIP files so UI progress can cover both packing and transfer. ZIP metadata uses stored `sha256`/`bytes` when available and does not re-read image files only to backfill missing hashes during export.
+- `/api/import` enforces ZIP safety/size/count/compression checks; `/api/download-all` keeps the low-memory streaming path with SQLite-backed direct export jobs/slots and reports server-side prepare/output progress over SSE when called with `export_job_id`. Tracked export jobs still write temp ZIP files for selected/small download flows with `Content-Length` transfer progress. ZIP metadata uses stored `sha256`/`bytes` when available and does not re-read image files only to backfill missing hashes during export.
 - gallery stores byte-size metadata and thumbnails (`THUMBNAILS_DIR`), with lazy thumbnail and opt-in byte-size backfill for older images; with Compose, nginx serves immutable frontend assets directly and serves image/thumb/download file bytes only after FastAPI returns an authorized `X-Accel-Redirect`
 - startup reconciliation removes gallery rows for missing files and marks previously running/queued jobs as interrupted
 
@@ -1098,7 +1101,10 @@ curl http://localhost:9090/health
 | `GET` | `/api/thumb/{filename}` | 访问或懒生成 WebP Gallery 缩略图 |
 | `GET` | `/api/download/{filename}` | 下载图片 |
 | `DELETE` | `/api/gallery/{id}` | 删除 Gallery 条目和对应服务器图片文件 |
-| `GET` | `/api/download-all` | 下载 Gallery 所有图片和 `metadata.json` 为 ZIP 文件 |
+| `GET` | `/api/download-all` | 低内存流式下载 Gallery 所有图片和 `metadata.json` 为 ZIP 文件；可传 direct export job 返回的 `export_job_id` |
+| `POST` | `/api/gallery/direct-export-jobs` | 为完整 Gallery 预留 direct streaming ZIP 导出任务，并返回 `download_url` |
+| `GET` | `/api/gallery/direct-export-jobs/{job_id}` | 查询 direct streaming ZIP 导出任务状态 |
+| `GET` | `/api/gallery/direct-export-jobs/{job_id}/events` | 通过 SSE 推送 direct ZIP 准备/输出进度 |
 | `POST` | `/api/gallery/export-jobs` | 创建可跟踪进度的 Gallery ZIP 导出任务；可传 `ids` 导出所选图片 |
 | `GET` | `/api/gallery/export-jobs/{job_id}` | 查询 ZIP 导出任务状态 |
 | `GET` | `/api/gallery/export-jobs/{job_id}/events` | 通过 SSE 推送 ZIP 打包进度 |
@@ -1129,7 +1135,7 @@ curl http://localhost:9090/health
 - SSE 是主进度通道；`/api/generate/jobs` 提供列表/历史（`include_finished=true`，可选 `limit`/`offset`，可选 `failed_only=true`），`/api/generate/jobs/history` 清空终态历史，`/api/generate/jobs/events` 通过 SQLite 亚秒级轮询推送实时任务列表变化
 - 任务终态历史包含 `stage_timings`：`upstream_wait`、`download_decode`、`validate`、`db_insert`；慢 Gallery 查询日志只记录提示词是否存在/长度/hash，以及其他筛选条件与 total，并计入 metrics；可选 metrics 包含 `worker_id`、最近 worker snapshots、队列深度、运行中任务数、失败率、任务分段耗时、SQLite busy/慢查询数、SSE poll 查询数、claim miss、活跃 SSE slots 和 worker heartbeat age；终态状态区分 `cancelled`、`interrupted` 和 `upstream_error`，同时保留通用 `error`
 - 上游 JSON/SSE 响应会在解析前受 `MAX_UPSTREAM_JSON_MB` 限制，JSON 请求体受 `MAX_JSON_BODY_MB` 限制；上游图片 URL 下载会做 SSRF/重定向目标复核，并会经过 Pillow 完整解码、`MAX_IMAGE_PIXELS` 像素限制和 `MAX_FILE_SIZE_MB` 体积限制
-- `/api/import` 做 ZIP 安全与体积校验；`/api/download-all` 保留低内存流式导出，并使用 SQLite 里的全局 direct export slot；带进度的导出任务会写入临时 ZIP，让 UI 同时展示打包和传输进度。ZIP metadata 会使用已保存的 `sha256`/`bytes`，导出时不会为了补缺失 hash 额外完整读取图片文件。
+- `/api/import` 做 ZIP 安全与体积校验；`/api/download-all` 保留低内存流式导出，并通过 SQLite-backed direct export job/slot 在传入 `export_job_id` 时用 SSE 汇报服务端准备/输出进度。tracked export job 仍用于所选/小体积下载流程，会写入临时 ZIP 并借助 `Content-Length` 展示传输进度。ZIP metadata 会使用已保存的 `sha256`/`bytes`，导出时不会为了补缺失 hash 额外完整读取图片文件。
 - Gallery 持久化图片字节数和缩略图（`THUMBNAILS_DIR`），旧图按需懒补缩略图；使用 Compose 时，nginx 会直接返回 immutable 前端资源，并且只在 FastAPI 返回已授权的 `X-Accel-Redirect` 后发送图片/缩略图/下载文件字节
 - 启动时会清理缺失文件对应的 Gallery 记录，并把上次进程遗留的 running/queued 任务标记为 interrupted
 

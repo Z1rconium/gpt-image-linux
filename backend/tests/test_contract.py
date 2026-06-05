@@ -228,6 +228,19 @@ def _wait_for_gallery_export_job(client: TestClient, job_id: str, timeout: float
     raise AssertionError(f"gallery export job {job_id} did not finish: {last}")
 
 
+def _wait_for_gallery_direct_export_job(client: TestClient, job_id: str, timeout: float = 5.0):
+    deadline = time.time() + timeout
+    last = None
+    while time.time() < deadline:
+        resp = client.get(f"/api/gallery/direct-export-jobs/{job_id}")
+        assert resp.status_code == 200
+        last = resp.json()
+        if last["status"] in {"success", "error"}:
+            return last
+        time.sleep(0.05)
+    raise AssertionError(f"direct gallery export job {job_id} did not finish: {last}")
+
+
 def _wait_for_gallery_sync_job(client: TestClient, job_id: str, timeout: float = 5.0):
     deadline = time.time() + timeout
     last = None
@@ -3571,6 +3584,72 @@ def test_gallery_export_job_reports_progress_and_downloads_zip(client):
         assert "metadata.json" in zf.namelist()
         assert "images/export-job-1.png" in zf.namelist()
         assert "images/export-job-2.png" in zf.namelist()
+
+
+def test_gallery_direct_export_job_tracks_streaming_download(client):
+    _fake_gallery_entry("direct-export-1", "one", "1024x1024", "direct-export-1.png")
+    _fake_gallery_entry("direct-export-2", "two", "1024x1024", "direct-export-2.png")
+
+    created = client.post("/api/gallery/direct-export-jobs")
+    assert created.status_code == 202
+    job = created.json()
+    assert job["job_id"].startswith("direct-")
+    assert job["status"] == "running"
+    assert job["stage"] == "queued"
+    assert job["progress"] == 0
+    assert job["requested_count"] == 2
+    assert job["download_url"].endswith(f"export_job_id={job['job_id']}")
+
+    archive = client.get(job["download_url"])
+    assert archive.status_code == 200
+    assert archive.headers["content-type"].startswith("application/zip")
+    assert archive.headers["x-gallery-export-job-id"] == job["job_id"]
+    with zipfile.ZipFile(io.BytesIO(archive.content)) as zf:
+        assert "metadata.json" in zf.namelist()
+        assert "images/direct-export-1.png" in zf.namelist()
+        assert "images/direct-export-2.png" in zf.namelist()
+
+    finished = _wait_for_gallery_direct_export_job(client, job["job_id"])
+    assert finished["status"] == "success"
+    assert finished["stage"] == "ready"
+    assert finished["progress"] == 100
+    assert finished["processed_count"] == 2
+    assert finished["requested_count"] == 2
+    assert finished["exported_count"] == 2
+    assert finished["missing_count"] == 0
+    assert finished["bytes_total"] > 0
+    assert finished["bytes_written"] == finished["bytes_total"]
+
+    events = client.get(f"/api/gallery/direct-export-jobs/{job['job_id']}/events")
+    assert events.status_code == 200
+    assert events.headers["content-type"].startswith("text/event-stream")
+    assert "event: export" in events.text
+    assert job["job_id"] in events.text
+
+
+def test_download_all_without_direct_job_keeps_legacy_streaming_behavior(client):
+    _fake_gallery_entry("legacy-direct-export", "one", "1024x1024", "legacy-direct-export.png")
+
+    archive = client.get("/api/download-all")
+
+    assert archive.status_code == 200
+    direct_job_id = archive.headers.get("x-gallery-export-job-id")
+    assert direct_job_id and direct_job_id.startswith("direct-")
+    assert storage.get_gallery_job("export_direct", direct_job_id) is None
+    with zipfile.ZipFile(io.BytesIO(archive.content)) as zf:
+        assert "images/legacy-direct-export.png" in zf.namelist()
+
+
+def test_gallery_direct_export_jobs_count_against_export_capacity(client):
+    _fake_gallery_entry("direct-capacity", "one", "1024x1024", "direct-capacity.png")
+
+    for _ in range(gallery_router.MAX_ACTIVE_EXPORT_JOBS):
+        created = client.post("/api/gallery/direct-export-jobs")
+        assert created.status_code == 202
+
+    blocked = client.post("/api/gallery/export-jobs")
+    assert blocked.status_code == 429
+    assert "Too many active export jobs" in blocked.json()["detail"]
 
 
 def test_gallery_export_job_persists_across_cleared_app_state(client):

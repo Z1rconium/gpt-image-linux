@@ -76,6 +76,9 @@ function operationProgress(progress: number, start = 0, end = 100) {
 function exportJobDetail(job: GalleryExportJobStatus) {
   const labels = get(t).gallery;
   if (job.status === 'success') return labels.exportDownloadReady;
+  if (job.stage === 'streaming') {
+    return labels.exportStreamingArchive(formatBytes(job.bytes_written), formatBytes(job.bytes_total));
+  }
   if (job.stage === 'packing') {
     return labels.exportPackingArchive(formatBytes(job.bytes_written), formatBytes(job.bytes_total));
   }
@@ -108,12 +111,16 @@ function batchToastMessage(action: 'delete' | 'favorite', result: GalleryBatchRe
   return get(t).messages.selectedImagesFavorited(updatedCount, missingCount);
 }
 
-function waitForGalleryExportJob(jobId: string, onJob: (job: GalleryExportJobStatus) => void): Promise<GalleryExportJobStatus> {
+function waitForGalleryExportJob(
+  jobId: string,
+  onJob: (job: GalleryExportJobStatus) => void,
+  eventsUrl = `/api/gallery/export-jobs/${encodeURIComponent(jobId)}/events`
+): Promise<GalleryExportJobStatus> {
   return new Promise((resolve, reject) => {
     let settled = false;
     let source: EventSource | null = null;
     source = openJsonEventSource<GalleryExportJobStatus>(
-      `/api/gallery/export-jobs/${encodeURIComponent(jobId)}/events`,
+      eventsUrl,
       {
         onEvent: ({ data }) => {
           onJob(data);
@@ -416,13 +423,32 @@ export function createGalleryActions(deps: GalleryActionDeps) {
         totalBytes = stats.total_bytes || 0;
       }
       if (totalBytes >= STREAMING_ZIP_DOWNLOAD_BYTES_THRESHOLD) {
+        const job = await apiFetch<GalleryExportJobStatus>(
+          '/api/gallery/direct-export-jobs',
+          { method: 'POST' },
+          'preparing direct gallery export'
+        );
         deps.setOperationStatus({
           kind: 'export',
           label,
-          detail: get(t).gallery.browserSavingDownload,
-          progress: null
+          detail: exportJobDetail(job),
+          progress: operationProgress(job.progress, 0, 100)
         });
-        startNativeDownload('/api/download-all', 'gpt-images.zip');
+        const readyJobPromise = waitForGalleryExportJob(
+          job.job_id,
+          (nextJob) => {
+            deps.setOperationStatus({
+              kind: 'export',
+              label,
+              detail: exportJobDetail(nextJob),
+              progress: operationProgress(nextJob.progress, 0, 100)
+            });
+          },
+          `/api/gallery/direct-export-jobs/${encodeURIComponent(job.job_id)}/events`
+        );
+        const downloadUrl = job.download_url || `/api/download-all?export_job_id=${encodeURIComponent(job.job_id)}`;
+        startNativeDownload(downloadUrl, job.filename || 'gpt-images.zip');
+        await readyJobPromise;
         showToast?.(get(t).messages.exportReady);
         return;
       }

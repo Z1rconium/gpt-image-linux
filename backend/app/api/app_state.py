@@ -180,7 +180,7 @@ async def lifespan(app: FastAPI):
         jobs.run_image_unit_dispatcher(app.state.worker_id)
     )
     app.state.gallery_export_lock = asyncio.Lock()
-    app.state.gallery_job_subscribers = {"export": {}, "sync": {}}
+    app.state.gallery_job_subscribers = {"export": {}, "export_direct": {}, "sync": {}}
     app.state.gallery_job_sse_poller_tasks = {}
     from .routers import gallery as gallery_router
     app.state.gallery_export_dispatcher_task = asyncio.create_task(

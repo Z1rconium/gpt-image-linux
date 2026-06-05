@@ -245,27 +245,137 @@ async def _gallery_zip_response(
     skipped: list[dict] | None = None,
     extra_headers: dict[str, str] | None = None,
     reserve_export_slot: bool = False,
+    direct_export_job: dict | None = None,
+    requested_count: int = 0,
 ) -> StreamingResponse:
-    direct_slot_id: str | None = None
-    if reserve_export_slot:
-        direct_slot_id = await _reserve_gallery_export_direct_slot()
+    cleanup_direct_job = False
+    if direct_export_job:
+        active_direct_job = direct_export_job
+    elif reserve_export_slot:
+        active_direct_job = await _reserve_gallery_export_direct_slot(
+            filename_prefix=filename_prefix,
+            requested_count=requested_count,
+            stage="streaming",
+            message="Streaming direct gallery ZIP download",
+        )
+        cleanup_direct_job = True
+    else:
+        active_direct_job = None
+
+    direct_job_id = str(active_direct_job.get("job_id")) if active_direct_job else None
 
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    filename = f"{filename_prefix}-{timestamp}.zip"
+    filename = str(active_direct_job.get("filename") or "") if active_direct_job else ""
+    if not filename:
+        filename = f"{filename_prefix}-{timestamp}.zip"
     headers = {
         "Content-Disposition": f'attachment; filename="{filename}"',
         "Content-Encoding": "identity",
         "X-Content-Type-Options": "nosniff",
     }
+    if direct_job_id:
+        headers["X-Gallery-Export-Job-Id"] = direct_job_id
     if extra_headers:
         headers.update(extra_headers)
 
+    def progress(updates: dict):
+        if not direct_job_id or not throttler:
+            return
+        force = updates.get("stage") in {"preparing", "streaming"} and (
+            updates.get("progress") in {0, 20, 100}
+            or updates.get("status") in GALLERY_EXPORT_TERMINAL_STATUSES
+        )
+        throttler.emit(
+            {
+                **updates,
+                "filename": filename,
+                "download_url": f"/api/download-all?export_job_id={quote(direct_job_id)}",
+                "lease_expires_at": _direct_export_slot_expires_at(),
+            },
+            force=force,
+        )
+
+    def mark_direct_job(updates: dict) -> None:
+        if direct_job_id:
+            storage.update_gallery_job(direct_job_id, updates)
+
+    throttler = GalleryProgressThrottler(
+        lambda updates: storage.update_gallery_job_progress(direct_job_id, updates)
+    ) if direct_job_id else None
+
     def zip_chunks():
         try:
-            yield from iter_gallery_zip_chunks(entries, skipped=skipped)
+            if direct_job_id:
+                mark_direct_job(
+                    {
+                        "status": "running",
+                        "stage": "preparing",
+                        "message": "Preparing gallery ZIP entries",
+                        "progress": 0,
+                        "filename": filename,
+                        "download_url": f"/api/download-all?export_job_id={quote(direct_job_id)}",
+                        "requested_count": requested_count,
+                        "started_at": utc_now(),
+                        "lease_expires_at": _direct_export_slot_expires_at(),
+                        "error": None,
+                    }
+                )
+            result = yield from iter_gallery_zip_chunks(
+                entries,
+                skipped=skipped,
+                requested_count=requested_count,
+                progress=progress if direct_job_id else None,
+            )
+            if direct_job_id:
+                mark_direct_job(
+                    {
+                        "status": "success",
+                        "stage": "ready",
+                        "message": "ZIP archive streamed",
+                        "progress": 100,
+                        "processed_count": result.requested_count,
+                        "requested_count": result.requested_count,
+                        "exported_count": result.exported_count,
+                        "missing_count": result.missing_count,
+                        "bytes_total": result.bytes_total,
+                        "bytes_written": result.bytes_total,
+                        "completed_at": utc_now(),
+                        "lease_owner": None,
+                        "lease_expires_at": None,
+                        "error": None,
+                    }
+                )
+        except (GeneratorExit, asyncio.CancelledError):
+            if direct_job_id and not cleanup_direct_job:
+                mark_direct_job(
+                    {
+                        "status": "error",
+                        "stage": "error",
+                        "message": "Direct ZIP download interrupted",
+                        "error": "Client disconnected before ZIP streaming completed",
+                        "completed_at": utc_now(),
+                        "lease_owner": None,
+                        "lease_expires_at": None,
+                    }
+                )
+            raise
+        except Exception as e:
+            if direct_job_id and not cleanup_direct_job:
+                mark_direct_job(
+                    {
+                        "status": "error",
+                        "stage": "error",
+                        "message": "Failed to stream ZIP archive",
+                        "error": str(e),
+                        "completed_at": utc_now(),
+                        "lease_owner": None,
+                        "lease_expires_at": None,
+                    }
+                )
+            raise
         finally:
-            if reserve_export_slot:
-                _release_gallery_export_direct_slot(direct_slot_id)
+            if cleanup_direct_job and direct_job_id:
+                _release_gallery_export_direct_slot(direct_job_id)
 
     return StreamingResponse(
         zip_chunks(),
@@ -286,20 +396,39 @@ def _gallery_export_lock() -> asyncio.Lock:
     return app.state.gallery_export_lock
 
 
-def _create_gallery_export_direct_slot() -> dict:
+def _create_gallery_export_direct_slot(
+    *,
+    filename_prefix: str = "gpt-images",
+    requested_count: int = 0,
+    status: str = "running",
+    stage: str = "queued",
+    message: str = "Waiting for direct gallery ZIP download",
+    payload: dict | None = None,
+) -> dict:
+    job_id = f"direct-{os.urandom(16).hex()}"
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    filename = f"{filename_prefix}-{timestamp}.zip"
     now = utc_now()
     return {
-        "job_id": f"direct-{os.urandom(16).hex()}",
+        "job_id": job_id,
         "kind": "export_direct",
-        "status": "running",
-        "stage": "streaming",
-        "message": "Streaming direct gallery ZIP download",
+        "status": status,
+        "stage": stage,
+        "message": message,
         "progress": 0,
+        "filename": filename,
+        "download_url": f"/api/download-all?export_job_id={quote(job_id)}",
+        "requested_count": requested_count,
+        "processed_count": 0,
+        "exported_count": 0,
+        "missing_count": 0,
+        "bytes_total": 0,
+        "bytes_written": 0,
         "created_at": now,
         "started_at": now,
         "updated_at": now,
         "lease_expires_at": _direct_export_slot_expires_at(),
-        "payload": {},
+        "payload": payload or {},
     }
 
 
@@ -308,11 +437,24 @@ def _release_gallery_export_direct_slot(job_id: str | None) -> None:
         storage.delete_gallery_job("export_direct", job_id)
 
 
-async def _reserve_gallery_export_direct_slot() -> str:
+async def _reserve_gallery_export_direct_slot(
+    *,
+    filename_prefix: str = "gpt-images",
+    requested_count: int = 0,
+    stage: str = "queued",
+    message: str = "Waiting for direct gallery ZIP download",
+    payload: dict | None = None,
+) -> dict:
     async with _gallery_export_lock():
         slot = await asyncio.to_thread(
             storage.reserve_gallery_job_capacity,
-            job=_create_gallery_export_direct_slot(),
+            job=_create_gallery_export_direct_slot(
+                filename_prefix=filename_prefix,
+                requested_count=requested_count,
+                stage=stage,
+                message=message,
+                payload=payload,
+            ),
             counted_kinds=("export", "export_direct"),
             max_active=MAX_ACTIVE_EXPORT_JOBS,
         )
@@ -327,7 +469,7 @@ async def _reserve_gallery_export_direct_slot() -> str:
                 detail=f"Too many active export jobs ({active_count}). "
                 "Please wait for existing exports to complete.",
             )
-        return str(slot["job_id"])
+        return slot
 
 
 def _gallery_export_payload(job: dict) -> dict:
@@ -1063,6 +1205,11 @@ async def gc_gallery_export_jobs(worker_id: str) -> None:
                     "sync",
                     SYNC_JOB_TTL_SECONDS,
                 )
+                stale_direct_exports = await asyncio.to_thread(
+                    storage.cleanup_stale_gallery_jobs,
+                    "export_direct",
+                    EXPORT_JOB_TTL_SECONDS,
+                )
                 expired_direct_slots = await asyncio.to_thread(
                     storage.cleanup_expired_gallery_jobs,
                     "export_direct",
@@ -1071,11 +1218,12 @@ async def gc_gallery_export_jobs(worker_id: str) -> None:
                     path = job.get("path")
                     if path:
                         Path(str(path)).unlink(missing_ok=True)
-                if stale_exports or stale_syncs or expired_direct_slots:
+                if stale_exports or stale_syncs or stale_direct_exports or expired_direct_slots:
                     logger.info(
-                        "GC cleaned up %d gallery export job(s), %d sync job(s), and %d direct export slot(s)",
+                        "GC cleaned up %d gallery export job(s), %d sync job(s), %d completed direct export job(s), and %d direct export slot(s)",
                         len(stale_exports),
                         len(stale_syncs),
+                        len(stale_direct_exports),
                         len(expired_direct_slots),
                     )
                 exports_dir = Path(config.DATA_DIR) / "exports"
@@ -1224,7 +1372,32 @@ async def download_gallery_batch(req: GalleryBatchRequest):
             "X-Gallery-Missing-Count": str(len(skipped_entries)),
         },
         reserve_export_slot=True,
+        requested_count=len(req.ids),
     )
+
+
+@router.post("/api/gallery/direct-export-jobs", response_model=GalleryExportJobStatus, status_code=202)
+async def create_gallery_direct_export_job():
+    gallery_count = await asyncio.to_thread(storage.get_gallery_count)
+    if gallery_count == 0:
+        raise HTTPException(status_code=404, detail="No images in gallery")
+
+    job = await _reserve_gallery_export_direct_slot(
+        filename_prefix="gpt-images",
+        requested_count=gallery_count,
+        stage="queued",
+        message="Waiting for direct gallery ZIP download",
+        payload={"ids": None, "filename_prefix": "gpt-images"},
+    )
+    return GalleryExportJobStatus(**_gallery_export_payload(job))
+
+
+@router.get("/api/gallery/direct-export-jobs/{job_id}", response_model=GalleryExportJobStatus)
+async def get_gallery_direct_export_job(job_id: str):
+    job = await asyncio.to_thread(storage.get_gallery_job, "export_direct", job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Direct gallery export job not found")
+    return GalleryExportJobStatus(**_gallery_export_payload(job))
 
 
 @router.post("/api/gallery/export-jobs", response_model=GalleryExportJobStatus, status_code=202)
@@ -1364,6 +1537,19 @@ async def stream_gallery_export_job(job_id: str, request: Request):
         terminal_statuses=GALLERY_EXPORT_TERMINAL_STATUSES,
         payload_builder=_gallery_export_payload,
         not_found_detail="Gallery export job not found",
+    )
+
+
+@router.get("/api/gallery/direct-export-jobs/{job_id}/events")
+async def stream_gallery_direct_export_job(job_id: str, request: Request):
+    return await _stream_gallery_job(
+        kind="export_direct",
+        job_id=job_id,
+        request=request,
+        event_name="export",
+        terminal_statuses=GALLERY_EXPORT_TERMINAL_STATUSES,
+        payload_builder=_gallery_export_payload,
+        not_found_detail="Direct gallery export job not found",
     )
 
 
@@ -1563,15 +1749,60 @@ async def download_image(filename: str):
 
 
 @router.get("/api/download-all")
-async def download_all_images():
+async def download_all_images(export_job_id: str | None = Query(default=None)):
     gallery_count = await asyncio.to_thread(storage.get_gallery_count)
+    direct_job = None
+    if export_job_id:
+        direct_job = await asyncio.to_thread(
+            storage.get_gallery_job,
+            "export_direct",
+            export_job_id,
+        )
+        if not direct_job:
+            raise HTTPException(status_code=404, detail="Direct gallery export job not found")
+        if direct_job.get("status") != "running" or direct_job.get("stage") != "queued":
+            raise HTTPException(status_code=409, detail="Direct gallery export job is already active or finished")
+
     if gallery_count == 0:
+        if direct_job:
+            await asyncio.to_thread(
+                storage.update_gallery_job,
+                export_job_id,
+                {
+                    "status": "error",
+                    "stage": "error",
+                    "message": "No images in gallery",
+                    "error": "No images in gallery",
+                    "completed_at": utc_now(),
+                    "lease_owner": None,
+                    "lease_expires_at": None,
+                },
+            )
         raise HTTPException(status_code=404, detail="No images in gallery")
+
+    if direct_job:
+        updated_direct_job = await asyncio.to_thread(
+            storage.update_gallery_job,
+            export_job_id,
+            {
+                "status": "running",
+                "stage": "preparing",
+                "message": "Preparing gallery ZIP entries",
+                "progress": 0,
+                "requested_count": gallery_count,
+                "started_at": utc_now(),
+                "lease_expires_at": _direct_export_slot_expires_at(),
+                "error": None,
+            },
+        )
+        direct_job = updated_direct_job or direct_job
 
     return await _gallery_zip_response(
         storage.iter_gallery_export_rows(),
         "gpt-images",
-        reserve_export_slot=True,
+        reserve_export_slot=not bool(direct_job),
+        direct_export_job=direct_job,
+        requested_count=gallery_count,
     )
 
 
