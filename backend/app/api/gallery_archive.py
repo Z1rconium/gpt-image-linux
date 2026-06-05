@@ -1,4 +1,3 @@
-import hashlib
 import json
 import os
 import re
@@ -41,14 +40,6 @@ def import_archive_max_bytes() -> int:
 
 def import_max_uncompressed_bytes() -> int:
     return config.IMPORT_MAX_UNCOMPRESSED_MB * 1024 * 1024
-
-
-def file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 _GALLERY_ENTRY_EXPORT_FIELDS = tuple(
@@ -105,35 +96,6 @@ def _resolve_export_metadata_for_entry(
 
     data["bytes"] = stat.st_size
     return data
-
-
-def build_gallery_export_metadata(
-    entries: Iterable[GalleryEntry | dict[str, Any]],
-    skipped: Iterable[dict[str, Any]] | None = None,
-) -> dict:
-    exported_at = utc_now()
-    images: list[dict[str, Any]] = []
-    for entry in entries:
-        path = storage.safe_image_path(_entry_filename(entry))
-        if path and path.exists():
-            data = _resolve_export_metadata_for_entry(entry, path)
-        else:
-            data = _entry_to_dict(entry)
-        images.append(data)
-
-    metadata = {
-        "schema_version": 1,
-        "exported_at": exported_at,
-        "app": {
-            "name": "gpt-image-linux",
-            "version": config.read_app_version(),
-        },
-        "images": images,
-    }
-    skipped_entries = list(skipped or [])
-    if skipped_entries:
-        metadata["skipped"] = skipped_entries
-    return metadata
 
 
 def unique_export_name(path: Path, used_names: set[str]) -> str:

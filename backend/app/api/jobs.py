@@ -332,31 +332,11 @@ def kick_image_unit_dispatcher():
         event.set()
 
 
-def count_active_jobs() -> int:
-    jobs = app.state.generate_jobs or {}
-    return sum(
-        1
-        for job in jobs.values()
-        if job.get("status") in ACTIVE_GENERATE_JOB_STATUSES
-    )
-
-
 def request_image_units(req: GenerateRequest | EditRequest) -> int:
     try:
         return max(1, int(req.n or 1))
     except (TypeError, ValueError):
         return 1
-
-
-def job_image_units(job: dict) -> int:
-    try:
-        return max(1, int(job.get("image_units") or job.get("n") or 1))
-    except (TypeError, ValueError):
-        return 1
-
-
-def count_active_job_units() -> int:
-    return storage.count_active_image_job_units()
 
 
 def snapshot_queue_metrics() -> dict[str, int]:
@@ -394,17 +374,6 @@ def snapshot_queue_metrics() -> dict[str, int]:
             counts[f"image_jobs.{operation}.{status}.current"] += 1
 
     return counts
-
-
-def track_generate_job_task(job_id: str, task: asyncio.Task):
-    tasks = get_generate_job_tasks()
-    tasks[job_id] = task
-    task.add_done_callback(
-        lambda _task, tracked_job_id=job_id: get_generate_job_tasks().pop(
-            tracked_job_id,
-            None,
-        )
-    )
 
 
 def build_pending_job(

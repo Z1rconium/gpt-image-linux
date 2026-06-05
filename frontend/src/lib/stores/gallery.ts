@@ -4,7 +4,6 @@ import { t } from '$lib/i18n';
 import { confirmStore } from '$lib/stores/confirm';
 import { createGalleryActions } from '$lib/stores/galleryActions';
 import type { ToastOptions, ToastVariant } from '$lib/stores/ui';
-import { formatBytes } from '$lib/utils/format';
 import type { GalleryEntry, GalleryResponse } from '$lib/api/types';
 
 export type GalleryFilters = {
@@ -77,7 +76,6 @@ function createGalleryStore() {
   let filterTimer: ReturnType<typeof setTimeout> | null = null;
   let requestSeq = 0;
   let abortController: AbortController | null = null;
-  let pendingRequestKey = '';
   const pendingSingleDeletes = new Map<string, { image: GalleryEntry; timer: ReturnType<typeof setTimeout> }>();
 
   subscribe((value) => {
@@ -132,7 +130,6 @@ function createGalleryStore() {
     const params = buildGalleryParams(page, filters, includeTotalBytes);
     const requestKey = params.toString();
     const seq = ++requestSeq;
-    pendingRequestKey = requestKey;
     abortController?.abort();
     abortController = new AbortController();
     update((current) => ({ ...current, loading: true, page }));
@@ -160,7 +157,6 @@ function createGalleryStore() {
     } finally {
       if (seq === requestSeq) {
         abortController = null;
-        pendingRequestKey = '';
         update((current) => ({ ...current, loading: false }));
       }
     }
@@ -316,7 +312,6 @@ function createGalleryStore() {
     requestSeq += 1;
     abortController?.abort();
     abortController = null;
-    pendingRequestKey = '';
     setOperationStatus(null);
   }
 

@@ -1,5 +1,4 @@
 import type { GenerateJobStatus } from '$lib/api/types';
-import type { GalleryEntry } from '$lib/api/types';
 import { isFailureJobStatus } from '$lib/utils/jobs';
 
 export function imageUrl(filename: string) {
