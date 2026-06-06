@@ -258,6 +258,11 @@ function json(body: unknown, status = 200) {
   };
 }
 
+function galleryCursor(image: GalleryImageFixture | undefined) {
+  if (!image) return null;
+  return Buffer.from(JSON.stringify({ sort_seq: 1, id: image.id }), 'utf8').toString('base64url');
+}
+
 function galleryResponse(images = baseGalleryImages, includeTotalBytes = false, requestedPage = 1) {
   const pageSize = 9;
   const totalPages = Math.max(Math.ceil(images.length / pageSize), 1);
@@ -273,6 +278,8 @@ function galleryResponse(images = baseGalleryImages, includeTotalBytes = false, 
     total_pages: totalPages,
     has_prev: page > 1,
     has_next: page < totalPages,
+    next_cursor: page < totalPages ? galleryCursor(pageImages[pageImages.length - 1]) : null,
+    prev_cursor: page > 1 ? galleryCursor(pageImages[0]) : null,
     images: pageImages,
     filter_options: {
       models: ['gpt-image-2'],
@@ -1058,7 +1065,13 @@ test('lightbox navigates images across gallery pages', async ({ page }) => {
   await expect(lightbox).toContainText('paged-img-9.png');
   const nextPageRequest = page.waitForRequest((request) => {
     const url = new URL(request.url());
-    return request.method() === 'GET' && url.pathname === '/api/gallery' && url.searchParams.get('page') === '2';
+    return (
+      request.method() === 'GET' &&
+      url.pathname === '/api/gallery' &&
+      url.searchParams.get('page') === '2' &&
+      url.searchParams.get('direction') === 'next' &&
+      Boolean(url.searchParams.get('cursor'))
+    );
   });
   await page.keyboard.press('ArrowRight');
   await nextPageRequest;
@@ -1206,7 +1219,12 @@ test('gallery page input jumps to the requested page on Enter', async ({ page })
 
   const nextPageRequest = page.waitForRequest((request) => {
     const url = new URL(request.url());
-    return request.method() === 'GET' && url.pathname === '/api/gallery' && url.searchParams.get('page') === '2';
+    return (
+      request.method() === 'GET' &&
+      url.pathname === '/api/gallery' &&
+      url.searchParams.get('page') === '2' &&
+      !url.searchParams.has('cursor')
+    );
   });
   await pageInput.fill('2');
   await pageInput.press('Enter');

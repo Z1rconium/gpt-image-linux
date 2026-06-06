@@ -94,7 +94,7 @@
         <div class="flex h-full min-h-0 w-full flex-col">
           <div class="flex min-h-0 flex-1 items-center justify-center">
             <img
-              src={imageUrl(image.filename)}
+              src={imageUrl(image.filename, image.image_url)}
               alt={image.prompt}
               class="lightbox-img"
               decoding="async"

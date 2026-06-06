@@ -214,7 +214,7 @@
 
     lightboxNavigating = true;
     try {
-      await galleryStore.loadGallery(nextPage);
+      await galleryStore.loadGallery(nextPage, false, direction > 0 ? 'next' : 'prev');
       const nextImages = $galleryStore.gallery?.images || [];
       const nextImage = direction < 0 ? nextImages[nextImages.length - 1] : nextImages[0];
       if (nextImage) {
@@ -546,7 +546,7 @@
 
   function prepareGalleryImageForEdit(image: GalleryEntry) {
     const nextLabel = $t.messages.galleryEditLabel(image.filename);
-    if (!editSourceStore.setGallerySource(image.id, nextLabel, imageUrl(image.filename), nextLabel, previewStore.setError)) {
+    if (!editSourceStore.setGallerySource(image.id, nextLabel, imageUrl(image.filename, image.image_url), nextLabel, previewStore.setError)) {
       showToast($t.messages.editSourceLimit(MAX_EDIT_SOURCE_IMAGES), 'error');
       return;
     }
@@ -662,7 +662,7 @@
   }
 
   async function copyImageUrl(image: GalleryEntry) {
-    await copyText(new URL(imageUrl(image.filename), window.location.origin).href);
+    await copyText(new URL(imageUrl(image.filename, image.image_url), window.location.origin).href);
     showToast($t.messages.imageUrlCopied);
   }
 

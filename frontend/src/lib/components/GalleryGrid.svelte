@@ -11,7 +11,7 @@
   export let canSyncR2 = false;
   export let onFilter: (key: keyof GalleryFilters, value: string | boolean) => void = () => {};
   export let onResetFilters: () => void = () => {};
-  export let onPage: (page: number) => void = () => {};
+  export let onPage: (page: number, direction?: 'next' | 'prev' | 'jump') => void = () => {};
   export let onLoadStats: () => void = () => {};
   export let onFavorite: (image: GalleryEntry) => void = () => {};
   export let onDelete: (image: GalleryEntry) => void = () => {};
@@ -108,7 +108,16 @@
 
   function thumbnailSrcset(image: GalleryEntry) {
     const fullWidth = image.image_width && image.image_width > 512 ? image.image_width : 1024;
-    return `${thumbnailUrl(image.filename, image.thumbnail_url)} 512w, ${imageUrl(image.filename)} ${fullWidth}w`;
+    return `${thumbnailUrl(image.filename, image.thumbnail_url)} 512w, ${imageUrl(image.filename, image.image_url)} ${fullWidth}w`;
+  }
+
+  function handleThumbnailError(event: Event, image: GalleryEntry) {
+    const img = event.currentTarget as HTMLImageElement;
+    const fallback = imageUrl(image.filename, image.image_url);
+    if (img.dataset.fallbackSrc === fallback) return;
+    img.dataset.fallbackSrc = fallback;
+    img.srcset = '';
+    img.src = fallback;
   }
 </script>
 
@@ -296,6 +305,7 @@
                   decoding="async"
                   width={image.image_width || undefined}
                   height={image.image_height || undefined}
+                  on:error={(event) => handleThumbnailError(event, image)}
                 />
               </picture>
             </button>
@@ -319,7 +329,7 @@
     </div>
 
     <div class="mt-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-      <button type="button" disabled={loading || !gallery?.has_prev} class="control-focus rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40" on:click={() => onPage(clampPage(currentPage - 1))}>
+      <button type="button" disabled={loading || !gallery?.has_prev} class="control-focus rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40" on:click={() => onPage(clampPage(currentPage - 1), 'prev')}>
         {$t.gallery.previous}
       </button>
       <label class="flex items-center justify-center gap-2 text-xs text-zinc-500">
@@ -339,7 +349,7 @@
         />
         <span>{$t.gallery.pageInputSuffix(totalPages)}</span>
       </label>
-      <button type="button" disabled={loading || !gallery?.has_next} class="control-focus rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40" on:click={() => onPage(clampPage(currentPage + 1))}>
+      <button type="button" disabled={loading || !gallery?.has_next} class="control-focus rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40" on:click={() => onPage(clampPage(currentPage + 1), 'next')}>
         {$t.gallery.next}
       </button>
     </div>

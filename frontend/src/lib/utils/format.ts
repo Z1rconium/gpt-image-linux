@@ -1,12 +1,19 @@
 import type { GenerateJobStatus } from '$lib/api/types';
 import { isFailureJobStatus } from '$lib/utils/jobs';
 
-export function imageUrl(filename: string) {
+function safeAssetUrl(url?: string | null) {
+  if (!url) return null;
+  return url.startsWith('/api/') || /^https?:\/\//.test(url) ? url : null;
+}
+
+export function imageUrl(filename: string, url?: string | null) {
+  const safeUrl = safeAssetUrl(url);
+  if (safeUrl) return safeUrl;
   return `/api/image/${encodeURIComponent(filename)}`;
 }
 
 export function thumbnailUrl(filename: string, url?: string | null) {
-  const safeUrl = url && url.startsWith('/api/') ? url : null;
+  const safeUrl = safeAssetUrl(url);
   return safeUrl || `/api/thumb/${encodeURIComponent(filename)}`;
 }
 

@@ -6,13 +6,13 @@ import { confirmStore } from '$lib/stores/confirm';
 import type { ToastOptions, ToastVariant } from '$lib/stores/ui';
 import { formatBytes } from '$lib/utils/format';
 import type { GalleryBatchResponse, GalleryExportJobStatus, GalleryResponse, GallerySyncJobStatus } from '$lib/api/types';
-import type { GalleryOperationStatus, GalleryState } from '$lib/stores/gallery';
+import type { GalleryNavigation, GalleryOperationStatus, GalleryState } from '$lib/stores/gallery';
 
 const STREAMING_ZIP_DOWNLOAD_BYTES_THRESHOLD = 64 * 1024 * 1024;
 
 type GalleryActionDeps = {
   getState: () => GalleryState;
-  loadGallery: (page?: number, includeTotalBytes?: boolean) => Promise<void>;
+  loadGallery: (page?: number, includeTotalBytes?: boolean | GalleryNavigation, navigation?: GalleryNavigation) => Promise<void>;
   clearSelection: () => void;
   setOperationStatus: (operationStatus: GalleryOperationStatus | null) => void;
   clearPendingSingleDeletes: () => void;

@@ -5,6 +5,7 @@ import logging
 import mimetypes
 import os
 import time
+import uuid
 from collections.abc import Iterable, Iterator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -66,6 +67,8 @@ SCHEDULED_R2_SYNC_DISABLED_POLL_SECONDS = 60
 GALLERY_JOB_LEASE_SECONDS = 300
 GALLERY_JOB_DISPATCH_INTERVAL_SECONDS = 0.5
 GALLERY_JOB_DISPATCH_MAX_IDLE_BACKOFF_SECONDS = 5.0
+THUMBNAIL_DISPATCH_INTERVAL_SECONDS = 1.0
+THUMBNAIL_DISPATCH_MAX_IDLE_BACKOFF_SECONDS = 5.0
 BACKGROUND_TASK_LEASE_SECONDS = 120
 GALLERY_PROGRESS_MIN_INTERVAL_SECONDS = 0.5
 GALLERY_PROGRESS_MIN_ITEMS = 50
@@ -1062,6 +1065,88 @@ async def run_gallery_sync_dispatcher(worker_id: str) -> None:
     await _run_gallery_job_dispatcher("sync", worker_id, MAX_ACTIVE_SYNC_JOBS)
 
 
+def get_thumbnail_dispatcher_kick_event() -> asyncio.Event:
+    event = getattr(app.state, "thumbnail_dispatcher_kick", None)
+    if event is None:
+        event = asyncio.Event()
+        app.state.thumbnail_dispatcher_kick = event
+    return event
+
+
+def kick_thumbnail_dispatcher() -> None:
+    task = getattr(app.state, "thumbnail_dispatcher_task", None)
+    if task and not task.done():
+        get_thumbnail_dispatcher_kick_event().set()
+        return
+    worker_id = getattr(app.state, "worker_id", f"{os.getpid()}-{id(app)}")
+    app.state.thumbnail_dispatcher_task = asyncio.create_task(
+        run_thumbnail_dispatcher(worker_id)
+    )
+
+
+async def _wait_for_thumbnail_dispatcher_wakeup(delay: float) -> None:
+    event = get_thumbnail_dispatcher_kick_event()
+    try:
+        await asyncio.wait_for(event.wait(), timeout=delay)
+    except asyncio.TimeoutError:
+        return
+    finally:
+        event.clear()
+
+
+def _thumbnail_job_lease_expires_at() -> str:
+    return (
+        datetime.now(timezone.utc)
+        + timedelta(seconds=storage.THUMBNAIL_JOB_LEASE_SECONDS)
+    ).isoformat()
+
+
+async def run_thumbnail_dispatcher(worker_id: str) -> None:
+    logger.info("Thumbnail dispatcher started: worker_id=%s", worker_id)
+    idle_delay = THUMBNAIL_DISPATCH_INTERVAL_SECONDS
+    while True:
+        try:
+            owner = f"thumbnail:{worker_id}:{uuid.uuid4()}"
+            job = await asyncio.to_thread(
+                storage.claim_next_thumbnail_job,
+                owner=owner,
+                lease_expires_at=_thumbnail_job_lease_expires_at(),
+                now=utc_now(),
+            )
+            if not job:
+                idle_delay = min(
+                    THUMBNAIL_DISPATCH_MAX_IDLE_BACKOFF_SECONDS,
+                    max(THUMBNAIL_DISPATCH_INTERVAL_SECONDS, idle_delay * 2),
+                )
+                await _wait_for_thumbnail_dispatcher_wakeup(idle_delay)
+                continue
+
+            idle_delay = THUMBNAIL_DISPATCH_INTERVAL_SECONDS
+            filename = str(job.get("filename") or "")
+            thumbnail_filename = await asyncio.to_thread(
+                storage.generate_thumbnail_for_image,
+                filename,
+            )
+            if thumbnail_filename:
+                await asyncio.to_thread(
+                    storage.complete_thumbnail_job,
+                    filename,
+                    owner=owner,
+                )
+            else:
+                await asyncio.to_thread(
+                    storage.fail_thumbnail_job,
+                    filename,
+                    owner=owner,
+                    error="thumbnail generation returned no file",
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("Thumbnail dispatcher error", exc_info=True)
+            await asyncio.sleep(THUMBNAIL_DISPATCH_INTERVAL_SECONDS)
+
+
 def kick_gallery_job_dispatchers() -> None:
     for name, starter in (
         ("gallery_export_dispatcher_task", run_gallery_export_dispatcher),
@@ -1257,6 +1342,8 @@ async def get_gallery_handler(
     date_to: str | None = Query(default=None),
     favorite: bool | None = Query(default=None),
     include_total_bytes: bool = Query(default=False),
+    cursor: str | None = Query(default=None, max_length=512),
+    direction: str = Query(default="next"),
 ):
     filters = build_gallery_filters(
         prompt=prompt,
@@ -1268,13 +1355,18 @@ async def get_gallery_handler(
         favorite=favorite,
     )
     started_at = time.perf_counter()
-    gallery_page = await asyncio.to_thread(
-        storage.get_gallery_page,
-        page=page,
-        page_size=page_size,
-        filters=filters,
-        include_total_bytes=include_total_bytes,
-    )
+    try:
+        gallery_page = await asyncio.to_thread(
+            storage.get_gallery_page,
+            page=page,
+            page_size=page_size,
+            filters=filters,
+            include_total_bytes=include_total_bytes,
+            cursor=cursor,
+            direction=direction,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     elapsed_ms = (time.perf_counter() - started_at) * 1000
     metrics.increment("gallery.requests")
     metrics.observe_ms("gallery.request", elapsed_ms)
@@ -1300,6 +1392,8 @@ async def get_gallery_handler(
         total_pages=gallery_page.total_pages,
         has_prev=gallery_page.has_prev,
         has_next=gallery_page.has_next,
+        next_cursor=gallery_page.next_cursor,
+        prev_cursor=gallery_page.prev_cursor,
         images=gallery_page.images,
         filter_options=gallery_page.filter_options,
     )
@@ -1727,7 +1821,12 @@ async def serve_thumbnail(filename: str):
         filename,
     )
     if not path:
-        raise HTTPException(status_code=404, detail="Thumbnail not found")
+        kick_thumbnail_dispatcher()
+        raise HTTPException(
+            status_code=404,
+            detail="Thumbnail not found",
+            headers={"Cache-Control": "no-cache"},
+        )
 
     if config.ENABLE_NGINX_ACCEL_REDIRECT:
         return _x_accel_response(

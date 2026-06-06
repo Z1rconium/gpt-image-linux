@@ -259,6 +259,7 @@ export type GalleryEntry = {
   prompt: string;
   size: string;
   filename: string;
+  image_url?: string | null;
   thumbnail_filename?: string | null;
   thumbnail_url?: string | null;
   created_at: string;
@@ -286,6 +287,8 @@ export type GalleryResponse = {
   total_pages: number;
   has_prev: boolean;
   has_next: boolean;
+  next_cursor?: string | null;
+  prev_cursor?: string | null;
   images: GalleryEntry[];
   filter_options: {
     models: string[];

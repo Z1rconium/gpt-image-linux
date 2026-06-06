@@ -62,6 +62,8 @@ OVERALL_CONFIG_REGISTRY: tuple[OverallConfigSpec, ...] = (
     _spec("ENABLE_METRICS", "bool", "false", "Observability", "Enable /api/metrics."),
     _spec("SLOW_GALLERY_QUERY_MS", "float", "200", "Observability", "Slow gallery query log threshold.", min_value=1),
     _spec("ENABLE_NGINX_ACCEL_REDIRECT", "bool", "false", "Observability", "Return X-Accel-Redirect for authorized image files when an nginx internal alias is in front.", restart_required=True),
+    _spec("PUBLIC_IMAGE_BASE_URL", "string", "", "Observability", "Optional public/CDN base URL for gallery image bytes.", restart_required=True),
+    _spec("PUBLIC_THUMBNAIL_BASE_URL", "string", "", "Observability", "Optional public/CDN base URL for generated gallery thumbnail bytes.", restart_required=True),
     _spec("GRANIAN_WORKERS", "int", "1", "Granian Runtime", "Granian worker process count; keep at or below MAX_ACTIVE_GENERATE_JOBS for generation throughput.", restart_required=True, min_value=1),
     _spec("GRANIAN_RUNTIME_THREADS", "int", "2", "Granian Runtime", "Rust runtime threads per worker; try 1 when using multiple workers behind nginx/HTTP/1.", restart_required=True, min_value=1),
     _spec("GRANIAN_LOOP", "string", "uvloop", "Granian Runtime", "Granian event loop implementation.", restart_required=True),

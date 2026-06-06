@@ -1,4 +1,6 @@
 import asyncio
+import base64
+import binascii
 import hashlib
 import json
 import logging
@@ -14,6 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Sequence
+from urllib.parse import quote
 
 from ..core import settings as config
 from ..core.api_paths import default_model_for_api_path, normalize_api_preset
@@ -103,6 +106,8 @@ __all__ = [
     "get_gallery_filter_options",
     "is_gallery_filename_referenced",
     "get_gallery_page",
+    "decode_gallery_cursor",
+    "encode_gallery_cursor",
     "get_gallery_total_bytes",
     "get_runtime_coordination_metrics",
     "create_gallery_job",
@@ -155,6 +160,8 @@ __all__ = [
     "release_edit_source_reservation",
     "release_sse_slot",
     "release_background_slot",
+    "claim_next_thumbnail_job",
+    "complete_thumbnail_job",
     "create_prompt_snippet",
     "delete_prompt_snippet",
     "safe_image_path",
@@ -165,6 +172,12 @@ __all__ = [
     "save_settings",
     "sync_overall_config_env_values",
     "invalidate_thumbnail_cache",
+    "enqueue_thumbnail_job",
+    "fail_thumbnail_job",
+    "generate_thumbnail_for_image",
+    "get_pending_thumbnail_job_count",
+    "image_url_for_filename",
+    "rebuild_gallery_filter_options",
     "sync_gallery_with_image_files",
     "trim_generate_jobs",
     "update_gallery_entries_favorite",
@@ -328,6 +341,8 @@ GALLERY_FTS_MIN_QUERY_LENGTH = 3
 GALLERY_TOTAL_BYTES_CACHE_SECONDS = 2.0
 _GALLERY_BYTES_CACHE_MAX_SIZE = 512
 THUMBNAIL_CPU_SLOT_LEASE_SECONDS = 600
+THUMBNAIL_JOB_LEASE_SECONDS = 600
+THUMBNAIL_JOB_MAX_ATTEMPTS = 3
 WORKER_METRIC_SNAPSHOT_TTL_SECONDS = 300
 
 _db_initialized = False
@@ -445,6 +460,8 @@ class GalleryPage:
     total_pages: int
     has_prev: bool
     has_next: bool
+    next_cursor: str | None
+    prev_cursor: str | None
     images: list[GalleryEntry]
     filter_options: GalleryFilterOptions
     query_elapsed_ms: float = 0.0
@@ -897,6 +914,12 @@ def _ensure_database():
                     value TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    applied_at TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS api_presets (
                     id TEXT PRIMARY KEY,
                     name TEXT NOT NULL,
@@ -937,6 +960,28 @@ def _ensure_database():
 
                 CREATE INDEX IF NOT EXISTS idx_gallery_entries_filename
                     ON gallery_entries(filename);
+
+                CREATE TABLE IF NOT EXISTS gallery_filter_options (
+                    kind TEXT NOT NULL,
+                    value TEXT NOT NULL,
+                    ref_count INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(kind, value)
+                );
+
+                CREATE TABLE IF NOT EXISTS thumbnail_jobs (
+                    filename TEXT PRIMARY KEY,
+                    status TEXT NOT NULL,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    lease_owner TEXT,
+                    lease_expires_at TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    error TEXT
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_thumbnail_jobs_claim
+                    ON thumbnail_jobs(status, lease_expires_at, created_at);
 
                 CREATE TABLE IF NOT EXISTS r2_sync_state (
                     filename TEXT PRIMARY KEY,
@@ -1133,6 +1178,7 @@ def _ensure_database():
             _migrate_gallery_schema(conn)
             _migrate_generate_jobs_schema(conn)
             _migrate_prompt_snippets_schema(conn)
+            _run_schema_migrations(conn)
             _ensure_gallery_fts(conn)
             conn.commit()
 
@@ -1143,6 +1189,110 @@ def _ensure_database():
 def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
     return {row["name"] for row in rows}
+
+
+def _migration_baseline_legacy_schema(conn: sqlite3.Connection):
+    # v1 marks databases that already passed the historical inline schema setup.
+    return
+
+
+def _migration_gallery_filter_options(conn: sqlite3.Connection):
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS gallery_filter_options (
+            kind TEXT NOT NULL,
+            value TEXT NOT NULL,
+            ref_count INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(kind, value)
+        )
+        """
+    )
+    _rebuild_gallery_filter_options_on_conn(conn)
+
+
+def _migration_thumbnail_jobs(conn: sqlite3.Connection):
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS thumbnail_jobs (
+            filename TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            lease_owner TEXT,
+            lease_expires_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            error TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_thumbnail_jobs_claim
+            ON thumbnail_jobs(status, lease_expires_at, created_at)
+        """
+    )
+
+
+def _migration_gallery_keyset_index(conn: sqlite3.Connection):
+    conn.execute(
+        """
+        UPDATE gallery_entries
+        SET sort_seq = rowid
+        WHERE sort_seq IS NULL
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_gallery_entries_sort_seq_id
+            ON gallery_entries(sort_seq DESC, id DESC)
+        """
+    )
+
+
+SCHEMA_MIGRATIONS = (
+    (1, "baseline_legacy_schema", _migration_baseline_legacy_schema),
+    (2, "gallery_filter_options", _migration_gallery_filter_options),
+    (3, "thumbnail_jobs", _migration_thumbnail_jobs),
+    (4, "gallery_keyset_index", _migration_gallery_keyset_index),
+)
+
+
+def _run_schema_migrations(conn: sqlite3.Connection):
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+            version INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            applied_at TEXT NOT NULL
+        )
+        """
+    )
+    rows = conn.execute("SELECT version FROM schema_migrations").fetchall()
+    applied_versions = {int(row["version"]) for row in rows}
+    now = utc_now()
+
+    if not applied_versions:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO schema_migrations (version, name, applied_at)
+            VALUES (?, ?, ?)
+            """,
+            (1, "baseline_legacy_schema", now),
+        )
+        applied_versions.add(1)
+
+    for version, name, migration in SCHEMA_MIGRATIONS:
+        if version in applied_versions:
+            continue
+        migration(conn)
+        conn.execute(
+            """
+            INSERT INTO schema_migrations (version, name, applied_at)
+            VALUES (?, ?, ?)
+            """,
+            (version, name, utc_now()),
+        )
 
 
 def _migrate_gallery_schema(conn: sqlite3.Connection):
@@ -1177,6 +1327,12 @@ def _migrate_gallery_schema(conn: sqlite3.Connection):
         """
         CREATE INDEX IF NOT EXISTS idx_gallery_entries_sort_seq
             ON gallery_entries(sort_seq DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_gallery_entries_sort_seq_id
+            ON gallery_entries(sort_seq DESC, id DESC)
         """
     )
     if "favorite" in _table_columns(conn, "gallery_entries"):
@@ -1997,8 +2153,92 @@ def _like_prompt_snippet_query(value: str) -> str:
     return f"%{escaped}%"
 
 
+def _public_file_url(base_url: str, filename: str) -> str:
+    return f"{base_url.rstrip('/')}/{quote(filename, safe='')}"
+
+
+def image_url_for_filename(filename: str) -> str | None:
+    if not safe_image_path(filename):
+        return None
+    if config.PUBLIC_IMAGE_BASE_URL:
+        return _public_file_url(config.PUBLIC_IMAGE_BASE_URL, filename)
+    return f"/api/image/{quote(filename, safe='')}"
+
+
 def _generate_prompt_snippet_id() -> str:
     return f"ps_{secrets.token_urlsafe(12)}"
+
+
+GALLERY_FILTER_OPTION_FIELDS = (
+    ("model", "model"),
+    ("preset", "api_preset_name"),
+    ("size", "size"),
+)
+
+
+def _filter_option_values_from_mapping(
+    mapping: dict[str, Any] | sqlite3.Row,
+) -> list[tuple[str, str]]:
+    values: list[tuple[str, str]] = []
+    for kind, column in GALLERY_FILTER_OPTION_FIELDS:
+        value = str(
+            mapping[column]
+            if isinstance(mapping, sqlite3.Row)
+            else mapping.get(column) or ""
+        ).strip()
+        if value:
+            values.append((kind, value))
+    return values
+
+
+def _increment_gallery_filter_options_on_conn(
+    conn: sqlite3.Connection,
+    mapping: dict[str, Any] | sqlite3.Row,
+    delta: int,
+):
+    values = _filter_option_values_from_mapping(mapping)
+    if not values:
+        return
+
+    now = utc_now()
+    for kind, value in values:
+        conn.execute(
+            """
+            INSERT INTO gallery_filter_options (kind, value, ref_count, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(kind, value) DO UPDATE SET
+                ref_count = ref_count + excluded.ref_count,
+                updated_at = excluded.updated_at
+            """,
+            (kind, value, delta, now),
+        )
+    conn.execute("DELETE FROM gallery_filter_options WHERE ref_count <= 0")
+    _invalidate_filter_options_cache()
+
+
+def _rebuild_gallery_filter_options_on_conn(conn: sqlite3.Connection):
+    conn.execute("DELETE FROM gallery_filter_options")
+    now = utc_now()
+    for kind, column in GALLERY_FILTER_OPTION_FIELDS:
+        conn.execute(
+            f"""
+            INSERT INTO gallery_filter_options (kind, value, ref_count, updated_at)
+            SELECT ?, TRIM({column}) AS value, COUNT(*) AS ref_count, ?
+            FROM gallery_entries
+            WHERE {column} IS NOT NULL AND TRIM({column}) != ''
+            GROUP BY TRIM({column})
+            """,
+            (kind, now),
+        )
+    _invalidate_filter_options_cache()
+
+
+def rebuild_gallery_filter_options() -> GalleryFilterOptions:
+    _ensure_database()
+    with _connect() as conn:
+        with _transaction(conn):
+            _rebuild_gallery_filter_options_on_conn(conn)
+        return _get_gallery_filter_options_on_conn(conn)
 
 
 def _insert_gallery_entries_on_conn(
@@ -2012,6 +2252,20 @@ def _insert_gallery_entries_on_conn(
     ]
     if not normalized_entries:
         return
+
+    incoming_ids = [entry["id"] for entry in normalized_entries]
+    existing_by_id: dict[str, sqlite3.Row] = {}
+    if incoming_ids:
+        placeholders = ", ".join("?" for _ in incoming_ids)
+        existing_rows = conn.execute(
+            f"""
+            SELECT id, model, api_preset_name, size
+            FROM gallery_entries
+            WHERE id IN ({placeholders})
+            """,
+            tuple(incoming_ids),
+        ).fetchall()
+        existing_by_id = {row["id"]: row for row in existing_rows}
 
     row = conn.execute(
         "SELECT COALESCE(MAX(sort_seq), 0) FROM gallery_entries"
@@ -2037,7 +2291,12 @@ def _insert_gallery_entries_on_conn(
         """,
         [_gallery_row_values(entry) for entry in normalized_entries],
     )
-    _invalidate_filter_options_cache()
+    for entry in normalized_entries:
+        existing = existing_by_id.get(entry["id"])
+        if existing is not None:
+            _increment_gallery_filter_options_on_conn(conn, existing, -1)
+        _increment_gallery_filter_options_on_conn(conn, entry, 1)
+        _enqueue_thumbnail_job_on_conn(conn, str(entry.get("filename") or ""))
     _invalidate_gallery_total_bytes_cache()
 
 
@@ -2235,6 +2494,8 @@ def delete_prompt_snippet(snippet_id: str) -> bool:
 
 
 def _attach_gallery_thumbnail_url(entry: dict[str, Any]) -> dict[str, Any]:
+    if "image_url" not in entry:
+        entry["image_url"] = image_url_for_filename(str(entry.get("filename") or ""))
     if "thumbnail_url" not in entry:
         entry["thumbnail_url"] = _thumbnail_url_for_filename(
             str(entry.get("filename") or "")
@@ -2291,6 +2552,193 @@ def _thumbnail_cpu_slot() -> Iterator[None]:
     finally:
         if slot_name is not None:
             release_background_slot(name=slot_name, owner=owner)
+
+
+def _enqueue_thumbnail_job_on_conn(
+    conn: sqlite3.Connection,
+    filename: str,
+    *,
+    force: bool = False,
+) -> bool:
+    normalized = str(filename or "").strip()
+    image_path = safe_image_path(normalized)
+    if not normalized or not image_path or not image_path.is_file():
+        return False
+
+    now = utc_now()
+    existing = conn.execute(
+        """
+        SELECT status, lease_expires_at
+        FROM thumbnail_jobs
+        WHERE filename = ?
+        """,
+        (normalized,),
+    ).fetchone()
+    if existing and not force:
+        if existing["status"] == "success":
+            return False
+        if (
+            existing["status"] == "running"
+            and str(existing["lease_expires_at"] or "") > now
+        ):
+            return False
+
+    conn.execute(
+        """
+        INSERT INTO thumbnail_jobs (
+            filename,
+            status,
+            attempts,
+            lease_owner,
+            lease_expires_at,
+            created_at,
+            updated_at,
+            error
+        )
+        VALUES (?, 'queued', 0, NULL, NULL, ?, ?, NULL)
+        ON CONFLICT(filename) DO UPDATE SET
+            status = 'queued',
+            lease_owner = NULL,
+            lease_expires_at = NULL,
+            updated_at = excluded.updated_at,
+            error = NULL
+        """,
+        (normalized, now, now),
+    )
+    return True
+
+
+def enqueue_thumbnail_job(filename: str, *, force: bool = False) -> bool:
+    _ensure_database()
+    image_path = safe_image_path(filename)
+    if not image_path or not image_path.is_file():
+        return False
+    with _connect() as conn:
+        with _transaction(conn):
+            return _enqueue_thumbnail_job_on_conn(conn, filename, force=force)
+
+
+def get_pending_thumbnail_job_count() -> int:
+    _ensure_database()
+    with _connect() as conn:
+        row = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM thumbnail_jobs
+            WHERE status = 'queued'
+               OR (status = 'running' AND lease_expires_at <= ?)
+            """,
+            (utc_now(),),
+        ).fetchone()
+    return int(row[0] or 0) if row else 0
+
+
+def claim_next_thumbnail_job(
+    *,
+    owner: str,
+    lease_expires_at: str,
+    now: str | None = None,
+) -> dict[str, Any] | None:
+    _ensure_database()
+    current_time = now or utc_now()
+    with _connect() as conn:
+        with _transaction(conn):
+            row = conn.execute(
+                """
+                SELECT filename, status, attempts, lease_owner, lease_expires_at,
+                    created_at, updated_at, error
+                FROM thumbnail_jobs
+                WHERE status = 'queued'
+                   OR (status = 'running' AND lease_expires_at <= ?)
+                ORDER BY created_at ASC, filename ASC
+                LIMIT 1
+                """,
+                (current_time,),
+            ).fetchone()
+            if not row:
+                return None
+            conn.execute(
+                """
+                UPDATE thumbnail_jobs
+                SET status = 'running',
+                    attempts = attempts + 1,
+                    lease_owner = ?,
+                    lease_expires_at = ?,
+                    updated_at = ?,
+                    error = NULL
+                WHERE filename = ?
+                """,
+                (owner, lease_expires_at, current_time, row["filename"]),
+            )
+            updated = conn.execute(
+                """
+                SELECT filename, status, attempts, lease_owner, lease_expires_at,
+                    created_at, updated_at, error
+                FROM thumbnail_jobs
+                WHERE filename = ?
+                """,
+                (row["filename"],),
+            ).fetchone()
+    return dict(updated) if updated else None
+
+
+def complete_thumbnail_job(filename: str, *, owner: str) -> bool:
+    _ensure_database()
+    with _connect() as conn:
+        with _transaction(conn):
+            cursor = conn.execute(
+                """
+                UPDATE thumbnail_jobs
+                SET status = 'success',
+                    lease_owner = NULL,
+                    lease_expires_at = NULL,
+                    updated_at = ?,
+                    error = NULL
+                WHERE filename = ? AND lease_owner = ?
+                """,
+                (utc_now(), filename, owner),
+            )
+            return cursor.rowcount > 0
+
+
+def fail_thumbnail_job(
+    filename: str,
+    *,
+    owner: str,
+    error: str,
+    max_attempts: int = THUMBNAIL_JOB_MAX_ATTEMPTS,
+) -> bool:
+    _ensure_database()
+    with _connect() as conn:
+        with _transaction(conn):
+            row = conn.execute(
+                """
+                SELECT attempts
+                FROM thumbnail_jobs
+                WHERE filename = ? AND lease_owner = ?
+                """,
+                (filename, owner),
+            ).fetchone()
+            if not row:
+                return False
+            next_status = (
+                "error"
+                if int(row["attempts"] or 0) >= max_attempts
+                else "queued"
+            )
+            conn.execute(
+                """
+                UPDATE thumbnail_jobs
+                SET status = ?,
+                    lease_owner = NULL,
+                    lease_expires_at = NULL,
+                    updated_at = ?,
+                    error = ?
+                WHERE filename = ? AND lease_owner = ?
+                """,
+                (next_status, utc_now(), str(error or "")[:1000], filename, owner),
+            )
+            return True
 
 
 def _dedupe_gallery_filename(filename: str, used_filenames: set[str]) -> str:
@@ -2371,6 +2819,26 @@ def ensure_thumbnail_for_image(filename: str) -> str | None:
     thumbnail_path = safe_thumbnail_path(thumbnail_filename)
     if thumbnail_path and thumbnail_path.is_file():
         _add_verified_thumbnail(thumbnail_filename)
+        _set_thumbnail_filename_for_image(filename, thumbnail_filename)
+        return thumbnail_filename
+
+    image_path = safe_image_path(filename)
+    if not image_path or not image_path.is_file():
+        return None
+
+    enqueue_thumbnail_job(filename, force=True)
+    return None
+
+
+def generate_thumbnail_for_image(filename: str) -> str | None:
+    thumbnail_filename = _thumbnail_filename_for_image(filename)
+    if not thumbnail_filename:
+        return None
+
+    thumbnail_path = safe_thumbnail_path(thumbnail_filename)
+    if thumbnail_path and thumbnail_path.is_file():
+        _add_verified_thumbnail(thumbnail_filename)
+        _set_thumbnail_filename_for_image(filename, thumbnail_filename)
         return thumbnail_filename
 
     image_path = safe_image_path(filename)
@@ -2380,6 +2848,7 @@ def ensure_thumbnail_for_image(filename: str) -> str | None:
     for _ in range(3):
         if thumbnail_path and thumbnail_path.is_file():
             _add_verified_thumbnail(thumbnail_filename)
+            _set_thumbnail_filename_for_image(filename, thumbnail_filename)
             return thumbnail_filename
         try:
             image_stat = image_path.stat()
@@ -2736,6 +3205,86 @@ def get_gallery_total_bytes(filters: dict[str, Any] | None = None) -> int:
         return _get_gallery_total_bytes_on_conn(conn, where_sql, params)
 
 
+def encode_gallery_cursor(sort_seq: int, image_id: str) -> str:
+    payload = json.dumps(
+        {"sort_seq": int(sort_seq), "id": str(image_id)},
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+
+def decode_gallery_cursor(cursor: str) -> tuple[int, str]:
+    raw_cursor = str(cursor or "").strip()
+    if not raw_cursor:
+        raise ValueError("Gallery cursor is required")
+    try:
+        padded = raw_cursor + ("=" * (-len(raw_cursor) % 4))
+        decoded = base64.urlsafe_b64decode(padded.encode("ascii"))
+        payload = json.loads(decoded.decode("utf-8"))
+        sort_seq = int(payload["sort_seq"])
+        image_id = str(payload["id"])
+    except (
+        KeyError,
+        TypeError,
+        ValueError,
+        json.JSONDecodeError,
+        UnicodeDecodeError,
+        binascii.Error,
+    ) as e:
+        raise ValueError("Invalid gallery cursor") from e
+    if not image_id:
+        raise ValueError("Invalid gallery cursor")
+    return sort_seq, image_id
+
+
+def _gallery_cursor_from_row(row: sqlite3.Row) -> str:
+    return encode_gallery_cursor(int(row["sort_seq"] or 0), str(row["id"]))
+
+
+def _combine_gallery_where(where_sql: str, clause: str) -> str:
+    if where_sql:
+        return f"{where_sql} AND {clause}"
+    return f" WHERE {clause}"
+
+
+def _gallery_has_row_before_cursor(
+    conn: sqlite3.Connection,
+    where_sql: str,
+    params: Sequence[Any],
+    row: sqlite3.Row,
+) -> bool:
+    sort_seq = int(row["sort_seq"] or 0)
+    image_id = str(row["id"])
+    cursor_where = _combine_gallery_where(
+        where_sql,
+        "(sort_seq > ? OR (sort_seq = ? AND id > ?))",
+    )
+    found = conn.execute(
+        f"SELECT 1 FROM gallery_entries{cursor_where} LIMIT 1",
+        (*params, sort_seq, sort_seq, image_id),
+    ).fetchone()
+    return found is not None
+
+
+def _gallery_has_row_after_cursor(
+    conn: sqlite3.Connection,
+    where_sql: str,
+    params: Sequence[Any],
+    row: sqlite3.Row,
+) -> bool:
+    sort_seq = int(row["sort_seq"] or 0)
+    image_id = str(row["id"])
+    cursor_where = _combine_gallery_where(
+        where_sql,
+        "(sort_seq < ? OR (sort_seq = ? AND id < ?))",
+    )
+    found = conn.execute(
+        f"SELECT 1 FROM gallery_entries{cursor_where} LIMIT 1",
+        (*params, sort_seq, sort_seq, image_id),
+    ).fetchone()
+    return found is not None
+
+
 def _get_gallery_rows_on_conn(
     conn: sqlite3.Connection,
     where_sql: str,
@@ -2748,7 +3297,7 @@ def _get_gallery_rows_on_conn(
         SELECT {", ".join(GALLERY_COLUMNS)}
         FROM gallery_entries
         {where_sql}
-        ORDER BY created_at DESC, sort_seq DESC
+        ORDER BY sort_seq DESC, id DESC
     """
     query_params: list[Any] = list(params)
     if limit is not None:
@@ -2789,33 +3338,37 @@ def iter_gallery_export_rows(
     """
     _ensure_database()
     where_sql, params = _build_gallery_filter_where(filters)
-    last_created_at: str | None = None
     last_sort_seq: int | None = None
+    last_id: str | None = None
     while True:
         with _connect() as conn:
-            if last_created_at is None:
+            if last_sort_seq is None or last_id is None:
                 sql = f"""
                     SELECT {", ".join(GALLERY_COLUMNS)}
                     FROM gallery_entries
                     {where_sql}
-                    ORDER BY created_at DESC, sort_seq DESC
+                    ORDER BY sort_seq DESC, id DESC
                     LIMIT ?
                 """
                 query_params = list(params) + [batch_size]
             else:
-                cursor_clause = "(created_at < ? OR (created_at = ? AND sort_seq < ?))"
-                if where_sql:
-                    combined_where = f"{where_sql} AND {cursor_clause}"
-                else:
-                    combined_where = f" WHERE {cursor_clause}"
+                combined_where = _combine_gallery_where(
+                    where_sql,
+                    "(sort_seq < ? OR (sort_seq = ? AND id < ?))",
+                )
                 sql = f"""
                     SELECT {", ".join(GALLERY_COLUMNS)}
                     FROM gallery_entries
                     {combined_where}
-                    ORDER BY created_at DESC, sort_seq DESC
+                    ORDER BY sort_seq DESC, id DESC
                     LIMIT ?
                 """
-                query_params = list(params) + [last_created_at, last_created_at, last_sort_seq, batch_size]
+                query_params = list(params) + [
+                    last_sort_seq,
+                    last_sort_seq,
+                    last_id,
+                    batch_size,
+                ]
             rows = conn.execute(sql, query_params).fetchall()
         if not rows:
             return
@@ -2824,8 +3377,8 @@ def iter_gallery_export_rows(
         if len(rows) < batch_size:
             return
         last_row = rows[-1]
-        last_created_at = last_row["created_at"]
-        last_sort_seq = last_row["sort_seq"]
+        last_sort_seq = int(last_row["sort_seq"] or 0)
+        last_id = str(last_row["id"])
 
 
 def _gallery_r2_sync_changed_condition() -> str:
@@ -3024,18 +3577,19 @@ def _get_gallery_filter_options_on_conn(conn: sqlite3.Connection) -> GalleryFilt
             return cached
 
     options: dict[str, list[str]] = {}
-    for key, column in (
+    for key, kind in (
         ("models", "model"),
-        ("presets", "api_preset_name"),
+        ("presets", "preset"),
         ("sizes", "size"),
     ):
         rows = conn.execute(
-            f"""
-            SELECT DISTINCT {column} AS value
-            FROM gallery_entries
-            WHERE {column} IS NOT NULL AND TRIM({column}) != ''
-            ORDER BY LOWER({column}) ASC
             """
+            SELECT value
+            FROM gallery_filter_options
+            WHERE kind = ? AND ref_count > 0
+            ORDER BY LOWER(value) ASC
+            """,
+            (kind,),
         ).fetchall()
         options[key] = [row["value"] for row in rows if row["value"]]
 
@@ -3057,33 +3611,105 @@ def get_gallery_page(
     page_size: int = 9,
     filters: dict[str, Any] | None = None,
     include_total_bytes: bool = False,
+    cursor: str | None = None,
+    direction: str = "next",
 ) -> GalleryPage:
     _ensure_database()
     requested_page = max(int(page), 1)
     page_size = max(int(page_size), 1)
-    offset = (requested_page - 1) * page_size
+    normalized_cursor = str(cursor or "").strip()
+    normalized_direction = str(direction or "next").strip().lower()
+    if normalized_direction not in {"next", "prev"}:
+        raise ValueError("Invalid gallery cursor direction")
+    decoded_cursor = (
+        decode_gallery_cursor(normalized_cursor) if normalized_cursor else None
+    )
 
     query_started_at = time.perf_counter()
     with _connect() as conn:
         where_sql, params = _build_gallery_filter_where(filters)
 
-        rows = _get_gallery_rows_on_conn(
-            conn,
-            where_sql,
-            params,
-            limit=page_size + 1,
-            offset=offset,
-        )
+        if decoded_cursor is None:
+            offset = (requested_page - 1) * page_size
+            rows = _get_gallery_rows_on_conn(
+                conn,
+                where_sql,
+                params,
+                limit=page_size + 1,
+                offset=offset,
+            )
 
-        has_next = len(rows) > page_size
-        if has_next:
-            rows = rows[:page_size]
-
-        has_prev = requested_page > 1
+            has_next = len(rows) > page_size
+            if has_next:
+                rows = rows[:page_size]
+            has_prev = requested_page > 1
+        else:
+            cursor_sort_seq, cursor_id = decoded_cursor
+            if normalized_direction == "prev":
+                cursor_where = _combine_gallery_where(
+                    where_sql,
+                    "(sort_seq > ? OR (sort_seq = ? AND id > ?))",
+                )
+                raw_rows = conn.execute(
+                    f"""
+                    SELECT {", ".join(GALLERY_COLUMNS)}
+                    FROM gallery_entries
+                    {cursor_where}
+                    ORDER BY sort_seq ASC, id ASC
+                    LIMIT ?
+                    """,
+                    (
+                        *params,
+                        cursor_sort_seq,
+                        cursor_sort_seq,
+                        cursor_id,
+                        page_size + 1,
+                    ),
+                ).fetchall()
+                has_prev = len(raw_rows) > page_size
+                if has_prev:
+                    raw_rows = raw_rows[:page_size]
+                rows = list(reversed(raw_rows))
+                has_next = (
+                    _gallery_has_row_after_cursor(conn, where_sql, params, rows[-1])
+                    if rows
+                    else False
+                )
+            else:
+                cursor_where = _combine_gallery_where(
+                    where_sql,
+                    "(sort_seq < ? OR (sort_seq = ? AND id < ?))",
+                )
+                rows = conn.execute(
+                    f"""
+                    SELECT {", ".join(GALLERY_COLUMNS)}
+                    FROM gallery_entries
+                    {cursor_where}
+                    ORDER BY sort_seq DESC, id DESC
+                    LIMIT ?
+                    """,
+                    (
+                        *params,
+                        cursor_sort_seq,
+                        cursor_sort_seq,
+                        cursor_id,
+                        page_size + 1,
+                    ),
+                ).fetchall()
+                has_next = len(rows) > page_size
+                if has_next:
+                    rows = rows[:page_size]
+                has_prev = (
+                    _gallery_has_row_before_cursor(conn, where_sql, params, rows[0])
+                    if rows
+                    else False
+                )
 
         total = _get_gallery_count_on_conn(conn, where_sql, params)
         total_pages = max((total + page_size - 1) // page_size, 1)
         effective_page = min(requested_page, total_pages)
+        prev_cursor = _gallery_cursor_from_row(rows[0]) if rows and has_prev else None
+        next_cursor = _gallery_cursor_from_row(rows[-1]) if rows and has_next else None
 
         total_bytes = (
             _get_gallery_total_bytes_on_conn(conn, where_sql, params)
@@ -3101,6 +3727,8 @@ def get_gallery_page(
         total_pages=total_pages,
         has_prev=has_prev,
         has_next=has_next,
+        next_cursor=next_cursor,
+        prev_cursor=prev_cursor,
         images=[GalleryEntry(**_gallery_entry_from_row(row)) for row in rows],
         filter_options=filter_options,
         query_elapsed_ms=round(query_elapsed_ms, 2),
@@ -3222,14 +3850,17 @@ def update_gallery_entry(image_id: str, updates: dict[str, Any]) -> GalleryEntry
                 return None
 
             if allowed_updates:
+                previous_filter_values = {
+                    "model": row["model"],
+                    "api_preset_name": row["api_preset_name"],
+                    "size": row["size"],
+                }
                 assignments = ", ".join(f"{key} = ?" for key in allowed_updates)
                 conn.execute(
                     f"UPDATE gallery_entries SET {assignments} WHERE id = ?",
                     (*allowed_updates.values(), image_id),
                 )
                 _invalidate_gallery_total_bytes_cache()
-                if allowed_updates.keys() & {"model", "api_preset_name", "size"}:
-                    _invalidate_filter_options_cache()
                 row = conn.execute(
                     f"""
                     SELECT {", ".join(GALLERY_COLUMNS)}
@@ -3238,6 +3869,13 @@ def update_gallery_entry(image_id: str, updates: dict[str, Any]) -> GalleryEntry
                     """,
                     (image_id,),
                 ).fetchone()
+                if allowed_updates.keys() & {"model", "api_preset_name", "size"}:
+                    _increment_gallery_filter_options_on_conn(
+                        conn,
+                        previous_filter_values,
+                        -1,
+                    )
+                    _increment_gallery_filter_options_on_conn(conn, row, 1)
 
     return GalleryEntry(**_gallery_entry_from_row(row))
 
@@ -4823,7 +5461,7 @@ def sync_gallery_with_image_files() -> int:
                 while True:
                     rows = conn.execute(
                         """
-                        SELECT id, filename
+                        SELECT id, filename, model, api_preset_name, size
                         FROM gallery_entries
                         WHERE id > ?
                         ORDER BY id
@@ -4847,10 +5485,12 @@ def sync_gallery_with_image_files() -> int:
                         "DELETE FROM gallery_entries WHERE id = ?",
                         [(entry_id,) for entry_id in stale_ids],
                     )
+                    for row in rows:
+                        if row["id"] in stale_ids:
+                            _increment_gallery_filter_options_on_conn(conn, row, -1)
                     removed_count += len(stale_ids)
 
                 if removed_count:
-                    _invalidate_filter_options_cache()
                     _invalidate_gallery_total_bytes_cache()
                     _clear_verified_thumbnails()
                 return removed_count
@@ -4870,7 +5510,11 @@ def _delete_gallery_entries_by_ids(
 
     placeholders = ", ".join("?" for _ in unique_ids)
     rows = conn.execute(
-        f"SELECT id, filename FROM gallery_entries WHERE id IN ({placeholders})",
+        f"""
+        SELECT id, filename, model, api_preset_name, size
+        FROM gallery_entries
+        WHERE id IN ({placeholders})
+        """,
         tuple(unique_ids),
     ).fetchall()
     if not rows:
@@ -4883,7 +5527,8 @@ def _delete_gallery_entries_by_ids(
         f"DELETE FROM gallery_entries WHERE id IN ({delete_placeholders})",
         tuple(removed_ids),
     )
-    _invalidate_filter_options_cache()
+    for row in rows:
+        _increment_gallery_filter_options_on_conn(conn, row, -1)
     _invalidate_gallery_total_bytes_cache()
 
     remaining_filenames: set[str] = set()
@@ -5002,6 +5647,7 @@ def delete_all_gallery_images() -> tuple[int, int]:
                 referenced_filenames = set(_get_all_filenames_on_conn(conn))
 
                 conn.execute("DELETE FROM gallery_entries")
+                conn.execute("DELETE FROM gallery_filter_options")
                 _invalidate_filter_options_cache()
                 _invalidate_gallery_total_bytes_cache()
 

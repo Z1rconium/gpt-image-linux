@@ -506,6 +506,7 @@ class GalleryEntry(BaseModel):
     prompt: str
     size: str
     filename: str
+    image_url: Optional[str] = None
     thumbnail_filename: Optional[str] = None
     thumbnail_url: Optional[str] = None
     created_at: str
@@ -671,6 +672,8 @@ class GalleryResponse(BaseModel):
     total_pages: int
     has_prev: bool
     has_next: bool
+    next_cursor: Optional[str] = None
+    prev_cursor: Optional[str] = None
     images: list[GalleryEntry]
     filter_options: GalleryFilterOptions = Field(default_factory=GalleryFilterOptions)
 

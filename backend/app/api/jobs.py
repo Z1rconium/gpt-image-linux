@@ -411,7 +411,10 @@ def build_pending_job(
 def gallery_entry_job_image(entry: GalleryEntry) -> dict:
     return {
         "image_id": entry.id,
-        "image_url": f"/api/image/{entry.filename}",
+        "image_url": (
+            storage.image_url_for_filename(entry.filename)
+            or f"/api/image/{entry.filename}"
+        ),
         "filename": entry.filename,
         "image_width": entry.image_width,
         "image_height": entry.image_height,
@@ -1057,7 +1060,10 @@ async def _run_image_job(
         "message": outcome.success_message or success_message,
         "operation": operation,
         "image_id": first_entry.id,
-        "image_url": f"/api/image/{first_entry.filename}",
+        "image_url": (
+            storage.image_url_for_filename(first_entry.filename)
+            or f"/api/image/{first_entry.filename}"
+        ),
         "images": job_images,
         "prompt": first_entry.prompt,
         "size": first_entry.size,

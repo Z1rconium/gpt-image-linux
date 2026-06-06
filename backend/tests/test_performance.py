@@ -111,6 +111,32 @@ def test_gallery_page_query_baseline(tmp_path, row_count, record_property):
     assert p95 < 500
 
 
+def test_gallery_cursor_query_baseline(tmp_path, record_property):
+    _configure_runtime(tmp_path)
+    _seed_gallery_rows(10_000)
+    first_page = storage.get_gallery_page(
+        page=1,
+        page_size=9,
+        filters={"prompt": "benchmark prompt 4"},
+    )
+    assert first_page.next_cursor
+
+    def query():
+        page = storage.get_gallery_page(
+            page=2,
+            page_size=9,
+            filters={"prompt": "benchmark prompt 4"},
+            cursor=first_page.next_cursor,
+            direction="next",
+        )
+        assert page.total > 0
+
+    p50, p95 = _measure_ms(query)
+    record_property("gallery_10000_rows_cursor_p50_ms", round(p50, 2))
+    record_property("gallery_10000_rows_cursor_p95_ms", round(p95, 2))
+    assert p95 < 250
+
+
 def test_job_history_query_baseline(tmp_path, record_property):
     _configure_runtime(tmp_path)
     _seed_job_rows(500)

@@ -53,8 +53,11 @@ def thumbnail_filename_for_image(filename: str) -> str | None:
 def thumbnail_url_for_filename(filename: str) -> str | None:
     if not safe_image_path(filename):
         return None
-    if not thumbnail_filename_for_image(filename):
+    thumbnail_filename = thumbnail_filename_for_image(filename)
+    if not thumbnail_filename:
         return None
+    if config.PUBLIC_THUMBNAIL_BASE_URL:
+        return f"{config.PUBLIC_THUMBNAIL_BASE_URL.rstrip('/')}/{quote(thumbnail_filename, safe='')}"
     return f"/api/thumb/{quote(filename, safe='')}"
 
 

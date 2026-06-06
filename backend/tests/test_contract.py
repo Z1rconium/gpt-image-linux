@@ -114,6 +114,8 @@ def _configure_runtime(tmp_path: Path, *, access_key: str = "", allow_unauthenti
     os.environ["GITHUB_REPO"] = "Z1rconium/gpt-image-linux"
     os.environ["TRUSTED_PROXY_IPS"] = ""
     os.environ["TRUST_PROXY_HEADERS"] = "false"
+    os.environ["PUBLIC_IMAGE_BASE_URL"] = ""
+    os.environ["PUBLIC_THUMBNAIL_BASE_URL"] = ""
 
     config.DEFAULT_API_URL = "https://api.example.com"
     config.DEFAULT_API_KEY = "${TEST_DEFAULT_API_KEY}"
@@ -134,6 +136,8 @@ def _configure_runtime(tmp_path: Path, *, access_key: str = "", allow_unauthenti
     config.TRUST_PROXY_HEADERS = False
     config.TRUSTED_PROXY_IPS = ""
     config.PUBLIC_ORIGIN = ""
+    config.PUBLIC_IMAGE_BASE_URL = ""
+    config.PUBLIC_THUMBNAIL_BASE_URL = ""
     config.ALLOWED_HOSTS = ""
     config.CSRF_ORIGIN_CHECK_ENABLED = True
     config.UPSTREAM_HOST_ALLOWLIST = ""
@@ -3434,6 +3438,27 @@ def test_storage_edit_source_reservation_is_global_and_released_on_terminal(tmp_
     assert storage.get_pending_edit_source_bytes() == 0
 
 
+def test_schema_migrations_are_recorded_and_idempotent(tmp_path):
+    _configure_runtime(tmp_path)
+    storage.verify_storage_writable()
+    with storage._connect() as conn:
+        versions = conn.execute(
+            "SELECT version, name FROM schema_migrations ORDER BY version"
+        ).fetchall()
+    assert [row["version"] for row in versions] == [1, 2, 3, 4]
+
+    storage.close_database_connections()
+    storage._db_initialized = False
+    storage.verify_storage_writable()
+    with storage._connect() as conn:
+        repeated_versions = conn.execute(
+            "SELECT version, name FROM schema_migrations ORDER BY version"
+        ).fetchall()
+    assert [(row["version"], row["name"]) for row in repeated_versions] == [
+        (row["version"], row["name"]) for row in versions
+    ]
+
+
 def test_gallery_image_download_and_zip(client):
     entry = _fake_gallery_entry("gallery-zip", "zip me", "1024x1024", "gallery-zip.png")
     assert entry.bytes == len(PNG_BYTES)
@@ -3465,10 +3490,15 @@ def test_gallery_image_download_and_zip(client):
     assert image.headers["cache-control"].startswith("public")
 
     thumb = client.get("/api/thumb/gallery-zip.png")
+    assert thumb.status_code == 404
+    assert thumb.headers["cache-control"] == "no-cache"
+    assert storage.get_gallery_entry("gallery-zip").thumbnail_filename is None
+
+    assert storage.generate_thumbnail_for_image("gallery-zip.png")
+    thumb = client.get("/api/thumb/gallery-zip.png")
     assert thumb.status_code == 200
     assert thumb.headers["content-type"].startswith("image/webp")
     assert thumb.headers["cache-control"].startswith("public")
-    assert storage.get_gallery_entry("gallery-zip").thumbnail_filename
 
     download = client.get("/api/download/gallery-zip.png")
     assert download.status_code == 200
@@ -3501,6 +3531,8 @@ def test_gallery_image_responses_use_x_accel_redirect_when_enabled(client):
     assert image.headers["content-type"].startswith("image/png")
     assert image.content == b""
 
+    generated_thumbnail = storage.generate_thumbnail_for_image("gallery accel.png")
+    assert generated_thumbnail
     thumb = client.get("/api/thumb/gallery%20accel.png")
     updated = storage.get_gallery_entry("gallery-accel")
     assert updated.thumbnail_filename
@@ -3517,6 +3549,100 @@ def test_gallery_image_responses_use_x_accel_redirect_when_enabled(client):
     assert download.headers["x-accel-redirect"] == "/_protected/images/gallery%20accel.png"
     assert "attachment" in download.headers["content-disposition"]
     assert download.headers["content-type"].startswith("image/png")
+
+
+def test_gallery_cursor_pagination_and_invalid_cursor(client):
+    for index in range(5):
+        _fake_gallery_entry(
+            f"cursor-{index}",
+            f"cursor prompt {index}",
+            "1024x1024",
+            f"cursor-{index}.png",
+        )
+
+    first = client.get("/api/gallery?page=1&page_size=2")
+    assert first.status_code == 200
+    first_data = first.json()
+    assert first_data["page"] == 1
+    assert first_data["has_next"] is True
+    assert first_data["has_prev"] is False
+    assert first_data["next_cursor"]
+    first_ids = [image["id"] for image in first_data["images"]]
+
+    second = client.get(
+        f"/api/gallery?page=2&page_size=2&cursor={first_data['next_cursor']}&direction=next"
+    )
+    assert second.status_code == 200
+    second_data = second.json()
+    assert second_data["page"] == 2
+    assert second_data["has_prev"] is True
+    assert second_data["prev_cursor"]
+    second_ids = [image["id"] for image in second_data["images"]]
+    assert not set(first_ids) & set(second_ids)
+
+    previous = client.get(
+        f"/api/gallery?page=1&page_size=2&cursor={second_data['prev_cursor']}&direction=prev"
+    )
+    assert previous.status_code == 200
+    assert [image["id"] for image in previous.json()["images"]] == first_ids
+
+    invalid = client.get("/api/gallery?cursor=not-a-valid-cursor")
+    assert invalid.status_code == 400
+
+
+def test_gallery_filter_options_are_materialized_and_incremental(client):
+    first = _fake_gallery_entry("filter-1", "filter one", "1024x1024", "filter-1.png")
+    second = _fake_gallery_entry("filter-2", "filter two", "1536x1024", "filter-2.png")
+    assert first is not None and second is not None
+
+    options = storage.get_gallery_filter_options()
+    assert options.models == ["gpt-image-2"]
+    assert options.presets == ["Default"]
+    assert options.sizes == ["1024x1024", "1536x1024"]
+
+    storage.update_gallery_entry("filter-2", {"model": "alt-model", "api_preset_name": "Alt"})
+    options = storage.get_gallery_filter_options()
+    assert options.models == ["alt-model", "gpt-image-2"]
+    assert options.presets == ["Alt", "Default"]
+
+    deleted, _files = storage.delete_gallery_images(["filter-2"])
+    assert deleted == 1
+    options = storage.get_gallery_filter_options()
+    assert options.models == ["gpt-image-2"]
+    assert options.presets == ["Default"]
+    assert options.sizes == ["1024x1024"]
+
+
+def test_public_image_and_thumbnail_base_urls_are_returned(client):
+    config.PUBLIC_IMAGE_BASE_URL = "https://cdn.example.com/images"
+    config.PUBLIC_THUMBNAIL_BASE_URL = "https://cdn.example.com/thumbs"
+
+    entry = _fake_gallery_entry("public-url", "public", "1024x1024", "public url.png")
+    assert entry.image_url == "https://cdn.example.com/images/public%20url.png"
+    assert entry.thumbnail_url.startswith("https://cdn.example.com/thumbs/")
+    assert entry.thumbnail_url.endswith(".webp")
+
+    gallery = client.get("/api/gallery")
+    assert gallery.status_code == 200
+    image = gallery.json()["images"][0]
+    assert image["image_url"] == "https://cdn.example.com/images/public%20url.png"
+    assert image["thumbnail_url"].startswith("https://cdn.example.com/thumbs/")
+
+    resp = client.post(
+        "/api/generate",
+        json={
+            "prompt": "public job",
+            "size": "1024x1024",
+            "model": "gpt-image-2",
+            "n": 1,
+            "quality": "auto",
+            "output_format": "png",
+        },
+    )
+    assert resp.status_code == 202
+    job = _wait_for_job(client, resp.json()["job_id"])
+    assert job["image_url"].startswith("https://cdn.example.com/images/")
+    assert job["images"][0]["image_url"].startswith("https://cdn.example.com/images/")
 
 
 def test_orphan_gallery_files_are_not_directly_served(client):
@@ -4202,21 +4328,59 @@ def test_import_gallery_entries_dedupes_existing_rows_at_commit(client):
     assert imported.thumbnail_url == "/api/thumb/import-1_1.png"
 
     thumb = client.get("/api/thumb/import-1_1.png")
+    assert thumb.status_code == 404
+    assert storage.generate_thumbnail_for_image("import-1_1.png")
+    thumb = client.get("/api/thumb/import-1_1.png")
     assert thumb.status_code == 200
 
 
-def test_thumbnail_endpoint_lazily_creates_file(client):
+def test_thumbnail_endpoint_enqueues_missing_thumbnail_job(client, monkeypatch):
+    original_generate_thumbnail = storage.generate_thumbnail_for_image
+    monkeypatch.setattr(gallery_router, "kick_thumbnail_dispatcher", lambda: None)
+    monkeypatch.setattr(storage, "generate_thumbnail_for_image", lambda filename: None)
     entry = _fake_gallery_entry("lazy-thumb", "lazy", "1024x1024", "lazy-thumb.png")
     assert entry.thumbnail_filename is None
 
     resp = client.get("/api/thumb/lazy-thumb.png")
     updated = storage.get_gallery_entry("lazy-thumb")
-    assert updated.thumbnail_filename
-    thumbnail_path = storage.safe_thumbnail_path(updated.thumbnail_filename)
-    assert thumbnail_path is not None
+    assert updated.thumbnail_filename is None
+    assert resp.status_code == 404
+    with storage._connect() as conn:
+        row = conn.execute(
+            "SELECT status FROM thumbnail_jobs WHERE filename = ?",
+            ("lazy-thumb.png",),
+        ).fetchone()
+    assert row is not None
 
-    assert resp.status_code == 200
+    monkeypatch.setattr(storage, "generate_thumbnail_for_image", original_generate_thumbnail)
+    thumbnail_filename = storage.generate_thumbnail_for_image("lazy-thumb.png")
+    assert thumbnail_filename
+    thumbnail_path = storage.safe_thumbnail_path(thumbnail_filename)
+    assert thumbnail_path is not None
     assert thumbnail_path.exists()
+
+    resp = client.get("/api/thumb/lazy-thumb.png")
+    assert resp.status_code == 200
+
+
+def test_thumbnail_job_queue_claims_and_completes(tmp_path):
+    _configure_runtime(tmp_path)
+    entry = _fake_gallery_entry("queue-thumb", "queue", "1024x1024", "queue-thumb.png")
+    assert entry.thumbnail_filename is None
+    assert storage.get_pending_thumbnail_job_count() == 1
+
+    owner = "thumbnail-test-worker"
+    job = storage.claim_next_thumbnail_job(
+        owner=owner,
+        lease_expires_at="2026-01-01T00:10:00+00:00",
+        now="2026-01-01T00:00:00+00:00",
+    )
+    assert job
+    assert job["filename"] == "queue-thumb.png"
+    thumbnail_filename = storage.generate_thumbnail_for_image(job["filename"])
+    assert thumbnail_filename
+    assert storage.complete_thumbnail_job(job["filename"], owner=owner)
+    assert storage.get_pending_thumbnail_job_count() == 0
 
 
 @pytest.mark.parametrize(

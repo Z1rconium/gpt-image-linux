@@ -44,7 +44,7 @@ def import_max_uncompressed_bytes() -> int:
 
 _GALLERY_ENTRY_EXPORT_FIELDS = tuple(
     name for name in GalleryEntry.model_fields
-    if name not in {"thumbnail_filename", "thumbnail_url"}
+    if name not in {"image_url", "thumbnail_filename", "thumbnail_url"}
 )
 
 
@@ -59,7 +59,7 @@ def _entry_to_dict(entry: GalleryEntry | dict[str, Any]) -> dict[str, Any]:
             data.setdefault(required, entry.get(required, ""))
         data["favorite"] = bool(entry.get("favorite"))
         return data
-    return entry.model_dump(exclude={"thumbnail_filename", "thumbnail_url"})
+    return entry.model_dump(exclude={"image_url", "thumbnail_filename", "thumbnail_url"})
 
 
 def _entry_filename(entry: GalleryEntry | dict[str, Any]) -> str:

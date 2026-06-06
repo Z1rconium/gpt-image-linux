@@ -33,6 +33,8 @@ export type GalleryOperationStatus = {
   progress: number | null;
 };
 
+export type GalleryNavigation = 'next' | 'prev' | 'jump';
+
 export const defaultGalleryFilters: GalleryFilters = {
   prompt: '',
   model: '',
@@ -53,7 +55,13 @@ const initialGalleryState: GalleryState = {
   selectedIds: new Set()
 };
 
-function buildGalleryParams(page: number, filters: GalleryFilters, includeTotalBytes = false) {
+function buildGalleryParams(
+  page: number,
+  filters: GalleryFilters,
+  includeTotalBytes = false,
+  cursor?: string | null,
+  direction?: 'next' | 'prev'
+) {
   const params = new URLSearchParams({ page: String(page), page_size: '9' });
   if (filters.prompt.trim()) params.set('prompt', filters.prompt.trim());
   if (filters.model) params.set('model', filters.model);
@@ -63,6 +71,10 @@ function buildGalleryParams(page: number, filters: GalleryFilters, includeTotalB
   if (filters.dateTo) params.set('date_to', filters.dateTo);
   if (filters.favorite) params.set('favorite', 'true');
   if (includeTotalBytes) params.set('include_total_bytes', 'true');
+  if (cursor && direction) {
+    params.set('cursor', cursor);
+    params.set('direction', direction);
+  }
   return params;
 }
 
@@ -125,9 +137,16 @@ function createGalleryStore() {
     };
   }
 
-  async function loadGallery(page = state.page, includeTotalBytes = false) {
+  async function loadGallery(page = state.page, includeTotalBytes: boolean | GalleryNavigation = false, navigation: GalleryNavigation = 'jump') {
+    if (typeof includeTotalBytes === 'string') {
+      navigation = includeTotalBytes;
+      includeTotalBytes = false;
+    }
     const filters = { ...state.filters };
-    const params = buildGalleryParams(page, filters, includeTotalBytes);
+    const cursor =
+      navigation === 'next' ? state.gallery?.next_cursor : navigation === 'prev' ? state.gallery?.prev_cursor : null;
+    const direction = navigation === 'next' || navigation === 'prev' ? navigation : undefined;
+    const params = buildGalleryParams(page, filters, includeTotalBytes, cursor, direction);
     const requestKey = params.toString();
     const seq = ++requestSeq;
     abortController?.abort();
