@@ -1,14 +1,9 @@
 services:
-  gpt-image-panel:
-    build:
-      context: .
-      target: runtime
-      args:
-        PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-python:3.11-slim}
-        NODE_BASE_IMAGE: ${NODE_BASE_IMAGE:-node:24-alpine}
-    container_name: gpt-image-panel
-    expose:
-      - "9090"
+  web:
+    image: ${GPT_IMAGE_PANEL_IMAGE:-ghcr.io/z1rconium/gpt-image-linux:v1.0.3}
+    container_name: gpt-image-panel-web
+    ports:
+      - "127.0.0.1:9090:9090"
     volumes:
       - ./images:/app/images
       - ./data:/app/data
@@ -27,7 +22,7 @@ services:
       - VERSION_CHECK_BRANCH=${VERSION_CHECK_BRANCH:-main}
       - ENABLE_METRICS=${ENABLE_METRICS:-false}
       - SLOW_GALLERY_QUERY_MS=${SLOW_GALLERY_QUERY_MS:-200}
-      - ENABLE_NGINX_ACCEL_REDIRECT=${ENABLE_NGINX_ACCEL_REDIRECT:-true}
+      - ENABLE_NGINX_ACCEL_REDIRECT=${ENABLE_NGINX_ACCEL_REDIRECT:-false}
       - PUBLIC_IMAGE_BASE_URL=${PUBLIC_IMAGE_BASE_URL:-}
       - PUBLIC_THUMBNAIL_BASE_URL=${PUBLIC_THUMBNAIL_BASE_URL:-}
       - GRANIAN_WORKERS=${GRANIAN_WORKERS:-1}
@@ -103,18 +98,3 @@ services:
       timeout: 10s
       retries: 3
       start_period: 10s
-
-  gpt-image-panel-nginx:
-    build:
-      context: .
-      target: nginx
-      args:
-        NODE_BASE_IMAGE: ${NODE_BASE_IMAGE:-node:24-alpine}
-    container_name: gpt-image-panel-nginx
-    ports:
-      - "127.0.0.1:9090:80"
-    volumes:
-      - ./images:/app/images:ro
-    depends_on:
-      - gpt-image-panel
-    restart: unless-stopped

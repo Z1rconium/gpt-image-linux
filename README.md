@@ -200,23 +200,16 @@ docker build \
 
 ### Docker Compose
 
-Compose runs nginx in front of the backend. The browser still uses `http://127.0.0.1:9090`; nginx owns that host port, proxies API/index requests to FastAPI, serves immutable SvelteKit assets directly, and sends authorized gallery image/thumbnail/download bytes through nginx internal redirects after the backend has checked access and gallery references.
+Compose runs `ghcr.io/z1rconium/gpt-image-linux:v1.0.3` as one web service on `http://127.0.0.1:9090`. This version does not use standalone worker containers; background generation, gallery export, R2 sync, thumbnails, SSE, and HTTP requests run inside the Granian/FastAPI service. Override `GPT_IMAGE_PANEL_IMAGE` only when you intentionally want another image tag.
 
 ```bash
 cp .env.example .env
 # edit .env if needed
 # ACCESS_KEY is required by default unless ALLOW_UNAUTHENTICATED=true
-docker-compose up -d --build --force-recreate
+docker-compose up -d --force-recreate
 ```
 
-For Docker Hub timeout issues with Compose, set this in `.env` before building:
-
-```bash
-PYTHON_BASE_IMAGE=docker.m.daocloud.io/library/python:3.11-slim
-NODE_BASE_IMAGE=docker.m.daocloud.io/library/node:24-alpine
-```
-
-Size Granian to the app capacity instead of CPU count alone. For generation throughput, keep `GRANIAN_WORKERS <= MAX_ACTIVE_GENERATE_JOBS`; `2-4` workers is usually enough. When nginx is in front and traffic is mostly HTTP/1, `GRANIAN_WORKERS>=2` can start with `GRANIAN_RUNTIME_THREADS=1`; raise it back to `2` for heavy SSE, uploads, or direct-download traffic. `GRANIAN_BACKPRESSURE` limits how many slow requests each worker lets into Python before Granian pushes back.
+Size Granian to the app capacity instead of CPU count alone. For generation throughput, keep `GRANIAN_WORKERS <= MAX_ACTIVE_GENERATE_JOBS`; `2-4` workers is usually enough. `GRANIAN_BACKPRESSURE` limits how many slow requests each worker lets into Python before Granian pushes back.
 
 `GRANIAN_WORKERS>1` is supported for generation/edit fan-out plus tracked Gallery export/R2 sync jobs: workers claim SQLite-backed work, direct ZIP downloads share SQLite-backed export capacity slots, SSE subscribers use SQLite global leases, startup maintenance runs once per worker group, GC/scheduled sync use background leader leases, and cancellation marks pending/running generation units without forcibly killing another process.
 
@@ -793,23 +786,16 @@ docker build \
 
 ### Docker Compose
 
-Compose 会在后端前面放 nginx。浏览器入口仍是 `http://127.0.0.1:9090`；宿主端口由 nginx 暴露，API/index 回源 FastAPI，SvelteKit immutable assets 由 nginx 直接返回，Gallery 图片/缩略图/下载会先由后端完成访问校验和 Gallery 引用校验，再通过 nginx internal redirect 发送文件字节。
+Compose 会把 `ghcr.io/z1rconium/gpt-image-linux:v1.0.3` 作为单个 web 服务运行在 `http://127.0.0.1:9090`。当前版本没有独立 worker 容器；后台生成、Gallery 导出、R2 同步、缩略图、SSE 和 HTTP 请求都在 Granian/FastAPI 服务内运行。只有明确要换镜像 tag 时才覆盖 `GPT_IMAGE_PANEL_IMAGE`。
 
 ```bash
 cp .env.example .env
 # 按需修改 .env
 # 默认必须设置 ACCESS_KEY，除非显式设置 ALLOW_UNAUTHENTICATED=true
-docker-compose up -d --build --force-recreate
+docker-compose up -d --force-recreate
 ```
 
-如果 Compose 构建时 Docker Hub 超时，先在 `.env` 里设置：
-
-```bash
-PYTHON_BASE_IMAGE=docker.m.daocloud.io/library/python:3.11-slim
-NODE_BASE_IMAGE=docker.m.daocloud.io/library/node:24-alpine
-```
-
-Granian 要按应用容量调，不要只按 CPU 数量加 worker。生成吞吐优先保持 `GRANIAN_WORKERS <= MAX_ACTIVE_GENERATE_JOBS`；通常 `2-4` 个 worker 就够。nginx 在前且主要是 HTTP/1 流量时，`GRANIAN_WORKERS>=2` 可以先用 `GRANIAN_RUNTIME_THREADS=1`；大量 SSE、上传或直连下载时再调回 `2`。`GRANIAN_BACKPRESSURE` 用来限制每个 worker 同时进入 Python 的慢请求数量。
+Granian 要按应用容量调，不要只按 CPU 数量加 worker。生成吞吐优先保持 `GRANIAN_WORKERS <= MAX_ACTIVE_GENERATE_JOBS`；通常 `2-4` 个 worker 就够。`GRANIAN_BACKPRESSURE` 用来限制每个 worker 同时进入 Python 的慢请求数量。
 
 `GRANIAN_WORKERS>1` 已支持生成/编辑 fan-out，以及可跟踪 Gallery export/R2 sync job：worker 通过 SQLite 认领任务，direct ZIP 下载共享 SQLite 里的 export 容量 slot，SSE 订阅使用 SQLite 全局 lease，启动维护只在同批 worker 中运行一次，GC/定时同步使用后台 leader lease，取消会标记未完成的生成 unit，但不会跨进程强杀正在等待上游的调用。
 
