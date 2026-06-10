@@ -2,7 +2,7 @@
   import type { GalleryEntry, GalleryResponse } from '$lib/api/types';
   import { t } from '$lib/i18n';
   import type { GalleryFilters, GalleryOperationStatus } from '$lib/stores/gallery';
-  import { formatBytes, galleryImageSize, imageUrl, thumbnailUrl } from '$lib/utils/format';
+  import { displayImageSize, formatBytes, imageUrl, thumbnailUrl } from '$lib/utils/format';
 
   export let gallery: GalleryResponse | null = null;
   export let filters: GalleryFilters;
@@ -312,7 +312,7 @@
             <div class="space-y-3 p-3">
               <div class="min-w-0">
                 <p class="line-clamp-2 text-sm text-zinc-200">{image.prompt}</p>
-                <p class="mt-1 text-xs text-zinc-500">{galleryImageSize(image)} / {image.model || '-'}</p>
+                <p class="mt-1 text-xs text-zinc-500">{displayImageSize(image)} / {image.model || '-'}</p>
               </div>
               <div class="flex flex-wrap gap-2">
                 <button type="button" class="gallery-card-action control-focus rounded-md border border-emerald-500/40 px-2 py-1 text-xs text-emerald-200 hover:bg-emerald-500/10" on:click={(event) => handleGalleryAction(event, () => onUsePrompt(image))}>{$t.common.usePrompt}</button>

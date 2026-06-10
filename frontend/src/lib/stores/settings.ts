@@ -1,4 +1,4 @@
-import { derived, get, writable } from 'svelte/store';
+import { get, writable } from 'svelte/store';
 import { apiFetch } from '$lib/api/client';
 import { t } from '$lib/i18n';
 import { confirmStore } from '$lib/stores/confirm';
@@ -218,4 +218,3 @@ function createSettingsStore() {
 }
 
 export const settingsStore = createSettingsStore();
-export const responsesMode = derived(settingsStore, ($state) => $state.settings?.api_path === '/v1/responses');

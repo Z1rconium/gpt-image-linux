@@ -41,7 +41,7 @@
   import { settingsStore } from '$lib/stores/settings';
   import { uiStore, type ToastOptions } from '$lib/stores/ui';
   import { versionStore } from '$lib/stores/version';
-  import { copyText, galleryImageSize, imageUrl } from '$lib/utils/format';
+  import { copyText, displayImageSize, imageUrl } from '$lib/utils/format';
   import {
     galleryEntryToPromptForm,
     galleryEntryToPromptOnly,
@@ -112,6 +112,15 @@
 
   function showToast(message: string, variant?: 'status' | 'error', options?: ToastOptions) {
     uiStore.showToast(message, variant, options);
+  }
+
+  function errorMessage(error: unknown, fallback = $t.messages.requestFailed) {
+    const message = error instanceof Error ? error.message : fallback;
+    return message || fallback;
+  }
+
+  function showError(error: unknown, fallback = $t.messages.requestFailed) {
+    showToast(errorMessage(error, fallback), 'error');
   }
 
   function syncUrlState(mode: 'replace' | 'push' = 'replace') {
@@ -222,8 +231,7 @@
         queueUrlSync('replace');
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : $t.messages.requestFailed;
-      showToast(message || $t.messages.requestFailed, 'error');
+      showError(error);
     } finally {
       lightboxNavigating = false;
     }
@@ -432,8 +440,7 @@
     try {
       await promptSnippetsStore.loadSnippets(query);
     } catch (error) {
-      const message = error instanceof Error ? error.message : $t.messages.requestFailed;
-      showToast(message || $t.messages.requestFailed, 'error');
+      showError(error);
     }
   }
 
@@ -443,8 +450,7 @@
       await promptSnippetsStore.loadSnippets($promptSnippetsStore.query);
       showToast($t.messages.promptSnippetSaved);
     } catch (error) {
-      const message = error instanceof Error ? error.message : $t.messages.requestFailed;
-      showToast(message || $t.messages.requestFailed, 'error');
+      showError(error);
     }
   }
 
@@ -454,8 +460,7 @@
       await promptSnippetsStore.loadSnippets($promptSnippetsStore.query);
       showToast($t.messages.promptSnippetUpdated);
     } catch (error) {
-      const message = error instanceof Error ? error.message : $t.messages.requestFailed;
-      showToast(message || $t.messages.requestFailed, 'error');
+      showError(error);
     }
   }
 
@@ -473,8 +478,7 @@
       await promptSnippetsStore.deleteSnippet(snippet.id);
       showToast($t.messages.promptSnippetDeleted);
     } catch (error) {
-      const message = error instanceof Error ? error.message : $t.messages.requestFailed;
-      showToast(message || $t.messages.requestFailed, 'error');
+      showError(error);
     }
   }
 
@@ -525,8 +529,7 @@
         durationMs: 6000
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : $t.messages.promptOptimizeFailed;
-      showToast(message || $t.messages.promptOptimizeFailed, 'error');
+      showError(error, $t.messages.promptOptimizeFailed);
     } finally {
       optimizingPrompt = false;
     }
@@ -550,7 +553,7 @@
       showToast($t.messages.editSourceLimit(MAX_EDIT_SOURCE_IMAGES), 'error');
       return;
     }
-    form = { ...form, size: galleryImageSize(image) };
+    form = { ...form, size: displayImageSize(image) };
     closeLightbox();
     showToast($t.messages.galleryImageReady);
   }
@@ -651,8 +654,7 @@
     try {
       await galleryStore.syncGallery(showToast);
     } catch (error) {
-      const message = error instanceof Error ? error.message : $t.messages.requestFailed;
-      showToast(message || $t.messages.requestFailed, 'error');
+      showError(error);
     }
   }
 
@@ -708,8 +710,7 @@
       await jobsStore.clearJobHistory();
       showToast($t.messages.jobHistoryCleared);
     } catch (error) {
-      const message = error instanceof Error ? error.message : $t.messages.requestFailed;
-      showToast(message || $t.messages.requestFailed, 'error');
+      showError(error);
     }
   }
 

@@ -8,12 +8,12 @@ export function normalizeApiPath(value: string | null | undefined, fallback: Api
   return GENERATION_API_PATHS.includes(value as ApiPath) ? (value as ApiPath) : fallback;
 }
 
-export function normalizeJobQuality(value: string | null | undefined): PromptFormState['quality'] {
+function normalizeJobQuality(value: string | null | undefined): PromptFormState['quality'] {
   if (value === 'auto' || value === 'low' || value === 'medium' || value === 'high') return value;
   return initialPromptFormState.quality;
 }
 
-export function normalizeJobOutputFormat(value: string | null | undefined): PromptFormState['outputFormat'] {
+function normalizeJobOutputFormat(value: string | null | undefined): PromptFormState['outputFormat'] {
   if (value === 'png' || value === 'jpeg' || value === 'webp') return value;
   return initialPromptFormState.outputFormat;
 }
@@ -22,11 +22,11 @@ export function normalizeResponseFormat(value: string | null | undefined, fallba
   return RESPONSE_FORMAT_OPTIONS.includes(value as ResponseFormatDefault) ? (value as ResponseFormatDefault) : fallback;
 }
 
-export function normalizeJobResponseFormat(value: string | null | undefined): PromptFormState['responseFormat'] {
+function normalizeJobResponseFormat(value: string | null | undefined): PromptFormState['responseFormat'] {
   return normalizeResponseFormat(value);
 }
 
-export function clampQuantity(value: number | string | null | undefined): number {
+function clampQuantity(value: number | string | null | undefined): number {
   return Math.min(Math.max(Number(value) || DEFAULT_QUANTITY, 1), 10);
 }
 

@@ -1,5 +1,5 @@
-export const ACTIVE_JOB_STATUSES = new Set(['queued', 'running']);
-export const FAILURE_JOB_STATUSES = new Set(['error', 'cancelled', 'interrupted', 'upstream_error']);
+const ACTIVE_JOB_STATUSES = new Set(['queued', 'running']);
+const FAILURE_JOB_STATUSES = new Set(['error', 'cancelled', 'interrupted', 'upstream_error']);
 
 export function isActiveJobStatus(status: string | null | undefined) {
   return Boolean(status && ACTIVE_JOB_STATUSES.has(status));

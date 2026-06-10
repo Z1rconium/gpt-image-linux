@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { GalleryEntry } from '$lib/api/types';
   import { t } from '$lib/i18n';
-  import { downloadUrl, formatBeijingTime, galleryImageSize, imageUrl } from '$lib/utils/format';
+  import { displayImageSize, downloadUrl, formatBeijingTime, imageUrl } from '$lib/utils/format';
   import { dialog } from '$lib/actions/dialog';
 
   export let open = false;
@@ -150,7 +150,7 @@
           <div class="grid grid-cols-2 gap-2 text-xs">
             <div class="rounded-lg border border-zinc-800 bg-zinc-950/50 px-3 py-2">
               <div class="text-zinc-600">{$t.common.size}</div>
-              <div class="mt-1 text-zinc-300">{galleryImageSize(image)}</div>
+              <div class="mt-1 text-zinc-300">{displayImageSize(image)}</div>
             </div>
             <div class="rounded-lg border border-zinc-800 bg-zinc-950/50 px-3 py-2">
               <div class="text-zinc-600">{$t.common.model}</div>

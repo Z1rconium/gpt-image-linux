@@ -70,10 +70,6 @@ export function displayImageSize(image: ImageSizeLike | null | undefined) {
   return image?.size || '-';
 }
 
-export function galleryImageSize(image: ImageSizeLike) {
-  return displayImageSize(image);
-}
-
 export function stageLabel(job: GenerateJobStatus | null, labels?: Record<string, string>) {
   if (!job?.stage) return '';
   const failureMessage = jobFailureMessage(job);
