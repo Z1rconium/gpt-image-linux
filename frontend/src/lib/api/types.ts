@@ -7,6 +7,7 @@ export type PresetHealthStatus = 'ok' | 'warning' | 'error';
 export type GenerateJobStatusValue = 'queued' | 'running' | 'success' | 'error' | 'cancelled' | 'interrupted' | 'upstream_error';
 export type GalleryExportJobStatusValue = 'queued' | 'running' | 'success' | 'error';
 export type GallerySyncJobStatusValue = 'queued' | 'running' | 'success' | 'error';
+export type GalleryImportJobStatusValue = 'queued' | 'running' | 'success' | 'error';
 
 export type ApiPreset = {
   id: string;
@@ -344,9 +345,27 @@ export type GallerySyncJobStatus = {
   total_count: number;
   compared_count: number;
   uploaded_count: number;
+  pending_upload_count: number;
   skipped_existing_count: number;
   missing_local_count: number;
   failed_count: number;
   bytes_total: number;
   bytes_uploaded: number;
+  dry_run: boolean;
+  checkpoint_filename?: string | null;
+};
+
+export type GalleryImportJobStatus = {
+  job_id: string;
+  status: GalleryImportJobStatusValue;
+  stage?: string | null;
+  message?: string | null;
+  progress: number;
+  requested_count: number;
+  processed_count: number;
+  imported_count: number;
+  skipped_count: number;
+  created_at?: string | null;
+  updated_at?: string | null;
+  error?: string | null;
 };

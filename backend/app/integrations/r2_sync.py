@@ -2,12 +2,13 @@ import logging
 import mimetypes
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from itertools import islice
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from ..core import settings as config
+from ..core.utils import utc_now
 from ..core.validators import (
     get_env_var_ref_name,
     is_malformed_env_var_ref,
@@ -56,6 +57,7 @@ class R2SyncResult:
     total_count: int = 0
     compared_count: int = 0
     uploaded_count: int = 0
+    pending_upload_count: int = 0
     skipped_existing_count: int = 0
     missing_local_count: int = 0
     failed_count: int = 0
@@ -69,6 +71,7 @@ class R2SyncResult:
 @dataclass
 class RemoteKeyLookup:
     keys: set[str]
+    etags: dict[str, str] = field(default_factory=dict)
     use_head_fallback: bool = False
 
     def contains(
@@ -83,8 +86,11 @@ class RemoteKeyLookup:
         if not self.use_head_fallback:
             return False
         try:
-            client.head_object(Bucket=bucket_name, Key=key)
+            response = client.head_object(Bucket=bucket_name, Key=key)
             self.keys.add(key)
+            etag = _etag_from_response(response)
+            if etag:
+                self.etags[key] = etag
             return True
         except Exception as e:
             if _is_not_found_error(e):
@@ -328,6 +334,13 @@ def _is_not_found_error(error: Exception) -> bool:
     return code in {"404", "nosuchkey", "notfound"} or status == "404"
 
 
+def _etag_from_response(response: Any) -> str | None:
+    if not isinstance(response, dict):
+        return None
+    etag = str(response.get("ETag") or "").strip().strip('"')
+    return etag or None
+
+
 def _list_remote_keys(
     client: Any,
     bucket_name: str,
@@ -338,6 +351,7 @@ def _list_remote_keys(
 ) -> RemoteKeyLookup:
     paginator = client.get_paginator("list_objects_v2")
     keys: set[str] = set()
+    etags: dict[str, str] = {}
     scanned_count = 0
     for page in paginator.paginate(Bucket=bucket_name, Prefix=key_prefix):
         for item in page.get("Contents", []) or []:
@@ -347,11 +361,14 @@ def _list_remote_keys(
             scanned_count += 1
             if key in candidate_keys:
                 keys.add(key)
+                etag = _etag_from_response(item)
+                if etag:
+                    etags[key] = etag
                 if len(keys) == len(candidate_keys):
-                    return RemoteKeyLookup(keys=keys)
+                    return RemoteKeyLookup(keys=keys, etags=etags)
             if scanned_count >= fallback_threshold:
-                return RemoteKeyLookup(keys=keys, use_head_fallback=True)
-    return RemoteKeyLookup(keys=keys)
+                return RemoteKeyLookup(keys=keys, etags=etags, use_head_fallback=True)
+    return RemoteKeyLookup(keys=keys, etags=etags)
 
 
 def _head_candidate_key(
@@ -359,10 +376,10 @@ def _head_candidate_key(
     *,
     bucket_name: str,
     key: str,
-) -> str | None:
+) -> tuple[str, str | None] | None:
     try:
-        client.head_object(Bucket=bucket_name, Key=key)
-        return key
+        response = client.head_object(Bucket=bucket_name, Key=key)
+        return key, _etag_from_response(response)
     except Exception as e:
         if _is_not_found_error(e):
             return None
@@ -377,6 +394,7 @@ def _head_remote_keys(
     concurrency: int,
 ) -> RemoteKeyLookup:
     keys: set[str] = set()
+    etags: dict[str, str] = {}
     if not candidate_keys:
         return RemoteKeyLookup(keys=keys)
     with ThreadPoolExecutor(max_workers=concurrency) as executor:
@@ -390,10 +408,13 @@ def _head_remote_keys(
             for key in candidate_keys
         }
         for future in as_completed(futures):
-            found_key = future.result()
-            if found_key:
+            found = future.result()
+            if found:
+                found_key, etag = found
                 keys.add(found_key)
-    return RemoteKeyLookup(keys=keys)
+                if etag:
+                    etags[found_key] = etag
+    return RemoteKeyLookup(keys=keys, etags=etags)
 
 
 def _complete_head_fallback(
@@ -408,14 +429,14 @@ def _complete_head_fallback(
         return lookup
     unresolved_keys = candidate_keys - lookup.keys
     if unresolved_keys:
-        lookup.keys.update(
-            _head_remote_keys(
-                client,
-                bucket_name,
-                unresolved_keys,
-                concurrency=concurrency,
-            ).keys
+        resolved = _head_remote_keys(
+            client,
+            bucket_name,
+            unresolved_keys,
+            concurrency=concurrency,
         )
+        lookup.keys.update(resolved.keys)
+        lookup.etags.update(resolved.etags)
     lookup.use_head_fallback = False
     return lookup
 
@@ -542,12 +563,18 @@ def _sync_candidate(
         return CandidateSyncOutcome(candidate=candidate, error=str(e))
 
 
-def _state_row_for_candidate(candidate: LocalSyncCandidate) -> dict[str, Any]:
+def _state_row_for_candidate(
+    candidate: LocalSyncCandidate,
+    *,
+    etag: str | None = None,
+) -> dict[str, Any]:
     return {
         "filename": candidate.filename,
         "sha256": str(_entry_value(candidate.entry, "sha256") or "").strip(),
         "bytes": candidate.byte_size,
         "key": candidate.key,
+        "etag": etag,
+        "last_remote_seen_at": utc_now(),
     }
 
 
@@ -560,6 +587,7 @@ def sync_gallery_to_r2(
     client_factory: ClientFactory | None = None,
     state_recorder: SyncStateRecorder | None = None,
     full_reconcile: bool = False,
+    dry_run: bool = False,
     concurrency: int | None = None,
     batch_size: int = R2_SYNC_BATCH_SIZE,
 ) -> R2SyncResult:
@@ -574,20 +602,21 @@ def sync_gallery_to_r2(
     result = R2SyncResult(total_count=known_total_count)
     errors: list[str] = []
 
-    def publish(stage: str, message: str) -> None:
+    def publish(stage: str, message: str, *, last_filename: str | None = None) -> None:
         if not progress_cb:
             return
         progress = 100 if result.total_count <= 0 else round(
             min(result.compared_count, result.total_count) / result.total_count * 100
         )
-        progress_cb(
-            {
-                "stage": stage,
-                "message": message,
-                "progress": progress,
-                **result.to_updates(),
-            }
-        )
+        updates = {
+            "stage": stage,
+            "message": message,
+            "progress": progress,
+            **result.to_updates(),
+        }
+        if last_filename:
+            updates["last_filename"] = last_filename
+        progress_cb(updates)
 
     publish("preparing", "Preparing local gallery candidates")
 
@@ -614,8 +643,23 @@ def sync_gallery_to_r2(
             candidate_keys=candidate_keys,
             concurrency=normalized_concurrency,
             full_reconcile=full_reconcile,
-        ).keys
+        )
         publish("comparing", "Comparing local gallery with R2 objects")
+
+        if dry_run:
+            for candidate in candidates:
+                if candidate.key in remote_keys.keys:
+                    result.skipped_existing_count += 1
+                else:
+                    result.pending_upload_count += 1
+                result.compared_count += 1
+                publish("preflight", f"Compared {result.compared_count} gallery image(s)")
+            publish(
+                "checkpoint",
+                f"Checkpoint after {candidates[-1].filename}",
+                last_filename=candidates[-1].filename,
+            )
+            continue
 
         confirmed_rows: list[dict[str, Any]] = []
         with ThreadPoolExecutor(max_workers=normalized_concurrency) as executor:
@@ -625,7 +669,7 @@ def sync_gallery_to_r2(
                     client,
                     candidate,
                     bucket_name=effective.bucket_name,
-                    remote_keys=remote_keys,
+                    remote_keys=remote_keys.keys,
                 )
                 for candidate in candidates
             ]
@@ -633,9 +677,14 @@ def sync_gallery_to_r2(
                 outcome = future.result()
                 if outcome.skipped_existing:
                     result.skipped_existing_count += 1
-                    confirmed_rows.append(_state_row_for_candidate(outcome.candidate))
+                    confirmed_rows.append(
+                        _state_row_for_candidate(
+                            outcome.candidate,
+                            etag=remote_keys.etags.get(outcome.candidate.key),
+                        )
+                    )
                 elif outcome.uploaded:
-                    remote_keys.add(outcome.candidate.key)
+                    remote_keys.keys.add(outcome.candidate.key)
                     result.uploaded_count += 1
                     result.bytes_uploaded += outcome.candidate.byte_size
                     confirmed_rows.append(_state_row_for_candidate(outcome.candidate))
@@ -645,6 +694,12 @@ def sync_gallery_to_r2(
 
                 result.compared_count += 1
                 publish("uploading", f"Compared {result.compared_count} gallery image(s)")
+
+        publish(
+            "checkpoint",
+            f"Checkpoint after {candidates[-1].filename}",
+            last_filename=candidates[-1].filename,
+        )
 
         if state_recorder and confirmed_rows:
             try:

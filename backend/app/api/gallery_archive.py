@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import shutil
 import tempfile
 import time
 import uuid
@@ -28,6 +29,44 @@ class GalleryZipFileResult:
     exported_count: int
     missing_count: int
     bytes_total: int
+
+
+@dataclass(frozen=True)
+class ImportZipManifest:
+    names: set[str]
+    use_ndjson: bool
+
+
+@dataclass
+class _PreparedGalleryZip:
+    stream: ZipStream
+    requested_count: int
+    exported_count: int
+    missing_count: int
+    bytes_total: int
+    cleanup_paths: list[Path]
+
+
+class _JsonArrayTempWriter:
+    def __init__(self, *, suffix: str = ".json") -> None:
+        fd, tmp_name = tempfile.mkstemp(prefix="gallery-metadata-", suffix=suffix)
+        self.path = Path(tmp_name)
+        self._file = os.fdopen(fd, "w", encoding="utf-8")
+        self._first = True
+        self.count = 0
+
+    def append(self, value: dict[str, Any]) -> None:
+        if not self._first:
+            self._file.write(",")
+        self._first = False
+        self._file.write(_compact_json(value))
+        self.count += 1
+
+    def close(self) -> None:
+        self._file.close()
+
+    def cleanup(self) -> None:
+        self.path.unlink(missing_ok=True)
 
 
 def max_upload_bytes() -> int:
@@ -98,6 +137,21 @@ def _resolve_export_metadata_for_entry(
     return data
 
 
+def _compact_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _export_metadata_header() -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "exported_at": utc_now(),
+        "app": {
+            "name": "gpt-image-linux",
+            "version": config.read_app_version(),
+        },
+    }
+
+
 def unique_export_name(path: Path, used_names: set[str]) -> str:
     name = path.name
     base = path.stem
@@ -117,64 +171,13 @@ def iter_gallery_zip_chunks(
     requested_count: int = 0,
     progress: GalleryZipProgressCallback | None = None,
 ) -> Generator[bytes, None, GalleryZipFileResult]:
-    used_names: set[str] = set()
-    metadata_images: list[dict[str, Any]] = []
-    skipped_entries: list[dict[str, Any]] = list(skipped or [])
-    initial_skipped_count = len(skipped_entries)
-    processed_count = 0
-    zs = ZipStream(compress_type=zipfile.ZIP_STORED, sized=True)
-    last_emit_at = 0.0
-
-    _emit_zip_progress(
-        progress,
-        status="running",
-        stage="preparing",
-        message="Preparing gallery ZIP entries",
-        progress=0,
-        processed_count=0,
+    prepared = _prepare_gallery_zip_stream(
+        entries,
+        skipped=skipped,
         requested_count=requested_count,
+        progress=progress,
     )
-
-    for entry in entries:
-        processed_count += 1
-        path = storage.safe_image_path(_entry_filename(entry))
-        if not path or not path.exists():
-            skipped_entries.append(
-                {
-                    "id": _entry_to_dict(entry).get("id"),
-                    "filename": _entry_filename(entry),
-                    "reason": "image_file_missing",
-                }
-            )
-        else:
-            name = unique_export_name(path, used_names)
-            metadata_entry = _resolve_export_metadata_for_entry(entry, path)
-            metadata_entry["filename"] = name
-            metadata_images.append(metadata_entry)
-            zs.add_path(path, arcname=f"images/{name}")
-
-        denominator = max(requested_count, processed_count, 1)
-        prepared_units = min(denominator, processed_count + initial_skipped_count)
-        if processed_count == 1 or processed_count % 10 == 0 or prepared_units >= denominator:
-            _emit_zip_progress(
-                progress,
-                status="running",
-                stage="preparing",
-                message="Preparing gallery ZIP entries",
-                progress=min(20, round((prepared_units / denominator) * 20)),
-                processed_count=prepared_units,
-                requested_count=denominator,
-                exported_count=len(metadata_images),
-                missing_count=len(skipped_entries),
-            )
-
-    metadata = _build_export_metadata_from_rows(metadata_images, skipped_entries)
-    zs.add(
-        json.dumps(metadata, ensure_ascii=False, indent=2).encode("utf-8"),
-        arcname="metadata.json",
-    )
-
-    bytes_total = len(zs)
+    last_emit_at = 0.0
     bytes_written = 0
     _emit_zip_progress(
         progress,
@@ -182,37 +185,41 @@ def iter_gallery_zip_chunks(
         stage="streaming",
         message="Streaming ZIP archive",
         progress=20,
-        bytes_total=bytes_total,
+        bytes_total=prepared.bytes_total,
         bytes_written=0,
-        exported_count=len(metadata_images),
-        missing_count=len(skipped_entries),
+        exported_count=prepared.exported_count,
+        missing_count=prepared.missing_count,
     )
 
-    for chunk in zs:
-        if not chunk:
-            continue
-        bytes_written += len(chunk)
-        now = time.monotonic()
-        if now - last_emit_at >= 0.1 or bytes_written >= bytes_total:
-            last_emit_at = now
-            _emit_zip_progress(
-                progress,
-                status="running",
-                stage="streaming",
-                message="Streaming ZIP archive",
-                progress=20 + round((bytes_written / max(bytes_total, 1)) * 80),
-                bytes_total=bytes_total,
-                bytes_written=bytes_written,
-                exported_count=len(metadata_images),
-                missing_count=len(skipped_entries),
-            )
-        yield chunk
+    try:
+        for chunk in prepared.stream:
+            if not chunk:
+                continue
+            bytes_written += len(chunk)
+            now = time.monotonic()
+            if now - last_emit_at >= 0.1 or bytes_written >= prepared.bytes_total:
+                last_emit_at = now
+                _emit_zip_progress(
+                    progress,
+                    status="running",
+                    stage="streaming",
+                    message="Streaming ZIP archive",
+                    progress=20 + round((bytes_written / max(prepared.bytes_total, 1)) * 80),
+                    bytes_total=prepared.bytes_total,
+                    bytes_written=bytes_written,
+                    exported_count=prepared.exported_count,
+                    missing_count=prepared.missing_count,
+                )
+            yield chunk
+    finally:
+        for path in prepared.cleanup_paths:
+            path.unlink(missing_ok=True)
 
     return GalleryZipFileResult(
-        requested_count=max(requested_count, processed_count + initial_skipped_count),
-        exported_count=len(metadata_images),
-        missing_count=len(skipped_entries),
-        bytes_total=bytes_total,
+        requested_count=prepared.requested_count,
+        exported_count=prepared.exported_count,
+        missing_count=prepared.missing_count,
+        bytes_total=prepared.bytes_total,
     )
 
 
@@ -229,18 +236,148 @@ def _build_export_metadata_from_rows(
     images: list[dict[str, Any]],
     skipped: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    metadata: dict[str, Any] = {
-        "schema_version": 1,
-        "exported_at": utc_now(),
-        "app": {
-            "name": "gpt-image-linux",
-            "version": config.read_app_version(),
-        },
-        "images": images,
-    }
+    metadata: dict[str, Any] = {**_export_metadata_header(), "images": images}
     if skipped:
         metadata["skipped"] = skipped
     return metadata
+
+
+def _prepare_gallery_zip_stream(
+    entries: Iterable[GalleryEntry | dict[str, Any]],
+    skipped: Iterable[dict[str, Any]] | None = None,
+    *,
+    requested_count: int = 0,
+    progress: GalleryZipProgressCallback | None = None,
+) -> _PreparedGalleryZip:
+    used_names: set[str] = set()
+    processed_count = 0
+    exported_count = 0
+    missing_count = 0
+    cleanup_paths: list[Path] = []
+    zs = ZipStream(compress_type=zipfile.ZIP_STORED, sized=True)
+
+    skipped_writer = _JsonArrayTempWriter()
+    cleanup_paths.append(skipped_writer.path)
+
+    metadata_json_fd, metadata_json_name = tempfile.mkstemp(
+        prefix="gallery-metadata-",
+        suffix=".json",
+    )
+    metadata_json_path = Path(metadata_json_name)
+    cleanup_paths.append(metadata_json_path)
+
+    metadata_ndjson_fd, metadata_ndjson_name = tempfile.mkstemp(
+        prefix="gallery-metadata-",
+        suffix=".ndjson",
+    )
+    metadata_ndjson_path = Path(metadata_ndjson_name)
+    cleanup_paths.append(metadata_ndjson_path)
+
+    _emit_zip_progress(
+        progress,
+        status="running",
+        stage="preparing",
+        message="Preparing gallery ZIP entries",
+        progress=0,
+        processed_count=0,
+        requested_count=requested_count,
+    )
+
+    try:
+        with (
+            os.fdopen(metadata_json_fd, "w", encoding="utf-8") as metadata_json,
+            os.fdopen(metadata_ndjson_fd, "w", encoding="utf-8") as metadata_ndjson,
+        ):
+            header = _export_metadata_header()
+            metadata_json.write("{")
+            metadata_json.write(f'"schema_version":{_compact_json(header["schema_version"])}')
+            metadata_json.write(f',"exported_at":{_compact_json(header["exported_at"])}')
+            metadata_json.write(f',"app":{_compact_json(header["app"])}')
+            metadata_json.write(',"images":[')
+            metadata_ndjson.write(_compact_json({"type": "header", **header}) + "\n")
+
+            first_image = True
+            for raw_skipped in skipped or ():
+                skipped_entry = dict(raw_skipped)
+                skipped_writer.append(skipped_entry)
+                metadata_ndjson.write(
+                    _compact_json({"type": "skipped", "entry": skipped_entry}) + "\n"
+                )
+                missing_count += 1
+
+            initial_skipped_count = missing_count
+
+            for entry in entries:
+                processed_count += 1
+                path = storage.safe_image_path(_entry_filename(entry))
+                if not path or not path.exists():
+                    skipped_entry = {
+                        "id": _entry_to_dict(entry).get("id"),
+                        "filename": _entry_filename(entry),
+                        "reason": "image_file_missing",
+                    }
+                    skipped_writer.append(skipped_entry)
+                    metadata_ndjson.write(
+                        _compact_json({"type": "skipped", "entry": skipped_entry}) + "\n"
+                    )
+                    missing_count += 1
+                else:
+                    name = unique_export_name(path, used_names)
+                    metadata_entry = _resolve_export_metadata_for_entry(entry, path)
+                    metadata_entry["filename"] = name
+                    if not first_image:
+                        metadata_json.write(",")
+                    first_image = False
+                    metadata_json.write(_compact_json(metadata_entry))
+                    metadata_ndjson.write(
+                        _compact_json({"type": "image", "image": metadata_entry}) + "\n"
+                    )
+                    exported_count += 1
+                    zs.add_path(path, arcname=f"images/{name}")
+
+                denominator = max(requested_count, processed_count + initial_skipped_count, 1)
+                prepared_units = min(denominator, processed_count + initial_skipped_count)
+                if processed_count == 1 or processed_count % 10 == 0 or prepared_units >= denominator:
+                    _emit_zip_progress(
+                        progress,
+                        status="running",
+                        stage="preparing",
+                        message="Preparing gallery ZIP entries",
+                        progress=min(20, round((prepared_units / denominator) * 20)),
+                        processed_count=prepared_units,
+                        requested_count=denominator,
+                        exported_count=exported_count,
+                        missing_count=missing_count,
+                    )
+
+            metadata_json.write("]")
+            skipped_writer.close()
+            if missing_count:
+                metadata_json.write(',"skipped":[')
+                with open(skipped_writer.path, "r", encoding="utf-8") as skipped_file:
+                    shutil.copyfileobj(skipped_file, metadata_json)
+                metadata_json.write("]")
+            metadata_json.write("}")
+
+        zs.add_path(metadata_json_path, arcname="metadata.json")
+        zs.add_path(metadata_ndjson_path, arcname="metadata.ndjson")
+        bytes_total = len(zs)
+        return _PreparedGalleryZip(
+            stream=zs,
+            requested_count=max(requested_count, processed_count + initial_skipped_count),
+            exported_count=exported_count,
+            missing_count=missing_count,
+            bytes_total=bytes_total,
+            cleanup_paths=cleanup_paths,
+        )
+    except BaseException:
+        try:
+            skipped_writer.close()
+        except Exception:
+            pass
+        for path in cleanup_paths:
+            path.unlink(missing_ok=True)
+        raise
 
 
 def write_gallery_zip_file(
@@ -256,60 +393,12 @@ def write_gallery_zip_file(
     temp_path = destination.with_name(f"{destination.name}.tmp")
     temp_path.unlink(missing_ok=True)
 
-    used_names: set[str] = set()
-    metadata_images: list[dict[str, Any]] = []
-    skipped_entries: list[dict[str, Any]] = list(skipped or [])
-    initial_skipped_count = len(skipped_entries)
-    processed_count = 0
-    zs = ZipStream(compress_type=zipfile.ZIP_STORED, sized=True)
-
-    _emit_zip_progress(
-        progress,
-        status="running",
-        stage="preparing",
-        message="Preparing gallery ZIP entries",
-        progress=0,
-        processed_count=0,
+    prepared = _prepare_gallery_zip_stream(
+        entries,
+        skipped=skipped,
         requested_count=requested_count,
+        progress=progress,
     )
-
-    for entry in entries:
-        processed_count += 1
-        path = storage.safe_image_path(_entry_filename(entry))
-        if not path or not path.exists():
-            skipped_entries.append(
-                {
-                    "id": _entry_to_dict(entry).get("id"),
-                    "filename": _entry_filename(entry),
-                    "reason": "image_file_missing",
-                }
-            )
-        else:
-            name = unique_export_name(path, used_names)
-            metadata_entry = _resolve_export_metadata_for_entry(entry, path)
-            metadata_entry["filename"] = name
-            metadata_images.append(metadata_entry)
-            zs.add_path(path, arcname=f"images/{name}")
-
-        denominator = max(requested_count, processed_count, 1)
-        prepared_units = min(denominator, processed_count + initial_skipped_count)
-        if processed_count == 1 or processed_count % 10 == 0 or prepared_units >= denominator:
-            _emit_zip_progress(
-                progress,
-                status="running",
-                stage="preparing",
-                message="Preparing gallery ZIP entries",
-                progress=min(20, round((prepared_units / denominator) * 20)),
-                processed_count=prepared_units,
-                requested_count=denominator,
-                exported_count=len(metadata_images),
-                missing_count=len(skipped_entries),
-            )
-
-    metadata = _build_export_metadata_from_rows(metadata_images, skipped_entries)
-    metadata_bytes = json.dumps(metadata, ensure_ascii=False, indent=2).encode("utf-8")
-    zs.add(metadata_bytes, arcname="metadata.json")
-    bytes_total = len(zs)
     bytes_written = 0
     last_emit_at = 0.0
 
@@ -319,44 +408,47 @@ def write_gallery_zip_file(
         stage="packing",
         message="Writing ZIP archive",
         progress=20,
-        bytes_total=bytes_total,
+        bytes_total=prepared.bytes_total,
         bytes_written=0,
-        exported_count=len(metadata_images),
-        missing_count=len(skipped_entries),
+        exported_count=prepared.exported_count,
+        missing_count=prepared.missing_count,
     )
 
     try:
         with open(temp_path, "wb") as f:
-            for chunk in zs:
+            for chunk in prepared.stream:
                 if not chunk:
                     continue
                 f.write(chunk)
                 bytes_written += len(chunk)
                 now = time.monotonic()
-                if now - last_emit_at >= 0.1 or bytes_written >= bytes_total:
+                if now - last_emit_at >= 0.1 or bytes_written >= prepared.bytes_total:
                     last_emit_at = now
                     _emit_zip_progress(
                         progress,
                         status="running",
                         stage="packing",
                         message="Writing ZIP archive",
-                        progress=20 + round((bytes_written / max(bytes_total, 1)) * 80),
-                        bytes_total=bytes_total,
+                        progress=20 + round((bytes_written / max(prepared.bytes_total, 1)) * 80),
+                        bytes_total=prepared.bytes_total,
                         bytes_written=bytes_written,
-                        exported_count=len(metadata_images),
-                        missing_count=len(skipped_entries),
+                        exported_count=prepared.exported_count,
+                        missing_count=prepared.missing_count,
                     )
         temp_path.replace(destination)
     except BaseException:
         temp_path.unlink(missing_ok=True)
         destination.unlink(missing_ok=True)
         raise
+    finally:
+        for path in prepared.cleanup_paths:
+            path.unlink(missing_ok=True)
 
     return GalleryZipFileResult(
-        requested_count=requested_count,
-        exported_count=len(metadata_images),
-        missing_count=len(skipped_entries),
-        bytes_total=bytes_total,
+        requested_count=prepared.requested_count,
+        exported_count=prepared.exported_count,
+        missing_count=prepared.missing_count,
+        bytes_total=prepared.bytes_total,
     )
 
 
@@ -385,7 +477,7 @@ def is_safe_zip_member_name(filename: str) -> bool:
     )
 
 
-def validate_import_zip_infos(zf: zipfile.ZipFile) -> set[str]:
+def validate_import_zip_infos(zf: zipfile.ZipFile) -> ImportZipManifest:
     file_infos = [info for info in zf.infolist() if not info.is_dir()]
     if len(file_infos) > config.IMPORT_MAX_FILES:
         raise HTTPException(
@@ -396,11 +488,14 @@ def validate_import_zip_infos(zf: zipfile.ZipFile) -> set[str]:
     names: set[str] = set()
     total_uncompressed = 0
     metadata_info: zipfile.ZipInfo | None = None
+    metadata_ndjson_info: zipfile.ZipInfo | None = None
     for info in file_infos:
         if not is_safe_zip_member_name(info.filename):
             raise HTTPException(status_code=400, detail="Import archive contains unsafe paths")
         if info.filename == "metadata.json":
             metadata_info = info
+        elif info.filename == "metadata.ndjson":
+            metadata_ndjson_info = info
         elif Path(info.filename).suffix.lower() in IMAGE_UPLOAD_EXTENSIONS:
             if info.file_size > max_upload_bytes():
                 raise HTTPException(status_code=400, detail="Imported image is too large")
@@ -424,26 +519,74 @@ def validate_import_zip_infos(zf: zipfile.ZipFile) -> set[str]:
             )
         names.add(info.filename)
 
-    if metadata_info is None:
+    if metadata_info is None and metadata_ndjson_info is None:
         raise HTTPException(status_code=400, detail="metadata.json is required")
-    if metadata_info.file_size > config.IMPORT_MAX_METADATA_BYTES:
+    if (
+        metadata_info is not None
+        and metadata_ndjson_info is None
+        and metadata_info.file_size > config.IMPORT_MAX_METADATA_BYTES
+    ):
         raise HTTPException(status_code=400, detail="metadata.json is too large")
 
-    return names
+    return ImportZipManifest(
+        names=names,
+        use_ndjson=metadata_ndjson_info is not None,
+    )
 
 
-def iter_import_gallery_entries(zip_path: Path) -> Iterator[tuple[bytes, dict]]:
+def iter_import_gallery_entries(
+    zip_path: Path,
+    *,
+    progress: GalleryZipProgressCallback | None = None,
+) -> Iterator[tuple[bytes, dict]]:
     try:
         zf = zipfile.ZipFile(zip_path)
     except zipfile.BadZipFile as e:
         raise HTTPException(status_code=400, detail="Import file must be a valid ZIP") from e
 
     with zf:
-        yield from _iter_zip_import_entries(zf)
+        yield from _iter_zip_import_entries(zf, progress=progress)
 
 
-async def stream_upload_to_tempfile(archive: UploadFile, max_bytes: int) -> Path:
-    fd, tmp_name = tempfile.mkstemp(suffix=".zip")
+def count_import_gallery_entries(zip_path: Path) -> int:
+    try:
+        zf = zipfile.ZipFile(zip_path)
+    except zipfile.BadZipFile as e:
+        raise HTTPException(status_code=400, detail="Import file must be a valid ZIP") from e
+
+    with zf:
+        manifest = validate_import_zip_infos(zf)
+        if manifest.use_ndjson:
+            return sum(
+                1
+                for entry in _iter_import_metadata_ndjson(zf)
+                if _metadata_entry_has_importable_image(entry, manifest.names)
+            )
+        metadata = _read_import_metadata_json(zf)
+        raw_images = metadata.get("images")
+        if not isinstance(raw_images, list):
+            raise HTTPException(status_code=400, detail="metadata.json images must be a list")
+        return sum(
+            1
+            for entry in raw_images
+            if isinstance(entry, dict)
+            and _metadata_entry_has_importable_image(entry, manifest.names)
+        )
+
+
+async def stream_upload_to_tempfile(
+    archive: UploadFile,
+    max_bytes: int,
+    *,
+    directory: Path | None = None,
+) -> Path:
+    if directory is not None:
+        directory.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix="gallery-import-",
+        suffix=".zip",
+        dir=str(directory) if directory is not None else None,
+    )
     tmp_path = Path(tmp_name)
     total = 0
     chunk_size = 1024 * 1024
@@ -471,31 +614,109 @@ async def stream_upload_to_tempfile(archive: UploadFile, max_bytes: int) -> Path
     return tmp_path
 
 
-def _iter_zip_import_entries(zf: zipfile.ZipFile) -> Iterator[tuple[bytes, dict]]:
-    names = validate_import_zip_infos(zf)
+def _read_import_metadata_json(zf: zipfile.ZipFile) -> dict[str, Any]:
     try:
-        metadata = json.loads(zf.read("metadata.json").decode("utf-8"))
+        raw_metadata = zf.read("metadata.json")
     except KeyError as e:
         raise HTTPException(status_code=400, detail="metadata.json is required") from e
+
+    if len(raw_metadata) > config.IMPORT_MAX_METADATA_BYTES:
+        raise HTTPException(status_code=400, detail="metadata.json is too large")
+
+    try:
+        metadata = json.loads(raw_metadata.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as e:
         raise HTTPException(status_code=400, detail="metadata.json is invalid") from e
+    if not isinstance(metadata, dict):
+        raise HTTPException(status_code=400, detail="metadata.json is invalid")
+    return metadata
 
-    raw_images = metadata.get("images")
-    if not isinstance(raw_images, list):
-        raise HTTPException(status_code=400, detail="metadata.json images must be a list")
+
+def _iter_import_metadata_ndjson(zf: zipfile.ZipFile) -> Iterator[dict[str, Any]]:
+    try:
+        stream = zf.open("metadata.ndjson")
+    except KeyError as e:
+        raise HTTPException(status_code=400, detail="metadata.ndjson is required") from e
+
+    with stream:
+        for raw_line in stream:
+            if len(raw_line) > config.IMPORT_MAX_METADATA_BYTES:
+                raise HTTPException(status_code=400, detail="metadata.ndjson line is too large")
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as e:
+                raise HTTPException(status_code=400, detail="metadata.ndjson is invalid") from e
+            if not isinstance(record, dict):
+                continue
+            if str(record.get("type") or "") != "image":
+                continue
+            image = record.get("image")
+            if isinstance(image, dict):
+                yield image
+
+
+def _metadata_entry_has_importable_image(raw_entry: dict[str, Any], names: set[str]) -> bool:
+    exported_filename = str(raw_entry.get("filename") or "")
+    zip_name = exported_filename if exported_filename in names else f"images/{exported_filename}"
+    return zip_name in names and Path(zip_name).suffix.lower() in IMAGE_UPLOAD_EXTENSIONS
+
+
+def _emit_import_progress(
+    callback: GalleryZipProgressCallback | None,
+    processed_count: int,
+    importable_count: int,
+    skipped_count: int,
+) -> None:
+    _emit_zip_progress(
+        callback,
+        status="running",
+        stage="validating",
+        message="Validating import archive entries",
+        processed_count=processed_count,
+        exported_count=importable_count,
+        missing_count=skipped_count,
+    )
+
+
+def _iter_zip_import_entries(
+    zf: zipfile.ZipFile,
+    *,
+    progress: GalleryZipProgressCallback | None = None,
+) -> Iterator[tuple[bytes, dict]]:
+    manifest = validate_import_zip_infos(zf)
+    names = manifest.names
+    if manifest.use_ndjson:
+        raw_images: Iterable[dict[str, Any]] = _iter_import_metadata_ndjson(zf)
+    else:
+        metadata = _read_import_metadata_json(zf)
+        raw_metadata_images = metadata.get("images")
+        if not isinstance(raw_metadata_images, list):
+            raise HTTPException(status_code=400, detail="metadata.json images must be a list")
+        raw_images = raw_metadata_images
 
     used_names: set[str] = set()
     used_ids: set[str] = set()
+    processed_count = 0
+    importable_count = 0
+    skipped_count = 0
 
     for raw_entry in raw_images:
         if not isinstance(raw_entry, dict):
             continue
+        processed_count += 1
 
         exported_filename = str(raw_entry.get("filename") or "")
         zip_name = exported_filename if exported_filename in names else f"images/{exported_filename}"
         if zip_name not in names:
+            skipped_count += 1
+            _emit_import_progress(progress, processed_count, importable_count, skipped_count)
             continue
         if Path(zip_name).suffix.lower() not in IMAGE_UPLOAD_EXTENSIONS:
+            skipped_count += 1
+            _emit_import_progress(progress, processed_count, importable_count, skipped_count)
             continue
 
         try:
@@ -503,8 +724,12 @@ def _iter_zip_import_entries(zf: zipfile.ZipFile) -> Iterator[tuple[bytes, dict]
                 limit = max_upload_bytes()
                 image_bytes = f.read(limit + 1)
         except KeyError:
+            skipped_count += 1
+            _emit_import_progress(progress, processed_count, importable_count, skipped_count)
             continue
         if not image_bytes:
+            skipped_count += 1
+            _emit_import_progress(progress, processed_count, importable_count, skipped_count)
             continue
         if len(image_bytes) > limit:
             raise HTTPException(
@@ -521,6 +746,8 @@ def _iter_zip_import_entries(zf: zipfile.ZipFile) -> Iterator[tuple[bytes, dict]
                 ),
             )
         except ValueError:
+            skipped_count += 1
+            _emit_import_progress(progress, processed_count, importable_count, skipped_count)
             continue
 
         original_name = Path(exported_filename or zip_name).name
@@ -544,4 +771,6 @@ def _iter_zip_import_entries(zf: zipfile.ZipFile) -> Iterator[tuple[bytes, dict]
             "filename": filename,
             "created_at": str(raw_entry.get("created_at") or utc_now()),
         }
+        importable_count += 1
+        _emit_import_progress(progress, processed_count, importable_count, skipped_count)
         yield image_bytes, entry

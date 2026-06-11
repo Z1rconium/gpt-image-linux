@@ -42,8 +42,8 @@ Key characteristics:
 - optional global Webhook URL with HTTPS-only validation, SSRF checks, signing, retry, and masked settings responses
 - gallery with filters (FTS-backed prompt search, model, preset, size, date range, favorite), URL-synced page/non-prompt-filter/lightbox/job-history state, direct page-number jump, lightbox previous/next navigation and left/right keyboard shortcuts, “Edit this image”, download, custom delete confirmations with 5-second undo for single images, batch actions with partial-success feedback, delete/delete-all, prompt/image-url copy, and on-demand total-size metadata
 - prompt snippets drawer for reusable prompt templates, stored separately from gallery images in SQLite
-- ZIP export/import (`metadata.json`) with streaming upload, safety validation, low-memory export path, skipped-entry metadata for partial batch downloads, and visible import/export/download progress states
-- Cloudflare R2 gallery backup sync: configurable in `.env` or Web Settings, health-probed from Settings, and manually or periodically synced from Gallery without changing local gallery storage as the source of truth
+- ZIP export/import (`metadata.json` plus streaming `metadata.ndjson` for new archives) with streaming upload, safety validation, low-memory direct export by default, skipped-entry metadata for partial batch downloads, and visible import/export/download progress states
+- Cloudflare R2 gallery backup sync: configurable in `.env` or Web Settings, health-probed from Settings, dry-run preflighted before manual sync, and manually or periodically synced from Gallery without changing local gallery storage as the source of truth
 - access-key gate, Host/public-origin allowlist, IP allowlist/proxy-header support, GitHub version badge, and CSP nonce injection
 - observability hooks for job stage timings, slow `/api/gallery` query logging, queue/failure metrics, and optional JSON/Prometheus metrics endpoints
 
@@ -348,7 +348,7 @@ The panel supports these upstream paths. The API base URL may either omit or inc
 - R2 Backup is an incremental backup path, not remote gallery storage.
 - Configure it in `.env` with `R2_BACKUP_ENABLED=true` plus the other `R2_*` variables, or in Web Settings. When SQLite has no saved R2 settings yet, startup persists the current `.env` R2 values so they appear in Web Settings. Later Web Settings saves take precedence. Web Settings accepts `${ENV_VAR_NAME}` refs for credentials; literal stored credentials require `ALLOW_PLAINTEXT_SECRETS=true`.
 - Test R2 in Settings runs `HeadBucket`, a prefix-scoped `ListObjectsV2`, and a small probe object write; probe cleanup failure is reported as a warning.
-- The Gallery Sync button records confirmed uploads in SQLite and normally only compares local filenames that are new or changed for the current `R2_KEY_PREFIX`; existing bucket objects are skipped, and bucket-only objects are never deleted or overwritten. Full reconcile mode rechecks local filenames against R2 for cases such as remote manual deletion.
+- The Gallery Sync button first runs a dry-run preflight showing compared, pending upload, skipped-existing, and missing-local counts. Confirmed uploads are recorded in SQLite and normal sync only compares local filenames that are new or changed for the current `R2_KEY_PREFIX`; existing bucket objects are skipped, and bucket-only objects are never deleted or overwritten. Full reconcile mode rechecks local filenames against R2 for cases such as remote manual deletion and stores a filename checkpoint so an expired job can resume after the last completed page.
 - `R2_SYNC_CONCURRENCY` controls bounded concurrent R2 `HEAD`/upload workers; the default is `4`, which is usually better for many small images than fully serial sync.
 - Set `R2_SYNC_INTERVAL_HOURS` or the Web Settings interval to a positive integer to run the same incremental sync periodically. `0` disables automatic sync, and startup waits one full interval before the first scheduled run.
 
@@ -370,7 +370,7 @@ The panel supports these upstream paths. The API base URL may either omit or inc
 
 - each uploaded source image is limited by `MAX_FILE_SIZE_MB`, must pass full Pillow decode validation plus pixel-bomb limits, and must be a supported raster format (`.png`, `.jpg`, `.jpeg`, `.webp`, `.gif`, `.avif`, `.bmp`, `.heic`, `.heif`, `.ico`, `.tif`, `.tiff`); SVG is rejected
 - `/api/import` accepts ZIP archives created by `/api/download-all`
-- import archives must include `metadata.json`
+- import archives must include `metadata.json` or `metadata.ndjson`; new exports include both, and import prefers `metadata.ndjson` to avoid loading large metadata arrays into memory while keeping `metadata.json` for older versions
 - selected-image ZIP downloads include `metadata.skipped` when requested gallery rows or image files are missing
 - import archives are validated for uploaded size, file count, total uncompressed size, metadata size, member-path safety, and compression ratio
 - imported image entries must pass file extension, content-type/magic-byte, full decoder, and pixel-count validation before they are stored
@@ -508,7 +508,7 @@ All variables listed in `.env.example` are also tracked in SQLite for Overall Co
 | `GET` | `/api/thumb/{filename}` | Serve an existing WebP gallery thumbnail; missing thumbnails are queued for the background worker |
 | `GET` | `/api/download/{filename}` | Download image as attachment |
 | `DELETE` | `/api/gallery/{id}` | Delete gallery entry and its server image file |
-| `GET` | `/api/download-all` | Download all gallery images plus `metadata.json` as a low-memory streaming ZIP file; accepts `export_job_id` from a direct export job |
+| `GET` | `/api/download-all` | Download all gallery images plus `metadata.json`/`metadata.ndjson` as a low-memory streaming ZIP file; accepts `export_job_id` from a direct export job |
 | `POST` | `/api/gallery/direct-export-jobs` | Reserve a direct streaming ZIP export job for the full gallery and return its `download_url` |
 | `GET` | `/api/gallery/direct-export-jobs/{job_id}` | Get direct streaming ZIP export job status |
 | `GET` | `/api/gallery/direct-export-jobs/{job_id}/events` | Stream direct ZIP prepare/output progress over SSE |
@@ -516,10 +516,12 @@ All variables listed in `.env.example` are also tracked in SQLite for Overall Co
 | `GET` | `/api/gallery/export-jobs/{job_id}` | Get tracked ZIP export job status |
 | `GET` | `/api/gallery/export-jobs/{job_id}/events` | Stream ZIP export pack progress over SSE |
 | `GET` | `/api/gallery/export-jobs/{job_id}/download` | Download a completed tracked ZIP export with `Content-Length` transfer progress |
-| `POST` | `/api/gallery/sync-jobs` | Start a single active R2 gallery backup sync job |
+| `POST` | `/api/gallery/sync-jobs` | Start a single active R2 gallery backup sync job; accepts `dry_run` and `full_reconcile` |
 | `GET` | `/api/gallery/sync-jobs/{job_id}` | Get R2 sync job status |
 | `GET` | `/api/gallery/sync-jobs/{job_id}/events` | Stream R2 sync progress over SSE |
-| `POST` | `/api/import` | Import a ZIP created by `/api/download-all` |
+| `POST` | `/api/import` | Import a ZIP created by `/api/download-all`; pass `async_job=true` to create a progress-tracked import job |
+| `GET` | `/api/gallery/import-jobs/{job_id}` | Get progress-tracked Gallery import job status |
+| `GET` | `/api/gallery/import-jobs/{job_id}/events` | Stream Gallery import progress over SSE |
 | `DELETE` | `/api/gallery` | Delete all gallery entries and server image files |
 | `GET` | `/api/metrics` | Optional metrics snapshot; returns JSON by default or Prometheus exposition format with `Accept: text/plain`; only available when `ENABLE_METRICS=true` |
 | `GET` | `/api/metrics/prometheus` | Optional Prometheus exposition metrics; only available when `ENABLE_METRICS=true` |
@@ -538,11 +540,11 @@ All variables listed in `.env.example` are also tracked in SQLite for Overall Co
 - SSE subscriber limits are enforced through SQLite `sse_slots`, so `MAX_SSE_SUBSCRIBERS_GLOBAL` is no longer multiplied by Granian worker count; stale slots expire if a worker dies before release
 - Gallery thumbnails are queued on image save/import and on missing-thumbnail access: `/api/thumb/{filename}` only serves an existing file or queues a missing one, Gallery rows expose `thumbnail_status`, and the background worker runs Pillow under the global `THUMBNAIL_CPU_CONCURRENCY` slot limit
 - Prompt Optimizer uses its own server-side Chat Completions-compatible endpoint config and user-configurable request timeout/response-size cap, resolves API key env refs on the backend, stores its editable system prompt in `DATA_DIR/prompt_optimizer_system_prompt.md`, and does not consume generation/edit queue capacity.
-- R2 Backup uses boto3 against a Cloudflare R2 S3-compatible endpoint under `asyncio.to_thread`; sync jobs list only the configured prefix, retain only keys that match local gallery filenames, fall back to per-file `HeadObject` checks for very large prefixes, upload missing local gallery filenames, and never serve, overwrite, or delete gallery images from R2.
+- R2 Backup uses boto3 against a Cloudflare R2 S3-compatible endpoint under `asyncio.to_thread`; sync jobs list only the configured prefix, retain only keys that match local gallery filenames, fall back to per-file `HeadObject` checks for very large prefixes, support dry-run preflight counts, store per-file remote-seen metadata, upload missing local gallery filenames, and never serve, overwrite, or delete gallery images from R2.
 - SSE is the primary progress channel; `/api/generate/jobs` provides list/history (`include_finished=true`, optional `limit`/`offset`, optional `failed_only=true`), `/api/generate/jobs/history` clears terminal history, and `/api/generate/jobs/events` streams SQLite-backed live job-list changes with sub-second polling
 - terminal job history includes `stage_timings` for `upstream_wait`, `download_decode`, `validate`, and `db_insert`; slow gallery queries are logged with prompt presence/length/hash plus other filters, totals, cursor/count flags, and rows/count/total-bytes/filter-options timings and counted in metrics; optional metrics include `worker_id`, recent worker snapshots, queue depth, running jobs, failure ratios, job-stage latencies, SQLite busy/slow counters, SSE poll query counters, claim misses, active SSE slots, and worker heartbeat age; terminal job statuses distinguish `cancelled`, `interrupted`, and `upstream_error` in addition to the generic `error`
 - upstream JSON/SSE bodies are read with a `MAX_UPSTREAM_JSON_MB` cap before parsing, JSON request bodies are capped by `MAX_JSON_BODY_MB`, and upstream image URL downloads are revalidated (SSRF-aware, no blind redirect follow), fully decoded with Pillow, pixel-limited by `MAX_IMAGE_PIXELS`, and bounded by `MAX_FILE_SIZE_MB`
-- `/api/import` enforces ZIP safety/size/count/compression checks; `/api/download-all` keeps the low-memory streaming path with SQLite-backed direct export jobs/slots and reports server-side prepare/output progress over SSE when called with `export_job_id`. Tracked export jobs still write temp ZIP files for selected/small download flows with `Content-Length` transfer progress. ZIP metadata uses stored `sha256`/`bytes` when available and does not re-read image files only to backfill missing hashes during export.
+- `/api/import` enforces ZIP safety/size/count/compression checks and can run as a progress-tracked import job with `async_job=true`; `/api/download-all` keeps the low-memory streaming path with SQLite-backed direct export jobs/slots and reports server-side prepare/output progress over SSE when called with `export_job_id`. Full Gallery export uses direct streaming by default. Tracked export jobs still write temp ZIP files for selected/small download flows with `Content-Length` transfer progress. ZIP metadata is written as streamed `metadata.json` plus `metadata.ndjson`, uses stored `sha256`/`bytes` when available, and does not re-read image files only to backfill missing hashes during export.
 - gallery stores byte-size metadata and thumbnails (`THUMBNAILS_DIR`), with older thumbnails queued for background backfill on access, opt-in byte-size backfill for older images, and a background file GC that removes unreferenced orphan images/thumbnails after a short TTL while preserving SQLite-referenced filenames; with Compose, nginx serves immutable frontend assets directly and serves image/thumb/download file bytes only after FastAPI returns an authorized `X-Accel-Redirect`; with `PUBLIC_IMAGE_BASE_URL`/`PUBLIC_THUMBNAIL_BASE_URL`, Gallery and job responses can point directly at object storage/CDN URLs
 - startup reconciliation removes gallery rows for missing files and marks previously running/queued jobs as interrupted
 
@@ -797,7 +799,7 @@ docker-compose up -d --force-recreate
 
 Granian 要按应用容量调，不要只按 CPU 数量加 worker。生成吞吐优先保持 `GRANIAN_WORKERS <= MAX_ACTIVE_GENERATE_JOBS`；通常 `2-4` 个 worker 就够。`GRANIAN_BACKPRESSURE` 用来限制每个 worker 同时进入 Python 的慢请求数量。
 
-`GRANIAN_WORKERS>1` 已支持生成/编辑 fan-out，以及可跟踪 Gallery export/R2 sync job：worker 通过 SQLite 认领任务，direct ZIP 下载共享 SQLite 里的 export 容量 slot，SSE 订阅使用 SQLite 全局 lease，启动维护只在同批 worker 中运行一次，GC/定时同步使用后台 leader lease，取消会标记未完成的生成 unit，但不会跨进程强杀正在等待上游的调用。
+`GRANIAN_WORKERS>1` 已支持生成/编辑 fan-out，以及可跟踪 Gallery export/import/R2 sync job：worker 通过 SQLite 认领任务，direct ZIP 下载共享 SQLite 里的 export 容量 slot，SSE 订阅使用 SQLite 全局 lease，启动维护只在同批 worker 中运行一次，GC/定时同步使用后台 leader lease，取消会标记未完成的生成 unit，但不会跨进程强杀正在等待上游的调用。
 
 ### 本地开发
 
@@ -955,7 +957,7 @@ curl http://localhost:9090/health
 
 - 每张上传的编辑源图大小受 `MAX_FILE_SIZE_MB` 限制，必须通过 Pillow 完整解码校验和像素炸弹限制，且必须是受支持的位图格式（`.png`、`.jpg`、`.jpeg`、`.webp`、`.gif`、`.avif`、`.bmp`、`.heic`、`.heif`、`.ico`、`.tif`、`.tiff`）；SVG 会被拒绝
 - `/api/import` 只接受由 `/api/download-all` 导出的 ZIP 归档
-- 导入 ZIP 必须包含 `metadata.json`
+- 导入 ZIP 必须包含 `metadata.json` 或 `metadata.ndjson`；新导出会同时包含两者，导入优先读取 `metadata.ndjson`，避免大图库 metadata 数组常驻内存，同时保留 `metadata.json` 给旧版本兼容
 - 所选图片 ZIP 下载遇到缺失图库行或缺失图片文件时，会在 `metadata.skipped` 中记录跳过项
 - 导入 ZIP 会校验上传体积、文件数、解压总体积、metadata 大小、安全路径和压缩比
 - 导入图片条目在存储前必须通过扩展名、Content-Type/文件魔数、完整解码和像素数量校验
@@ -1091,7 +1093,7 @@ curl http://localhost:9090/health
 | `GET` | `/api/thumb/{filename}` | 访问已存在的 WebP Gallery 缩略图；缺失时排入后台 worker |
 | `GET` | `/api/download/{filename}` | 下载图片 |
 | `DELETE` | `/api/gallery/{id}` | 删除 Gallery 条目和对应服务器图片文件 |
-| `GET` | `/api/download-all` | 低内存流式下载 Gallery 所有图片和 `metadata.json` 为 ZIP 文件；可传 direct export job 返回的 `export_job_id` |
+| `GET` | `/api/download-all` | 低内存流式下载 Gallery 所有图片和 `metadata.json`/`metadata.ndjson` 为 ZIP 文件；可传 direct export job 返回的 `export_job_id` |
 | `POST` | `/api/gallery/direct-export-jobs` | 为完整 Gallery 预留 direct streaming ZIP 导出任务，并返回 `download_url` |
 | `GET` | `/api/gallery/direct-export-jobs/{job_id}` | 查询 direct streaming ZIP 导出任务状态 |
 | `GET` | `/api/gallery/direct-export-jobs/{job_id}/events` | 通过 SSE 推送 direct ZIP 准备/输出进度 |
@@ -1099,10 +1101,12 @@ curl http://localhost:9090/health
 | `GET` | `/api/gallery/export-jobs/{job_id}` | 查询 ZIP 导出任务状态 |
 | `GET` | `/api/gallery/export-jobs/{job_id}/events` | 通过 SSE 推送 ZIP 打包进度 |
 | `GET` | `/api/gallery/export-jobs/{job_id}/download` | 下载已完成的 ZIP 导出，并通过 `Content-Length` 支持传输进度 |
-| `POST` | `/api/gallery/sync-jobs` | 创建单活 R2 Gallery 备份同步任务 |
+| `POST` | `/api/gallery/sync-jobs` | 创建单活 R2 Gallery 备份同步任务；支持 `dry_run` 和 `full_reconcile` |
 | `GET` | `/api/gallery/sync-jobs/{job_id}` | 查询 R2 同步任务状态 |
 | `GET` | `/api/gallery/sync-jobs/{job_id}/events` | 通过 SSE 推送 R2 同步进度 |
-| `POST` | `/api/import` | 导入 `/api/download-all` 创建的 ZIP |
+| `POST` | `/api/import` | 导入 `/api/download-all` 创建的 ZIP；传 `async_job=true` 可创建带进度的导入任务 |
+| `GET` | `/api/gallery/import-jobs/{job_id}` | 查询可跟踪 Gallery 导入任务状态 |
+| `GET` | `/api/gallery/import-jobs/{job_id}/events` | 通过 SSE 推送 Gallery 导入进度 |
 | `DELETE` | `/api/gallery` | 删除所有 Gallery 条目和服务器图片文件 |
 | `GET` | `/api/metrics` | 可选指标快照；默认 JSON，带 `Accept: text/plain` 时返回 Prometheus exposition format；仅在 `ENABLE_METRICS=true` 时可用 |
 | `GET` | `/api/metrics/prometheus` | 可选 Prometheus exposition metrics；仅在 `ENABLE_METRICS=true` 时可用 |
@@ -1121,11 +1125,11 @@ curl http://localhost:9090/health
 - SSE 订阅上限通过 SQLite `sse_slots` 执行，所以 `MAX_SSE_SUBSCRIBERS_GLOBAL` 不再随 Granian worker 数量倍增；worker 异常退出时 stale slot 会过期释放
 - Gallery 缩略图会在图片保存/import 和访问缺失缩略图时排队：`/api/thumb/{filename}` 只返回已存在文件或为缺失缩略图排队，Gallery 行返回 `thumbnail_status`，后台 worker 按 `THUMBNAIL_CPU_CONCURRENCY` 全局 slot 限制运行 Pillow
 - 提示词优化器使用独立的服务端 Chat Completions 兼容 endpoint 配置和用户可配置请求超时/响应体积上限，在后端解析 API Key 环境变量引用，不占用生成/编辑任务队列容量。
-- R2 Backup 通过 boto3 访问 Cloudflare R2 S3 兼容 endpoint，并用 `asyncio.to_thread` 隔离阻塞调用；同步任务只列出配置的 prefix，只保留匹配本地 Gallery filename 的远端 key，远端 prefix 极大时会降级为按文件 `HeadObject` 检查，只上传缺失的本地 Gallery filename，不会从 R2 服务、覆盖或删除 Gallery 图片。
+- R2 Backup 通过 boto3 访问 Cloudflare R2 S3 兼容 endpoint，并用 `asyncio.to_thread` 隔离阻塞调用；同步任务只列出配置的 prefix，只保留匹配本地 Gallery filename 的远端 key，远端 prefix 极大时会降级为按文件 `HeadObject` 检查，支持 dry-run 预检数量，记录每个文件的远端确认 metadata，只上传缺失的本地 Gallery filename，不会从 R2 服务、覆盖或删除 Gallery 图片。
 - SSE 是主进度通道；`/api/generate/jobs` 提供列表/历史（`include_finished=true`，可选 `limit`/`offset`，可选 `failed_only=true`），`/api/generate/jobs/history` 清空终态历史，`/api/generate/jobs/events` 通过 SQLite 亚秒级轮询推送实时任务列表变化
 - 任务终态历史包含 `stage_timings`：`upstream_wait`、`download_decode`、`validate`、`db_insert`；慢 Gallery 查询日志记录提示词是否存在/长度/hash、其他筛选条件、total、cursor/count flags，以及 rows/count/total-bytes/filter-options 分段耗时，并计入 metrics；可选 metrics 包含 `worker_id`、最近 worker snapshots、队列深度、运行中任务数、失败率、任务分段耗时、SQLite busy/慢查询数、SSE poll 查询数、claim miss、活跃 SSE slots 和 worker heartbeat age；终态状态区分 `cancelled`、`interrupted` 和 `upstream_error`，同时保留通用 `error`
 - 上游 JSON/SSE 响应会在解析前受 `MAX_UPSTREAM_JSON_MB` 限制，JSON 请求体受 `MAX_JSON_BODY_MB` 限制；上游图片 URL 下载会做 SSRF/重定向目标复核，并会经过 Pillow 完整解码、`MAX_IMAGE_PIXELS` 像素限制和 `MAX_FILE_SIZE_MB` 体积限制
-- `/api/import` 做 ZIP 安全与体积校验；`/api/download-all` 保留低内存流式导出，并通过 SQLite-backed direct export job/slot 在传入 `export_job_id` 时用 SSE 汇报服务端准备/输出进度。tracked export job 仍用于所选/小体积下载流程，会写入临时 ZIP 并借助 `Content-Length` 展示传输进度。ZIP metadata 会使用已保存的 `sha256`/`bytes`，导出时不会为了补缺失 hash 额外完整读取图片文件。
+- `/api/import` 做 ZIP 安全与体积校验，并可通过 `async_job=true` 作为带进度的导入任务运行；`/api/download-all` 保留低内存流式导出，并通过 SQLite-backed direct export job/slot 在传入 `export_job_id` 时用 SSE 汇报服务端准备/输出进度。完整 Gallery 导出默认使用 direct streaming。tracked export job 仍用于所选/小体积下载流程，会写入临时 ZIP 并借助 `Content-Length` 展示传输进度。ZIP metadata 会流式写入 `metadata.json` 和 `metadata.ndjson`，使用已保存的 `sha256`/`bytes`，导出时不会为了补缺失 hash 额外完整读取图片文件。
 - Gallery 持久化图片字节数和缩略图（`THUMBNAILS_DIR`），旧图访问时会排队补缩略图，后台 file GC 会在短 TTL 后删除未被 SQLite 引用的孤儿图片/缩略图并保护仍被引用的 filename；使用 Compose 时，nginx 会直接返回 immutable 前端资源，并且只在 FastAPI 返回已授权的 `X-Accel-Redirect` 后发送图片/缩略图/下载文件字节；配置 `PUBLIC_IMAGE_BASE_URL`/`PUBLIC_THUMBNAIL_BASE_URL` 后，Gallery 和 job 响应可直接返回对象存储/CDN URL
 - 启动时会清理缺失文件对应的 Gallery 记录，并把上次进程遗留的 running/queued 任务标记为 interrupted
 

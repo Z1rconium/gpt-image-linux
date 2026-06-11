@@ -5,7 +5,7 @@ import { t } from '$lib/i18n';
 import { confirmStore } from '$lib/stores/confirm';
 import type { ToastOptions, ToastVariant } from '$lib/stores/ui';
 import { formatBytes } from '$lib/utils/format';
-import type { GalleryBatchResponse, GalleryExportJobStatus, GalleryResponse, GallerySyncJobStatus } from '$lib/api/types';
+import type { GalleryBatchResponse, GalleryExportJobStatus, GalleryImportJobStatus, GalleryResponse, GallerySyncJobStatus } from '$lib/api/types';
 import type { GalleryNavigation, GalleryOperationStatus, GalleryState } from '$lib/stores/gallery';
 
 const STREAMING_ZIP_DOWNLOAD_BYTES_THRESHOLD = 64 * 1024 * 1024;
@@ -90,7 +90,19 @@ function exportJobDetail(job: GalleryExportJobStatus) {
 
 function syncJobDetail(job: GallerySyncJobStatus) {
   const labels = get(t).gallery;
+  if (job.status === 'success' && job.dry_run) {
+    return labels.syncDryRunCompleteDetail(job.total_count, job.pending_upload_count, job.skipped_existing_count, job.missing_local_count);
+  }
   if (job.status === 'success') return labels.syncCompleteDetail(job.uploaded_count, job.skipped_existing_count);
+  if (job.dry_run && job.total_count > 0) {
+    return labels.syncDryRunProgress(
+      Math.min(job.compared_count, job.total_count),
+      job.total_count,
+      job.pending_upload_count,
+      job.skipped_existing_count,
+      job.missing_local_count
+    );
+  }
   if (job.stage === 'listing_remote') return labels.syncListingRemote;
   if (job.total_count > 0) {
     return labels.syncProgress(
@@ -102,6 +114,15 @@ function syncJobDetail(job: GallerySyncJobStatus) {
     );
   }
   return job.message || labels.syncPreparing;
+}
+
+function importJobDetail(job: GalleryImportJobStatus) {
+  const labels = get(t).gallery;
+  if (job.status === 'success') return labels.importCompleteDetail(job.imported_count, job.skipped_count);
+  if (job.requested_count > 0 && job.processed_count > 0) {
+    return labels.importValidatingEntries(Math.min(job.processed_count, job.requested_count), job.requested_count, job.imported_count, job.skipped_count);
+  }
+  return job.message || labels.importingArchive;
 }
 
 function batchToastMessage(action: 'delete' | 'favorite', result: GalleryBatchResponse) {
@@ -173,6 +194,37 @@ function waitForGallerySyncJob(jobId: string, onJob: (job: GallerySyncJobStatus)
         }
       },
       ['sync']
+    );
+  });
+}
+
+function waitForGalleryImportJob(jobId: string, onJob: (job: GalleryImportJobStatus) => void): Promise<GalleryImportJobStatus> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let source: EventSource | null = null;
+    source = openJsonEventSource<GalleryImportJobStatus>(
+      `/api/gallery/import-jobs/${encodeURIComponent(jobId)}/events`,
+      {
+        onEvent: ({ data }) => {
+          onJob(data);
+          if (data.status === 'success') {
+            settled = true;
+            source?.close();
+            resolve(data);
+          } else if (data.status === 'error') {
+            settled = true;
+            source?.close();
+            reject(new Error(data.error || data.message || get(t).messages.requestFailed));
+          }
+        },
+        onError: (error) => {
+          if (settled) return;
+          settled = true;
+          source?.close();
+          reject(error instanceof Error ? error : new Error(get(t).messages.requestFailed));
+        }
+      },
+      ['import']
     );
   });
 }
@@ -413,76 +465,28 @@ export function createGalleryActions(deps: GalleryActionDeps) {
       progress: 0
     });
     try {
-      let totalBytes = deps.getState().gallery?.total_bytes || 0;
-      if (totalBytes <= 0) {
-        const stats = await apiFetch<GalleryResponse>(
-          '/api/gallery?page=1&page_size=1&include_total_bytes=true',
-          {},
-          'loading gallery export size'
-        );
-        totalBytes = stats.total_bytes || 0;
-      }
-      if (totalBytes >= STREAMING_ZIP_DOWNLOAD_BYTES_THRESHOLD) {
-        const job = await apiFetch<GalleryExportJobStatus>(
-          '/api/gallery/direct-export-jobs',
-          { method: 'POST' },
-          'preparing direct gallery export'
-        );
-        deps.setOperationStatus({
-          kind: 'export',
-          label,
-          detail: exportJobDetail(job),
-          progress: operationProgress(job.progress, 0, 100)
-        });
-        const readyJobPromise = waitForGalleryExportJob(
-          job.job_id,
-          (nextJob) => {
-            deps.setOperationStatus({
-              kind: 'export',
-              label,
-              detail: exportJobDetail(nextJob),
-              progress: operationProgress(nextJob.progress, 0, 100)
-            });
-          },
-          `/api/gallery/direct-export-jobs/${encodeURIComponent(job.job_id)}/events`
-        );
-        const downloadUrl = job.download_url || `/api/download-all?export_job_id=${encodeURIComponent(job.job_id)}`;
-        startNativeDownload(downloadUrl, job.filename || 'gpt-images.zip');
-        await readyJobPromise;
-        showToast?.(get(t).messages.exportReady);
-        return;
-      }
-
-      const job = await apiFetch<GalleryExportJobStatus>('/api/gallery/export-jobs', { method: 'POST' }, 'preparing gallery export');
-      const readyJob = await waitForGalleryExportJob(job.job_id, (nextJob) => {
-        deps.setOperationStatus({
-          kind: 'export',
-          label,
-          detail: exportJobDetail(nextJob),
-          progress: operationProgress(nextJob.progress, 0, 50)
-        });
-      });
+      const job = await apiFetch<GalleryExportJobStatus>('/api/gallery/direct-export-jobs', { method: 'POST' }, 'preparing direct gallery export');
       deps.setOperationStatus({
         kind: 'export',
         label,
-        detail: get(t).gallery.browserSavingDownload,
-        progress: 50
+        detail: exportJobDetail(job),
+        progress: operationProgress(job.progress, 0, 100)
       });
-      const downloadUrl = readyJob.download_url || `/api/gallery/export-jobs/${encodeURIComponent(readyJob.job_id)}/download`;
-      if (readyJob.bytes_total >= STREAMING_ZIP_DOWNLOAD_BYTES_THRESHOLD) {
-        startNativeDownload(downloadUrl, 'gpt-images.zip');
-        showToast?.(get(t).messages.exportReady);
-        return;
-      }
-
-      const response = await fetch(downloadUrl, {
-        method: 'GET',
-        credentials: 'same-origin',
-        headers: { Accept: 'application/zip' }
-      });
-      if (!response.ok) throw new Error(get(t).messages.requestFailed);
-      const blob = await downloadResponseBlob(response, 'export', label, get(t).gallery.browserSavingDownload, { start: 50, end: 100 });
-      downloadBlob(blob, filenameFromContentDisposition(response.headers.get('Content-Disposition'), 'gpt-images.zip'));
+      const readyJobPromise = waitForGalleryExportJob(
+        job.job_id,
+        (nextJob) => {
+          deps.setOperationStatus({
+            kind: 'export',
+            label,
+            detail: exportJobDetail(nextJob),
+            progress: operationProgress(nextJob.progress, 0, 100)
+          });
+        },
+        `/api/gallery/direct-export-jobs/${encodeURIComponent(job.job_id)}/events`
+      );
+      const downloadUrl = job.download_url || `/api/download-all?export_job_id=${encodeURIComponent(job.job_id)}`;
+      startNativeDownload(downloadUrl, job.filename || 'gpt-images.zip');
+      await readyJobPromise;
       showToast?.(get(t).messages.exportReady);
     } finally {
       deps.setOperationStatus(null);
@@ -498,6 +502,40 @@ export function createGalleryActions(deps: GalleryActionDeps) {
       progress: 0
     });
     try {
+      const dryRunJob = await apiFetch<GallerySyncJobStatus>(
+        '/api/gallery/sync-jobs',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ dry_run: true })
+        },
+        'preflighting R2 gallery sync'
+      );
+      const dryRunFinished = await waitForGallerySyncJob(dryRunJob.job_id, (nextJob) => {
+        deps.setOperationStatus({
+          kind: 'sync',
+          label,
+          detail: syncJobDetail(nextJob),
+          progress: nextJob.progress
+        });
+      });
+      deps.setOperationStatus({
+        kind: 'sync',
+        label,
+        detail: syncJobDetail(dryRunFinished),
+        progress: 100
+      });
+      if (dryRunFinished.total_count <= 0 || dryRunFinished.pending_upload_count <= 0) {
+        showToast?.(
+          get(t).messages.r2SyncComplete(
+            0,
+            dryRunFinished.skipped_existing_count,
+            dryRunFinished.missing_local_count
+          )
+        );
+        return;
+      }
+
       const job = await apiFetch<GallerySyncJobStatus>('/api/gallery/sync-jobs', { method: 'POST' }, 'starting R2 gallery sync');
       const finished = await waitForGallerySyncJob(job.job_id, (nextJob) => {
         deps.setOperationStatus({
@@ -552,22 +590,30 @@ export function createGalleryActions(deps: GalleryActionDeps) {
       progress: null
     });
     try {
-      const result = await apiFetch<{ status: string; imported: number }>(
-        '/api/import',
+      const job = await apiFetch<GalleryImportJobStatus>(
+        '/api/import?async_job=true',
         {
           method: 'POST',
           body: formData
         },
         'importing archive'
       );
+      const finished = await waitForGalleryImportJob(job.job_id, (nextJob) => {
+        deps.setOperationStatus({
+          kind: 'import',
+          label: get(t).gallery.importingArchive,
+          detail: importJobDetail(nextJob),
+          progress: nextJob.progress
+        });
+      });
       deps.setOperationStatus({
         kind: 'import',
         label: get(t).gallery.importingArchive,
         detail: get(t).gallery.refreshingAfterImport,
-        progress: null
+        progress: 100
       });
       await deps.loadGallery(1);
-      showToast(get(t).messages.imported(result.imported));
+      showToast(get(t).messages.imported(finished.imported_count));
     } finally {
       deps.setOperationStatus(null);
     }

@@ -29,6 +29,7 @@ GenerateJobStatusValue = Literal[
 ]
 GalleryExportJobStatusValue = Literal["queued", "running", "success", "error"]
 GallerySyncJobStatusValue = Literal["queued", "running", "success", "error"]
+GalleryImportJobStatusValue = Literal["queued", "running", "success", "error"]
 GalleryThumbnailStatus = Literal["ready", "queued", "missing"]
 ShortId = Annotated[str, Field(min_length=1, max_length=128)]
 
@@ -568,6 +569,7 @@ class GalleryExportRequest(StrictRequestModel):
 
 class GallerySyncRequest(StrictRequestModel):
     full_reconcile: bool = False
+    dry_run: bool = False
 
 
 class GalleryExportJobStatus(BaseModel):
@@ -601,11 +603,29 @@ class GallerySyncJobStatus(BaseModel):
     total_count: int = 0
     compared_count: int = 0
     uploaded_count: int = 0
+    pending_upload_count: int = 0
     skipped_existing_count: int = 0
     missing_local_count: int = 0
     failed_count: int = 0
     bytes_total: int = 0
     bytes_uploaded: int = 0
+    dry_run: bool = False
+    checkpoint_filename: Optional[str] = None
+
+
+class GalleryImportJobStatus(BaseModel):
+    job_id: str
+    status: GalleryImportJobStatusValue
+    stage: Optional[str] = None
+    message: Optional[str] = None
+    progress: int = 0
+    requested_count: int = 0
+    processed_count: int = 0
+    imported_count: int = 0
+    skipped_count: int = 0
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    error: Optional[str] = None
 
 
 class GalleryBatchResponse(BaseModel):

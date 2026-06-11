@@ -258,6 +258,19 @@ def _wait_for_gallery_sync_job(client: TestClient, job_id: str, timeout: float =
     raise AssertionError(f"gallery sync job {job_id} did not finish: {last}")
 
 
+def _wait_for_gallery_import_job(client: TestClient, job_id: str, timeout: float = 5.0):
+    deadline = time.time() + timeout
+    last = None
+    while time.time() < deadline:
+        resp = client.get(f"/api/gallery/import-jobs/{job_id}")
+        assert resp.status_code == 200
+        last = resp.json()
+        if last["status"] in {"success", "error"}:
+            return last
+        time.sleep(0.05)
+    raise AssertionError(f"gallery import job {job_id} did not finish: {last}")
+
+
 def _fake_gallery_entry(image_id: str, prompt: str, size: str, filename: str):
     storage.add_to_gallery_sync(
         image_id=image_id,
@@ -3730,6 +3743,7 @@ def test_gallery_export_job_reports_progress_and_downloads_zip(client):
     assert archive.headers["x-gallery-missing-count"] == "0"
     with zipfile.ZipFile(io.BytesIO(archive.content)) as zf:
         assert "metadata.json" in zf.namelist()
+        assert "metadata.ndjson" in zf.namelist()
         assert "images/export-job-1.png" in zf.namelist()
         assert "images/export-job-2.png" in zf.namelist()
 
@@ -3754,6 +3768,7 @@ def test_gallery_direct_export_job_tracks_streaming_download(client):
     assert archive.headers["x-gallery-export-job-id"] == job["job_id"]
     with zipfile.ZipFile(io.BytesIO(archive.content)) as zf:
         assert "metadata.json" in zf.namelist()
+        assert "metadata.ndjson" in zf.namelist()
         assert "images/direct-export-1.png" in zf.namelist()
         assert "images/direct-export-2.png" in zf.namelist()
 
@@ -3786,6 +3801,7 @@ def test_download_all_without_direct_job_keeps_legacy_streaming_behavior(client)
     assert storage.get_gallery_job("export_direct", direct_job_id) is None
     with zipfile.ZipFile(io.BytesIO(archive.content)) as zf:
         assert "images/legacy-direct-export.png" in zf.namelist()
+        assert "metadata.ndjson" in zf.namelist()
 
 
 def test_gallery_direct_export_jobs_count_against_export_capacity(client):
@@ -3929,6 +3945,56 @@ def test_gallery_sync_job_reports_progress_and_terminal_sse(client, monkeypatch)
     assert events.headers["content-type"].startswith("text/event-stream")
     assert "event: sync" in events.text
     assert job["job_id"] in events.text
+
+
+def test_gallery_sync_job_supports_dry_run_preflight(client, monkeypatch):
+    _fake_gallery_entry("sync-dry-run-1", "one", "1024x1024", "sync-dry-run-1.png")
+    storage.save_r2_backup_settings(
+        {
+            "enabled": True,
+            "endpoint_url": "https://account.r2.cloudflarestorage.com",
+            "bucket_name": "image-backups",
+            "region": "auto",
+            "key_prefix": "gallery-test/",
+            "access_key_id": "${TEST_R2_ACCESS_KEY_ID}",
+            "secret_access_key": "${TEST_R2_SECRET_ACCESS_KEY}",
+        }
+    )
+
+    seen: dict[str, object] = {}
+
+    def fake_sync(settings, entries, *, total_count, progress_cb=None, dry_run=False, state_recorder=None):
+        seen["dry_run"] = dry_run
+        seen["state_recorder"] = state_recorder
+        assert len(list(entries)) == 1
+        result = r2_sync.R2SyncResult(
+            total_count=total_count,
+            compared_count=1,
+            pending_upload_count=1,
+        )
+        if progress_cb:
+            progress_cb(
+                {
+                    "stage": "preflight",
+                    "message": "Compared 1 gallery image(s)",
+                    "progress": 100,
+                    **result.to_updates(),
+                }
+            )
+        return result
+
+    monkeypatch.setattr(r2_sync, "sync_gallery_to_r2", fake_sync)
+    created = client.post("/api/gallery/sync-jobs", json={"dry_run": True})
+    assert created.status_code == 202
+    job = created.json()
+    assert job["dry_run"] is True
+
+    finished = _wait_for_gallery_sync_job(client, job["job_id"])
+    assert finished["status"] == "success"
+    assert finished["dry_run"] is True
+    assert finished["pending_upload_count"] == 1
+    assert finished["uploaded_count"] == 0
+    assert seen == {"dry_run": True, "state_recorder": None}
 
 
 def test_gallery_sync_job_accepts_enabled_r2_env_defaults(tmp_path, monkeypatch):
@@ -4317,6 +4383,30 @@ def test_import_archive(client):
     assert imported.bytes == len(PNG_BYTES)
     assert imported.thumbnail_filename is None
     assert imported.thumbnail_url == "/api/thumb/import-1.png"
+
+
+def test_import_archive_async_job_reports_progress_and_terminal_sse(client):
+    resp = client.post(
+        "/api/import?async_job=true",
+        files={"archive": ("archive.zip", _import_archive_bytes(), "application/zip")},
+    )
+    assert resp.status_code == 202
+    job = resp.json()
+    assert job["status"] == "queued"
+    assert job["requested_count"] == 1
+
+    finished = _wait_for_gallery_import_job(client, job["job_id"])
+    assert finished["status"] == "success"
+    assert finished["progress"] == 100
+    assert finished["imported_count"] == 1
+    assert finished["skipped_count"] == 0
+    assert storage.get_gallery_entry("import-1") is not None
+
+    events = client.get(f"/api/gallery/import-jobs/{job['job_id']}/events")
+    assert events.status_code == 200
+    assert events.headers["content-type"].startswith("text/event-stream")
+    assert "event: import" in events.text
+    assert job["job_id"] in events.text
 
 
 def test_import_gallery_entries_dedupes_existing_rows_at_commit(client):

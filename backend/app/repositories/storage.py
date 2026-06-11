@@ -297,6 +297,7 @@ GALLERY_JOB_COLUMNS = (
     "total_count",
     "compared_count",
     "uploaded_count",
+    "pending_upload_count",
     "skipped_existing_count",
     "missing_local_count",
     "failed_count",
@@ -1011,6 +1012,8 @@ def _ensure_database():
                     sha256 TEXT,
                     bytes INTEGER NOT NULL DEFAULT 0,
                     key TEXT NOT NULL,
+                    etag TEXT,
+                    last_remote_seen_at TEXT,
                     synced_at TEXT NOT NULL
                 );
 
@@ -1110,6 +1113,7 @@ def _ensure_database():
                     total_count INTEGER NOT NULL DEFAULT 0,
                     compared_count INTEGER NOT NULL DEFAULT 0,
                     uploaded_count INTEGER NOT NULL DEFAULT 0,
+                    pending_upload_count INTEGER NOT NULL DEFAULT 0,
                     skipped_existing_count INTEGER NOT NULL DEFAULT 0,
                     missing_local_count INTEGER NOT NULL DEFAULT 0,
                     failed_count INTEGER NOT NULL DEFAULT 0,
@@ -1200,6 +1204,8 @@ def _ensure_database():
             _migrate_api_presets_schema(conn)
             _migrate_gallery_schema(conn)
             _migrate_generate_jobs_schema(conn)
+            _migrate_gallery_jobs_schema(conn)
+            _migrate_r2_sync_state_schema(conn)
             _migrate_prompt_snippets_schema(conn)
             _run_schema_migrations(conn)
             _ensure_gallery_fts(conn)
@@ -1509,6 +1515,22 @@ def _migrate_generate_jobs_schema(conn: sqlite3.Connection):
         conn.execute("ALTER TABLE generate_jobs ADD COLUMN stage_timings_json TEXT")
     if "images_json" not in columns:
         conn.execute("ALTER TABLE generate_jobs ADD COLUMN images_json TEXT")
+
+
+def _migrate_gallery_jobs_schema(conn: sqlite3.Connection):
+    columns = _table_columns(conn, "gallery_jobs")
+    if "pending_upload_count" not in columns:
+        conn.execute(
+            "ALTER TABLE gallery_jobs ADD COLUMN pending_upload_count INTEGER NOT NULL DEFAULT 0"
+        )
+
+
+def _migrate_r2_sync_state_schema(conn: sqlite3.Connection):
+    columns = _table_columns(conn, "r2_sync_state")
+    if "etag" not in columns:
+        conn.execute("ALTER TABLE r2_sync_state ADD COLUMN etag TEXT")
+    if "last_remote_seen_at" not in columns:
+        conn.execute("ALTER TABLE r2_sync_state ADD COLUMN last_remote_seen_at TEXT")
 
 
 def _migrate_prompt_snippets_schema(conn: sqlite3.Connection):
@@ -2198,6 +2220,7 @@ def _normalize_gallery_job(job: dict[str, Any]) -> dict[str, Any]:
         "total_count",
         "compared_count",
         "uploaded_count",
+        "pending_upload_count",
         "skipped_existing_count",
         "missing_local_count",
         "failed_count",
@@ -3537,9 +3560,11 @@ def count_gallery_r2_sync_rows(
     *,
     key_prefix: str = "",
     full_reconcile: bool = False,
+    start_after_filename: str = "",
 ) -> int:
     """Count unique local filenames that R2 sync should compare."""
     _ensure_database()
+    start_after = str(start_after_filename or "")
     with _connect() as conn:
         if full_reconcile:
             row = conn.execute(
@@ -3548,10 +3573,13 @@ def count_gallery_r2_sync_rows(
                 FROM (
                     SELECT filename
                     FROM gallery_entries
-                    WHERE filename IS NOT NULL AND trim(filename) != ''
+                    WHERE filename IS NOT NULL
+                        AND trim(filename) != ''
+                        AND filename > ?
                     GROUP BY filename
                 )
-                """
+                """,
+                (start_after,),
             ).fetchone()
         else:
             row = conn.execute(
@@ -3563,7 +3591,9 @@ def count_gallery_r2_sync_rows(
                         MAX(bytes) AS bytes,
                         MAX(NULLIF(sha256, '')) AS sha256
                     FROM gallery_entries
-                    WHERE filename IS NOT NULL AND trim(filename) != ''
+                    WHERE filename IS NOT NULL
+                        AND trim(filename) != ''
+                        AND filename > ?
                     GROUP BY filename
                 )
                 SELECT COUNT(*)
@@ -3571,7 +3601,7 @@ def count_gallery_r2_sync_rows(
                 LEFT JOIN r2_sync_state state ON state.filename = local.filename
                 WHERE {_gallery_r2_sync_changed_condition()}
                 """,
-                (key_prefix,),
+                (start_after, key_prefix),
             ).fetchone()
     return int(row[0] or 0) if row else 0
 
@@ -3580,6 +3610,7 @@ def iter_gallery_r2_sync_rows(
     *,
     key_prefix: str = "",
     full_reconcile: bool = False,
+    start_after_filename: str = "",
     batch_size: int = GALLERY_SYNC_BATCH_SIZE,
 ) -> Iterator[dict[str, Any]]:
     """Yield minimal, filename-unique rows for R2 sync.
@@ -3590,7 +3621,7 @@ def iter_gallery_r2_sync_rows(
     """
     _ensure_database()
     normalized_batch_size = max(1, int(batch_size or GALLERY_SYNC_BATCH_SIZE))
-    last_filename = ""
+    last_filename = str(start_after_filename or "")
     while True:
         with _connect() as conn:
             if full_reconcile:
@@ -3651,7 +3682,7 @@ def iter_gallery_r2_sync_rows(
 
 def mark_gallery_r2_sync_state(rows: Iterable[dict[str, Any]]) -> None:
     """Mark local filenames as confirmed in R2."""
-    prepared: list[tuple[str, str | None, int, str, str]] = []
+    prepared: list[tuple[str, str | None, int, str, str | None, str, str]] = []
     synced_at = utc_now()
     for row in rows:
         filename = str(row.get("filename") or "").strip()
@@ -3660,7 +3691,9 @@ def mark_gallery_r2_sync_state(rows: Iterable[dict[str, Any]]) -> None:
             continue
         sha256 = str(row.get("sha256") or "").strip() or None
         byte_size = _coerce_nonnegative_int(row.get("bytes"), 0)
-        prepared.append((filename, sha256, byte_size, key, synced_at))
+        etag = str(row.get("etag") or "").strip() or None
+        last_remote_seen_at = str(row.get("last_remote_seen_at") or "").strip() or synced_at
+        prepared.append((filename, sha256, byte_size, key, etag, last_remote_seen_at, synced_at))
     if not prepared:
         return
 
@@ -3669,12 +3702,16 @@ def mark_gallery_r2_sync_state(rows: Iterable[dict[str, Any]]) -> None:
         with _transaction(conn):
             conn.executemany(
                 """
-                INSERT INTO r2_sync_state (filename, sha256, bytes, key, synced_at)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO r2_sync_state (
+                    filename, sha256, bytes, key, etag, last_remote_seen_at, synced_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(filename) DO UPDATE SET
                     sha256 = excluded.sha256,
                     bytes = excluded.bytes,
                     key = excluded.key,
+                    etag = excluded.etag,
+                    last_remote_seen_at = excluded.last_remote_seen_at,
                     synced_at = excluded.synced_at
                 """,
                 prepared,
@@ -4218,6 +4255,7 @@ def update_gallery_job(job_id: str, updates: dict[str, Any]) -> dict[str, Any] |
         "total_count",
         "compared_count",
         "uploaded_count",
+        "pending_upload_count",
         "skipped_existing_count",
         "missing_local_count",
         "failed_count",
@@ -4272,6 +4310,7 @@ def _normalize_gallery_job_updates(updates: dict[str, Any]) -> dict[str, Any]:
         "total_count",
         "compared_count",
         "uploaded_count",
+        "pending_upload_count",
         "skipped_existing_count",
         "missing_local_count",
         "failed_count",

@@ -180,7 +180,7 @@ async def lifespan(app: FastAPI):
         jobs.run_image_unit_dispatcher(app.state.worker_id)
     )
     app.state.gallery_export_lock = asyncio.Lock()
-    app.state.gallery_job_subscribers = {"export": {}, "export_direct": {}, "sync": {}}
+    app.state.gallery_job_subscribers = {"export": {}, "export_direct": {}, "sync": {}, "import": {}}
     app.state.gallery_job_sse_poller_tasks = {}
     from .routers import gallery as gallery_router
     app.state.thumbnail_dispatcher_kick = asyncio.Event()
@@ -192,6 +192,9 @@ async def lifespan(app: FastAPI):
     )
     app.state.gallery_sync_dispatcher_task = asyncio.create_task(
         gallery_router.run_gallery_sync_dispatcher(app.state.worker_id)
+    )
+    app.state.gallery_import_dispatcher_task = asyncio.create_task(
+        gallery_router.run_gallery_import_dispatcher(app.state.worker_id)
     )
     app.state.gallery_export_gc_task = asyncio.create_task(
         gallery_router.gc_gallery_export_jobs(app.state.worker_id)
@@ -236,6 +239,9 @@ async def lifespan(app: FastAPI):
         gallery_sync_dispatcher_task = getattr(app.state, "gallery_sync_dispatcher_task", None)
         if gallery_sync_dispatcher_task and not gallery_sync_dispatcher_task.done():
             gallery_sync_dispatcher_task.cancel()
+        gallery_import_dispatcher_task = getattr(app.state, "gallery_import_dispatcher_task", None)
+        if gallery_import_dispatcher_task and not gallery_import_dispatcher_task.done():
+            gallery_import_dispatcher_task.cancel()
         thumbnail_dispatcher_task = getattr(app.state, "thumbnail_dispatcher_task", None)
         if thumbnail_dispatcher_task and not thumbnail_dispatcher_task.done():
             thumbnail_dispatcher_task.cancel()
@@ -268,6 +274,7 @@ async def lifespan(app: FastAPI):
                 thumbnail_dispatcher_task,
                 gallery_export_dispatcher_task,
                 gallery_sync_dispatcher_task,
+                gallery_import_dispatcher_task,
                 gc_task,
                 file_gc_task,
                 scheduled_sync_task,

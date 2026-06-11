@@ -252,6 +252,9 @@ const en = {
     downloading: 'Downloading...',
     importingArchive: 'Importing archive',
     importingArchiveDetail: (size: string) => `Uploading ${size || 'archive'} and validating ZIP contents. Do not close this page.`,
+    importValidatingEntries: (done: number, total: number, imported: number, skipped: number) =>
+      `Validated ${done} / ${total}; importable ${imported}, skipped ${skipped}`,
+    importCompleteDetail: (imported: number, skipped: number) => `Import complete. Imported ${imported}, skipped ${skipped}.`,
     refreshingAfterImport: 'Import finished. Refreshing gallery...',
     exportingArchive: 'Exporting gallery archive',
     exportPreparing: 'Preparing ZIP archive.',
@@ -262,6 +265,10 @@ const en = {
     syncingR2: 'Syncing R2 backup',
     syncPreparing: 'Preparing R2 sync.',
     syncListingRemote: 'Listing existing R2 objects.',
+    syncDryRunProgress: (done: number, total: number, pending: number, skipped: number, missing: number) =>
+      `Preflight ${done} / ${total}; needs upload ${pending}, remote exists ${skipped}, missing local ${missing}`,
+    syncDryRunCompleteDetail: (total: number, pending: number, skipped: number, missing: number) =>
+      `Preflight complete. Compared ${total}; needs upload ${pending}, remote exists ${skipped}, missing local ${missing}.`,
     syncProgress: (done: number, total: number, uploaded: number, skipped: number, bytes: string) =>
       `Compared ${done} / ${total}; uploaded ${uploaded}, skipped ${skipped}${bytes ? ` (${bytes})` : ''}`,
     syncCompleteDetail: (uploaded: number, skipped: number) => `R2 sync complete. Uploaded ${uploaded}, skipped ${skipped}.`,
@@ -693,6 +700,9 @@ const zh: TranslationSchema<typeof en> = {
     downloading: '下载中...',
     importingArchive: '正在导入归档',
     importingArchiveDetail: (size) => `正在上传 ${size || '归档'} 并校验 ZIP 内容。不要关闭此页面。`,
+    importValidatingEntries: (done, total, imported, skipped) =>
+      `已校验 ${done} / ${total}；可导入 ${imported}，已跳过 ${skipped}`,
+    importCompleteDetail: (imported, skipped) => `导入完成。已导入 ${imported}，已跳过 ${skipped}。`,
     refreshingAfterImport: '导入完成，正在刷新图库...',
     exportingArchive: '正在导出图库归档',
     exportPreparing: '正在准备 ZIP 归档。',
@@ -703,6 +713,10 @@ const zh: TranslationSchema<typeof en> = {
     syncingR2: '正在同步 R2 备份',
     syncPreparing: '正在准备 R2 同步。',
     syncListingRemote: '正在列出已有 R2 对象。',
+    syncDryRunProgress: (done, total, pending, skipped, missing) =>
+      `预检 ${done} / ${total}；需上传 ${pending}，远端已存在 ${skipped}，本地缺失 ${missing}`,
+    syncDryRunCompleteDetail: (total, pending, skipped, missing) =>
+      `预检完成。已比较 ${total}；需上传 ${pending}，远端已存在 ${skipped}，本地缺失 ${missing}。`,
     syncProgress: (done, total, uploaded, skipped, bytes) =>
       `已比较 ${done} / ${total}；已上传 ${uploaded}，已跳过 ${skipped}${bytes ? `（${bytes}）` : ''}`,
     syncCompleteDetail: (uploaded, skipped) => `R2 同步完成。已上传 ${uploaded}，已跳过 ${skipped}。`,
