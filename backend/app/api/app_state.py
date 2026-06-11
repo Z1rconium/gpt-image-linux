@@ -196,6 +196,9 @@ async def lifespan(app: FastAPI):
     app.state.gallery_export_gc_task = asyncio.create_task(
         gallery_router.gc_gallery_export_jobs(app.state.worker_id)
     )
+    app.state.gallery_file_gc_task = asyncio.create_task(
+        gallery_router.run_gallery_file_gc(app.state.worker_id)
+    )
     app.state.gallery_r2_scheduled_sync_task = asyncio.create_task(
         gallery_router.run_gallery_r2_scheduled_sync(app.state.worker_id)
     )
@@ -239,6 +242,9 @@ async def lifespan(app: FastAPI):
         gc_task = getattr(app.state, "gallery_export_gc_task", None)
         if gc_task and not gc_task.done():
             gc_task.cancel()
+        file_gc_task = getattr(app.state, "gallery_file_gc_task", None)
+        if file_gc_task and not file_gc_task.done():
+            file_gc_task.cancel()
         scheduled_sync_task = getattr(app.state, "gallery_r2_scheduled_sync_task", None)
         if scheduled_sync_task and not scheduled_sync_task.done():
             scheduled_sync_task.cancel()
@@ -263,6 +269,7 @@ async def lifespan(app: FastAPI):
                 gallery_export_dispatcher_task,
                 gallery_sync_dispatcher_task,
                 gc_task,
+                file_gc_task,
                 scheduled_sync_task,
                 *gallery_job_sse_poller_tasks,
                 *tasks,

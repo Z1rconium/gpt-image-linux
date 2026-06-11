@@ -12,7 +12,7 @@ import time
 import uuid
 from collections import OrderedDict
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Sequence
@@ -109,6 +109,7 @@ __all__ = [
     "decode_gallery_cursor",
     "encode_gallery_cursor",
     "get_gallery_total_bytes",
+    "cleanup_orphan_gallery_files",
     "get_runtime_coordination_metrics",
     "create_gallery_job",
     "get_gallery_job",
@@ -338,7 +339,11 @@ GALLERY_SYNC_BATCH_SIZE = 500
 GALLERY_FTS_VERSION_KEY = "gallery_fts_version"
 GALLERY_FTS_VERSION = "trigram-v1"
 GALLERY_FTS_MIN_QUERY_LENGTH = 3
+GALLERY_COUNT_CACHE_SECONDS = 2.0
 GALLERY_TOTAL_BYTES_CACHE_SECONDS = 2.0
+GALLERY_ORPHAN_FILE_TTL_SECONDS = 300
+GALLERY_ORPHAN_GC_BATCH_SIZE = 500
+_GALLERY_COUNT_CACHE_MAX_SIZE = 512
 _GALLERY_BYTES_CACHE_MAX_SIZE = 512
 THUMBNAIL_CPU_SLOT_LEASE_SECONDS = 600
 THUMBNAIL_JOB_LEASE_SECONDS = 600
@@ -361,6 +366,11 @@ _gallery_total_bytes_cache: OrderedDict[
     tuple[float, int],
 ] = OrderedDict()
 _gallery_total_bytes_cache_lock = threading.RLock()
+_gallery_count_cache: OrderedDict[
+    tuple[str, str, tuple[Any, ...]],
+    tuple[float, int],
+] = OrderedDict()
+_gallery_count_cache_lock = threading.RLock()
 _gallery_fts_available: bool | None = None
 
 _verified_thumbnails: set[str] = set()
@@ -465,6 +475,9 @@ class GalleryPage:
     images: list[GalleryEntry]
     filter_options: GalleryFilterOptions
     query_elapsed_ms: float = 0.0
+    timings_ms: dict[str, float] = field(default_factory=dict)
+    counts_included: bool = True
+    filter_options_included: bool = True
 
 
 @dataclass
@@ -484,6 +497,16 @@ def _invalidate_filter_options_cache():
 def _invalidate_gallery_total_bytes_cache():
     with _gallery_total_bytes_cache_lock:
         _gallery_total_bytes_cache.clear()
+
+
+def _invalidate_gallery_count_cache():
+    with _gallery_count_cache_lock:
+        _gallery_count_cache.clear()
+
+
+def _invalidate_gallery_query_caches():
+    _invalidate_gallery_count_cache()
+    _invalidate_gallery_total_bytes_cache()
 
 
 def _default_settings() -> dict:
@@ -794,7 +817,7 @@ def close_database_connections():
     _close_thread_connection()
     _clear_verified_thumbnails()
     _invalidate_filter_options_cache()
-    _invalidate_gallery_total_bytes_cache()
+    _invalidate_gallery_query_caches()
 
 
 
@@ -1250,11 +1273,45 @@ def _migration_gallery_keyset_index(conn: sqlite3.Connection):
     )
 
 
+def _migration_gallery_sort_filter_indexes(conn: sqlite3.Connection):
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_gallery_entries_favorite_sort_seq_id
+            ON gallery_entries(favorite, sort_seq DESC, id DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_gallery_entries_model_sort_seq_id
+            ON gallery_entries(model, sort_seq DESC, id DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_gallery_entries_preset_sort_seq_id
+            ON gallery_entries(api_preset_name, sort_seq DESC, id DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_gallery_entries_size_sort_seq_id
+            ON gallery_entries(size, sort_seq DESC, id DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_gallery_entries_created_at_sort_seq_id
+            ON gallery_entries(created_at DESC, sort_seq DESC, id DESC)
+        """
+    )
+
+
 SCHEMA_MIGRATIONS = (
     (1, "baseline_legacy_schema", _migration_baseline_legacy_schema),
     (2, "gallery_filter_options", _migration_gallery_filter_options),
     (3, "thumbnail_jobs", _migration_thumbnail_jobs),
     (4, "gallery_keyset_index", _migration_gallery_keyset_index),
+    (5, "gallery_sort_filter_indexes", _migration_gallery_sort_filter_indexes),
 )
 
 
@@ -1342,10 +1399,22 @@ def _migrate_gallery_schema(conn: sqlite3.Connection):
                 ON gallery_entries(favorite, created_at DESC, sort_seq DESC)
             """
         )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_gallery_entries_favorite_sort_seq_id
+                ON gallery_entries(favorite, sort_seq DESC, id DESC)
+            """
+        )
     conn.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_gallery_entries_model_created_at
             ON gallery_entries(model, created_at DESC, sort_seq DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_gallery_entries_model_sort_seq_id
+            ON gallery_entries(model, sort_seq DESC, id DESC)
         """
     )
     conn.execute(
@@ -1356,14 +1425,32 @@ def _migrate_gallery_schema(conn: sqlite3.Connection):
     )
     conn.execute(
         """
+        CREATE INDEX IF NOT EXISTS idx_gallery_entries_preset_sort_seq_id
+            ON gallery_entries(api_preset_name, sort_seq DESC, id DESC)
+        """
+    )
+    conn.execute(
+        """
         CREATE INDEX IF NOT EXISTS idx_gallery_entries_size_created_at
             ON gallery_entries(size, created_at DESC, sort_seq DESC)
         """
     )
     conn.execute(
         """
+        CREATE INDEX IF NOT EXISTS idx_gallery_entries_size_sort_seq_id
+            ON gallery_entries(size, sort_seq DESC, id DESC)
+        """
+    )
+    conn.execute(
+        """
         CREATE INDEX IF NOT EXISTS idx_gallery_entries_created_at
             ON gallery_entries(created_at DESC, sort_seq DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_gallery_entries_created_at_sort_seq_id
+            ON gallery_entries(created_at DESC, sort_seq DESC, id DESC)
         """
     )
     conn.execute(
@@ -1782,7 +1869,42 @@ def _gallery_row_values(entry: dict[str, Any]) -> tuple[Any, ...]:
     return tuple(entry.get(column) for column in GALLERY_COLUMNS)
 
 
-def _gallery_entry_from_row(row: sqlite3.Row) -> dict[str, Any]:
+def _gallery_thumbnail_status_for_row(
+    row: sqlite3.Row,
+    conn: sqlite3.Connection | None = None,
+) -> str:
+    filename = str(row["filename"] or "")
+    thumbnail_filename = str(row["thumbnail_filename"] or "").strip()
+    if not thumbnail_filename:
+        thumbnail_filename = _thumbnail_filename_for_image(filename) or ""
+
+    thumbnail_path = safe_thumbnail_path(thumbnail_filename) if thumbnail_filename else None
+    if thumbnail_path and thumbnail_path.is_file():
+        return "ready"
+
+    if conn is not None and filename:
+        job = conn.execute(
+            """
+            SELECT status, lease_expires_at
+            FROM thumbnail_jobs
+            WHERE filename = ?
+            """,
+            (filename,),
+        ).fetchone()
+        if job:
+            status = str(job["status"] or "")
+            if status == "queued" or (
+                status == "running" and str(job["lease_expires_at"] or "") > utc_now()
+            ):
+                return "queued"
+
+    return "missing"
+
+
+def _gallery_entry_from_row(
+    row: sqlite3.Row,
+    conn: sqlite3.Connection | None = None,
+) -> dict[str, Any]:
     entry = {
         column: row[column]
         for column in GALLERY_COLUMNS
@@ -1794,6 +1916,7 @@ def _gallery_entry_from_row(row: sqlite3.Row) -> dict[str, Any]:
         str(entry["thumbnail_filename"])
     ):
         entry.pop("thumbnail_filename", None)
+    entry["thumbnail_status"] = _gallery_thumbnail_status_for_row(row, conn)
     return _attach_gallery_thumbnail_url(entry)
 
 
@@ -2297,7 +2420,7 @@ def _insert_gallery_entries_on_conn(
             _increment_gallery_filter_options_on_conn(conn, existing, -1)
         _increment_gallery_filter_options_on_conn(conn, entry, 1)
         _enqueue_thumbnail_job_on_conn(conn, str(entry.get("filename") or ""))
-    _invalidate_gallery_total_bytes_cache()
+    _invalidate_gallery_query_caches()
 
 
 def load_settings() -> dict:
@@ -3145,11 +3268,29 @@ def _get_gallery_count_on_conn(
     where_sql: str,
     params: Sequence[Any],
 ) -> int:
+    cache_key = (config.DATABASE_FILE, where_sql, tuple(params))
+    now = time.monotonic()
+    with _gallery_count_cache_lock:
+        cached = _gallery_count_cache.get(cache_key)
+        if cached and (now - cached[0]) < GALLERY_COUNT_CACHE_SECONDS:
+            _gallery_count_cache.move_to_end(cache_key)
+            return cached[1]
+        if cached:
+            _gallery_count_cache.pop(cache_key, None)
+
     row = conn.execute(
         f"SELECT COUNT(*) FROM gallery_entries{where_sql}",
         tuple(params),
     ).fetchone()
-    return int(row[0]) if row else 0
+    total = int(row[0]) if row else 0
+
+    with _gallery_count_cache_lock:
+        _gallery_count_cache[cache_key] = (now, total)
+        _gallery_count_cache.move_to_end(cache_key)
+        while len(_gallery_count_cache) > _GALLERY_COUNT_CACHE_MAX_SIZE:
+            _gallery_count_cache.popitem(last=False)
+
+    return total
 
 
 def get_gallery_count(filters: dict[str, Any] | None = None) -> int:
@@ -3564,7 +3705,7 @@ def update_gallery_entry_hash(filename: str, sha256: str, byte_size: int) -> Non
                     """,
                     (sha256, byte_size, filename),
                 )
-                _invalidate_gallery_total_bytes_cache()
+                _invalidate_gallery_query_caches()
     except sqlite3.Error as e:
         logger.warning("Failed to persist sha256 for %s: %s", filename, e)
 
@@ -3611,6 +3752,8 @@ def get_gallery_page(
     page_size: int = 9,
     filters: dict[str, Any] | None = None,
     include_total_bytes: bool = False,
+    include_counts: bool = True,
+    include_filter_options: bool = True,
     cursor: str | None = None,
     direction: str = "next",
 ) -> GalleryPage:
@@ -3626,9 +3769,16 @@ def get_gallery_page(
     )
 
     query_started_at = time.perf_counter()
+    timings_ms: dict[str, float] = {
+        "rows_ms": 0.0,
+        "count_ms": 0.0,
+        "total_bytes_ms": 0.0,
+        "filter_options_ms": 0.0,
+    }
     with _connect() as conn:
         where_sql, params = _build_gallery_filter_where(filters)
 
+        rows_started_at = time.perf_counter()
         if decoded_cursor is None:
             offset = (requested_page - 1) * page_size
             rows = _get_gallery_rows_on_conn(
@@ -3704,19 +3854,34 @@ def get_gallery_page(
                     if rows
                     else False
                 )
+        timings_ms["rows_ms"] = round((time.perf_counter() - rows_started_at) * 1000, 2)
 
-        total = _get_gallery_count_on_conn(conn, where_sql, params)
-        total_pages = max((total + page_size - 1) // page_size, 1)
-        effective_page = min(requested_page, total_pages)
+        if include_counts:
+            count_started_at = time.perf_counter()
+            total = _get_gallery_count_on_conn(conn, where_sql, params)
+            timings_ms["count_ms"] = round((time.perf_counter() - count_started_at) * 1000, 2)
+            total_pages = max((total + page_size - 1) // page_size, 1)
+            effective_page = min(requested_page, total_pages)
+        else:
+            total = 0
+            total_pages = max(requested_page + (1 if has_next else 0), 1)
+            effective_page = requested_page
         prev_cursor = _gallery_cursor_from_row(rows[0]) if rows and has_prev else None
         next_cursor = _gallery_cursor_from_row(rows[-1]) if rows and has_next else None
 
-        total_bytes = (
-            _get_gallery_total_bytes_on_conn(conn, where_sql, params)
-            if include_total_bytes
-            else 0
-        )
-        filter_options = _get_gallery_filter_options_on_conn(conn)
+        if include_total_bytes:
+            total_bytes_started_at = time.perf_counter()
+            total_bytes = _get_gallery_total_bytes_on_conn(conn, where_sql, params)
+            timings_ms["total_bytes_ms"] = round((time.perf_counter() - total_bytes_started_at) * 1000, 2)
+        else:
+            total_bytes = 0
+        if include_filter_options:
+            filter_options_started_at = time.perf_counter()
+            filter_options = _get_gallery_filter_options_on_conn(conn)
+            timings_ms["filter_options_ms"] = round((time.perf_counter() - filter_options_started_at) * 1000, 2)
+        else:
+            filter_options = GalleryFilterOptions()
+        images = [GalleryEntry(**_gallery_entry_from_row(row, conn)) for row in rows]
     query_elapsed_ms = (time.perf_counter() - query_started_at) * 1000
 
     return GalleryPage(
@@ -3729,9 +3894,12 @@ def get_gallery_page(
         has_next=has_next,
         next_cursor=next_cursor,
         prev_cursor=prev_cursor,
-        images=[GalleryEntry(**_gallery_entry_from_row(row)) for row in rows],
+        images=images,
         filter_options=filter_options,
         query_elapsed_ms=round(query_elapsed_ms, 2),
+        timings_ms=timings_ms,
+        counts_included=include_counts,
+        filter_options_included=include_filter_options,
     )
 
 
@@ -3860,7 +4028,7 @@ def update_gallery_entry(image_id: str, updates: dict[str, Any]) -> GalleryEntry
                     f"UPDATE gallery_entries SET {assignments} WHERE id = ?",
                     (*allowed_updates.values(), image_id),
                 )
-                _invalidate_gallery_total_bytes_cache()
+                _invalidate_gallery_query_caches()
                 row = conn.execute(
                     f"""
                     SELECT {", ".join(GALLERY_COLUMNS)}
@@ -3900,7 +4068,7 @@ def update_gallery_entries_favorite(image_ids: list[str], favorite: bool) -> int
                 f"UPDATE gallery_entries SET favorite = ? WHERE id IN ({update_placeholders})",
                 (_normalize_gallery_favorite(favorite), *found_ids),
             )
-            _invalidate_gallery_total_bytes_cache()
+            _invalidate_gallery_query_caches()
             return len(found_ids)
 
 
@@ -5491,7 +5659,7 @@ def sync_gallery_with_image_files() -> int:
                     removed_count += len(stale_ids)
 
                 if removed_count:
-                    _invalidate_gallery_total_bytes_cache()
+                    _invalidate_gallery_query_caches()
                     _clear_verified_thumbnails()
                 return removed_count
 
@@ -5529,7 +5697,7 @@ def _delete_gallery_entries_by_ids(
     )
     for row in rows:
         _increment_gallery_filter_options_on_conn(conn, row, -1)
-    _invalidate_gallery_total_bytes_cache()
+    _invalidate_gallery_query_caches()
 
     remaining_filenames: set[str] = set()
     if removed_filenames:
@@ -5571,10 +5739,12 @@ def delete_gallery_images(image_ids: Sequence[str]) -> tuple[int, int]:
             if _delete_image_unlocked(filename):
                 deleted_count += 1
         except OSError as e:
+            metrics.increment("gallery.orphan_cleanup_pending")
             logger.warning("Failed to delete image file %s: %s", filename, e)
         try:
             _delete_thumbnail_unlocked(filename)
         except OSError as e:
+            metrics.increment("gallery.orphan_cleanup_pending")
             logger.warning("Failed to delete thumbnail for %s: %s", filename, e)
         thumbnail_filename = _thumbnail_filename_for_image(filename)
         if thumbnail_filename:
@@ -5613,6 +5783,7 @@ def _delete_gallery_file_if_unreferenced(filename: str) -> bool:
         try:
             deleted = _delete_image_unlocked(filename)
         except OSError as e:
+            metrics.increment("gallery.orphan_cleanup_pending")
             logger.warning("Failed to delete gallery image file %s: %s", filename, e)
 
         try:
@@ -5621,9 +5792,108 @@ def _delete_gallery_file_if_unreferenced(filename: str) -> bool:
             if thumbnail_filename:
                 _remove_verified_thumbnail(thumbnail_filename)
         except OSError as e:
+            metrics.increment("gallery.orphan_cleanup_pending")
             logger.warning("Failed to delete gallery thumbnail for %s: %s", filename, e)
 
         return deleted
+
+
+def _file_older_than(path: Path, cutoff_epoch_seconds: float) -> bool:
+    try:
+        return path.stat().st_mtime < cutoff_epoch_seconds
+    except OSError:
+        return False
+
+
+def cleanup_orphan_gallery_files(
+    *,
+    ttl_seconds: int = GALLERY_ORPHAN_FILE_TTL_SECONDS,
+    batch_size: int = GALLERY_ORPHAN_GC_BATCH_SIZE,
+) -> dict[str, int]:
+    """Delete unreferenced image and thumbnail files after a short TTL."""
+    _ensure_database()
+    cutoff = time.time() - max(0, int(ttl_seconds))
+    limit = max(1, int(batch_size))
+    removed_images = 0
+    removed_thumbnails = 0
+    failed = 0
+    scanned = 0
+
+    with _storage_lock:
+        with _connect() as conn:
+            referenced_filenames = set(_get_all_filenames_on_conn(conn))
+        referenced_thumbnails = {
+            thumbnail
+            for filename in referenced_filenames
+            if (thumbnail := _thumbnail_filename_for_image(filename))
+        }
+
+        images_dir = Path(config.IMAGES_DIR)
+        if images_dir.exists():
+            for path in images_dir.iterdir():
+                if scanned >= limit:
+                    break
+                if not path.is_file() or path.suffix.lower() not in IMAGE_FILE_EXTENSIONS:
+                    continue
+                scanned += 1
+                filename = path.name
+                if filename in referenced_filenames or not _file_older_than(path, cutoff):
+                    continue
+                try:
+                    if _delete_image_unlocked(filename):
+                        removed_images += 1
+                except OSError as e:
+                    failed += 1
+                    metrics.increment("gallery.orphan_cleanup_pending")
+                    logger.warning("Failed to GC orphan gallery image %s: %s", filename, e)
+
+        thumbnails_dir = Path(config.THUMBNAILS_DIR)
+        same_dir_as_images = False
+        try:
+            same_dir_as_images = thumbnails_dir.resolve() == images_dir.resolve()
+        except OSError:
+            same_dir_as_images = False
+
+        if thumbnails_dir.exists() and scanned < limit:
+            protected_thumbnail_names = set(referenced_thumbnails)
+            if same_dir_as_images:
+                protected_thumbnail_names.update(referenced_filenames)
+            for path in thumbnails_dir.iterdir():
+                if scanned >= limit:
+                    break
+                if not path.is_file() or path.suffix.lower() != THUMBNAIL_EXTENSION:
+                    continue
+                scanned += 1
+                thumbnail_filename = path.name
+                if (
+                    thumbnail_filename in protected_thumbnail_names
+                    or not safe_thumbnail_path(thumbnail_filename)
+                    or not _file_older_than(path, cutoff)
+                ):
+                    continue
+                try:
+                    path.unlink()
+                    _remove_verified_thumbnail(thumbnail_filename)
+                    removed_thumbnails += 1
+                except OSError as e:
+                    failed += 1
+                    metrics.increment("gallery.orphan_cleanup_pending")
+                    logger.warning("Failed to GC orphan gallery thumbnail %s: %s", thumbnail_filename, e)
+
+    if removed_images or removed_thumbnails or failed:
+        logger.info(
+            "Gallery file GC scanned=%d removed_images=%d removed_thumbnails=%d failed=%d",
+            scanned,
+            removed_images,
+            removed_thumbnails,
+            failed,
+        )
+    return {
+        "scanned": scanned,
+        "removed_images": removed_images,
+        "removed_thumbnails": removed_thumbnails,
+        "failed": failed,
+    }
 
 
 def delete_all_gallery_images() -> tuple[int, int]:
@@ -5649,7 +5919,7 @@ def delete_all_gallery_images() -> tuple[int, int]:
                 conn.execute("DELETE FROM gallery_entries")
                 conn.execute("DELETE FROM gallery_filter_options")
                 _invalidate_filter_options_cache()
-                _invalidate_gallery_total_bytes_cache()
+                _invalidate_gallery_query_caches()
 
     filenames_to_delete = referenced_filenames | disk_filenames
     deleted_count = 0

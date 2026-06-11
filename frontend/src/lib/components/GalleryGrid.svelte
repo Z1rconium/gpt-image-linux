@@ -107,12 +107,23 @@
   }
 
   function thumbnailSrcset(image: GalleryEntry) {
+    if (!thumbnailReady(image)) return '';
     const fullWidth = image.image_width && image.image_width > 512 ? image.image_width : 1024;
     return `${thumbnailUrl(image.filename, image.thumbnail_url)} 512w, ${imageUrl(image.filename, image.image_url)} ${fullWidth}w`;
   }
 
+  function thumbnailReady(image: GalleryEntry) {
+    return !image.thumbnail_status || image.thumbnail_status === 'ready';
+  }
+
   function handleThumbnailError(event: Event, image: GalleryEntry) {
     const img = event.currentTarget as HTMLImageElement;
+    if (image.thumbnail_status) {
+      img.removeAttribute('srcset');
+      img.removeAttribute('src');
+      img.classList.add('opacity-0');
+      return;
+    }
     const fallback = imageUrl(image.filename, image.image_url);
     if (img.dataset.fallbackSrc === fallback) return;
     img.dataset.fallbackSrc = fallback;
@@ -284,30 +295,34 @@
       <div class={`grid gap-4 sm:grid-cols-2 md:gap-5 lg:grid-cols-3 lg:gap-4 ${loading ? 'opacity-70' : ''}`}>
         {#each images as image, index (image.id)}
           <article class={`gallery-card overflow-hidden rounded-xl border ${selectedIds.has(image.id) ? 'border-emerald-400 bg-emerald-500/10' : 'border-zinc-800 bg-zinc-950/45'}`}>
-            <button type="button" class="control-focus relative block aspect-square w-full bg-zinc-950" on:click={() => handleImageClick(image)}>
+            <button type="button" class="control-focus relative block aspect-square w-full bg-zinc-950" aria-label={image.prompt} on:click={() => handleImageClick(image)}>
               {#if selectionMode}
                 <span class="absolute left-2 top-2 z-10 rounded-md bg-zinc-950/80 px-2 py-1 text-xs font-medium text-zinc-100">
                   {selectedIds.has(image.id) ? '✓' : ''}
                 </span>
               {/if}
-              <picture class="block h-full w-full">
-                <source
-                  media="(max-width: 1023px)"
-                  srcset={thumbnailSrcset(image)}
-                  sizes="(max-width: 639px) calc(100vw - 32px), calc((100vw - 64px) / 2)"
-                />
-                <img
-                  src={thumbnailUrl(image.filename, image.thumbnail_url)}
-                  alt={image.prompt}
-                  class="h-full w-full object-cover"
-                  loading={index < EAGER_THUMB_COUNT ? 'eager' : 'lazy'}
-                  fetchpriority={index < EAGER_THUMB_COUNT ? 'high' : 'auto'}
-                  decoding="async"
-                  width={image.image_width || undefined}
-                  height={image.image_height || undefined}
-                  on:error={(event) => handleThumbnailError(event, image)}
-                />
-              </picture>
+              {#if thumbnailReady(image)}
+                <picture class="block h-full w-full">
+                  <source
+                    media="(max-width: 1023px)"
+                    srcset={thumbnailSrcset(image)}
+                    sizes="(max-width: 639px) calc(100vw - 32px), calc((100vw - 64px) / 2)"
+                  />
+                  <img
+                    src={thumbnailUrl(image.filename, image.thumbnail_url)}
+                    alt={image.prompt}
+                    class="h-full w-full object-cover"
+                    loading={index < EAGER_THUMB_COUNT ? 'eager' : 'lazy'}
+                    fetchpriority={index < EAGER_THUMB_COUNT ? 'high' : 'auto'}
+                    decoding="async"
+                    width={image.image_width || undefined}
+                    height={image.image_height || undefined}
+                    on:error={(event) => handleThumbnailError(event, image)}
+                  />
+                </picture>
+              {:else}
+                <div class="h-full w-full bg-[radial-gradient(circle_at_30%_25%,rgba(16,185,129,0.14),transparent_28%),linear-gradient(135deg,rgba(39,39,42,0.9),rgba(9,9,11,0.96))]" aria-label={image.prompt}></div>
+              {/if}
             </button>
             <div class="space-y-3 p-3">
               <div class="min-w-0">

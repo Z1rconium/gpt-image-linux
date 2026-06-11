@@ -29,6 +29,7 @@ GenerateJobStatusValue = Literal[
 ]
 GalleryExportJobStatusValue = Literal["queued", "running", "success", "error"]
 GallerySyncJobStatusValue = Literal["queued", "running", "success", "error"]
+GalleryThumbnailStatus = Literal["ready", "queued", "missing"]
 ShortId = Annotated[str, Field(min_length=1, max_length=128)]
 
 
@@ -509,6 +510,7 @@ class GalleryEntry(BaseModel):
     image_url: Optional[str] = None
     thumbnail_filename: Optional[str] = None
     thumbnail_url: Optional[str] = None
+    thumbnail_status: GalleryThumbnailStatus = "missing"
     created_at: str
     completed_at: Optional[str] = None
     image_width: Optional[int] = None

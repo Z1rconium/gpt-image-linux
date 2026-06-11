@@ -60,7 +60,9 @@ function buildGalleryParams(
   filters: GalleryFilters,
   includeTotalBytes = false,
   cursor?: string | null,
-  direction?: 'next' | 'prev'
+  direction?: 'next' | 'prev',
+  includeCounts = true,
+  includeFilterOptions = true
 ) {
   const params = new URLSearchParams({ page: String(page), page_size: '9' });
   if (filters.prompt.trim()) params.set('prompt', filters.prompt.trim());
@@ -71,6 +73,8 @@ function buildGalleryParams(
   if (filters.dateTo) params.set('date_to', filters.dateTo);
   if (filters.favorite) params.set('favorite', 'true');
   if (includeTotalBytes) params.set('include_total_bytes', 'true');
+  if (!includeCounts) params.set('include_counts', 'false');
+  if (!includeFilterOptions) params.set('include_filter_options', 'false');
   if (cursor && direction) {
     params.set('cursor', cursor);
     params.set('direction', direction);
@@ -146,7 +150,16 @@ function createGalleryStore() {
     const cursor =
       navigation === 'next' ? state.gallery?.next_cursor : navigation === 'prev' ? state.gallery?.prev_cursor : null;
     const direction = navigation === 'next' || navigation === 'prev' ? navigation : undefined;
-    const params = buildGalleryParams(page, filters, includeTotalBytes, cursor, direction);
+    const lightweightCursorPage = Boolean(cursor && direction && !includeTotalBytes && state.gallery);
+    const params = buildGalleryParams(
+      page,
+      filters,
+      includeTotalBytes,
+      cursor,
+      direction,
+      !lightweightCursorPage,
+      !lightweightCursorPage
+    );
     const requestKey = params.toString();
     const seq = ++requestSeq;
     abortController?.abort();
@@ -159,7 +172,17 @@ function createGalleryStore() {
         'loading gallery'
       );
       if (seq !== requestSeq) return;
-      const filteredGallery = filterPendingGallery(gallery, includeTotalBytes, filters);
+      const mergedGallery =
+        lightweightCursorPage && state.gallery
+          ? {
+              ...gallery,
+              total: state.gallery.total,
+              total_bytes: state.gallery.total_bytes,
+              total_pages: state.gallery.total_pages,
+              filter_options: state.gallery.filter_options
+            }
+          : gallery;
+      const filteredGallery = filterPendingGallery(mergedGallery, includeTotalBytes, filters);
       const visibleIds = new Set(filteredGallery.images.map((image) => image.id));
       const selectedIds = new Set([...state.selectedIds].filter((id) => visibleIds.has(id)));
       update((current) => ({

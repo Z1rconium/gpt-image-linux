@@ -41,6 +41,13 @@ IMAGE_DISPATCHER_HEARTBEAT_INTERVAL_SECONDS = 5.0
 IMAGE_DISPATCHER_MAX_IDLE_BACKOFF_SECONDS = 2.0
 
 
+def kick_thumbnail_dispatcher() -> None:
+    task = getattr(app.state, "thumbnail_dispatcher_task", None)
+    event = getattr(app.state, "thumbnail_dispatcher_kick", None)
+    if task and not task.done() and event is not None:
+        event.set()
+
+
 @dataclass(frozen=True)
 class EditImageSource:
     temp_path: Path
@@ -1052,6 +1059,7 @@ async def _run_image_job(
         or entry
         for entry in outcome.entries
     ]
+    kick_thumbnail_dispatcher()
     first_entry = updated_entries[0]
     job_images = [gallery_entry_job_image(entry) for entry in updated_entries]
     job_update = {
@@ -1289,6 +1297,7 @@ async def run_claimed_image_unit(unit: dict, worker_id: str):
             or entry
             for entry in entries
         ]
+        kick_thumbnail_dispatcher()
         result_images = [gallery_entry_job_result(entry) for entry in updated_entries]
         stage_timings = stage_timer.snapshot()
         metrics.increment(f"image_jobs.{operation}.succeeded")

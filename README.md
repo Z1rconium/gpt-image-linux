@@ -412,7 +412,7 @@ All variables listed in `.env.example` are also tracked in SQLite for Overall Co
 | `VERSION_CHECK_TIMEOUT_SECONDS` | `3` | Timeout for each GitHub latest release or branch `VERSION` request |
 | `VERSION_CHECK_BRANCH` | `main` | Branch used for the fallback raw `VERSION` file check |
 | `ENABLE_METRICS` | `false` | Enable `/api/metrics` JSON counters/gauges/rates/latency summaries and Prometheus text output |
-| `SLOW_GALLERY_QUERY_MS` | `200` | Log `/api/gallery` requests at or above this threshold with prompt presence/length/hash, other filters, page, total, and DB query time |
+| `SLOW_GALLERY_QUERY_MS` | `200` | Log `/api/gallery` requests at or above this threshold with prompt presence/length/hash, other filters, page, total, DB query time, and rows/count/total-bytes/filter-options timings |
 | `ENABLE_NGINX_ACCEL_REDIRECT` | `false` | Return `X-Accel-Redirect` for authorized image/thumb/download responses when nginx internal aliases are in front; Compose enables this by default |
 | `PUBLIC_IMAGE_BASE_URL` | empty | Optional public/CDN base URL for gallery image bytes; when set, Gallery and job image URLs point there while `/api/image` remains as an authorized fallback |
 | `PUBLIC_THUMBNAIL_BASE_URL` | empty | Optional public/CDN base URL for generated thumbnail bytes; when set, Gallery thumbnail URLs point there while `/api/thumb` remains as an authorized fallback |
@@ -501,7 +501,7 @@ All variables listed in `.env.example` are also tracked in SQLite for Overall Co
 | `GET` | `/api/generate/{job_id}` | Get generation job status or result |
 | `GET` | `/api/generate/{job_id}/events` | Stream generation job status/progress over SSE |
 | `DELETE` | `/api/generate/{job_id}` | Cancel and remove a queued/running generation or edit job |
-| `GET` | `/api/gallery` | List gallery images with page or cursor pagination and optional `prompt`, `model`, `preset`, `size`, `date_from`, `date_to`, `favorite`, and `include_total_bytes` filters |
+| `GET` | `/api/gallery` | List gallery images with page or cursor pagination and optional `prompt`, `model`, `preset`, `size`, `date_from`, `date_to`, `favorite`, `include_total_bytes`, `include_counts`, and `include_filter_options` filters; image rows include `thumbnail_status` (`ready`, `queued`, or `missing`) |
 | `PATCH` | `/api/gallery/{id}/favorite` | Set or clear a gallery favorite flag |
 | `GET` | `/api/gallery/{image_id}` | Get a single gallery entry by ID |
 | `GET` | `/api/image/{filename}` | Serve image file |
@@ -536,14 +536,14 @@ All variables listed in `.env.example` are also tracked in SQLite for Overall Co
 - batch generation/edit (`n > 1`) consumes `n` queue units; the parent job aggregates successful unit results into `images[]`, Gallery metadata keeps the user-requested `n`, and units can be claimed by different Granian workers
 - tracked Gallery export jobs and manual/scheduled R2 sync jobs persist in SQLite, so create/query/SSE/download work across `GRANIAN_WORKERS>1`; workers claim queued or expired running jobs with SQLite leases, empty dispatchers back off, GC/scheduled sync use background leader leases, export ZIP files live under shared `DATA_DIR/exports`, and direct ZIP downloads reserve the same global export capacity through short-lived SQLite slot rows
 - SSE subscriber limits are enforced through SQLite `sse_slots`, so `MAX_SSE_SUBSCRIBERS_GLOBAL` is no longer multiplied by Granian worker count; stale slots expire if a worker dies before release
-- Gallery thumbnails are lazy: image save and DB insert enqueue thumbnail work, `/api/thumb/{filename}` only serves an existing file or queues a missing one, and the background worker runs Pillow under the global `THUMBNAIL_CPU_CONCURRENCY` slot limit
+- Gallery thumbnails are queued on image save/import and on missing-thumbnail access: `/api/thumb/{filename}` only serves an existing file or queues a missing one, Gallery rows expose `thumbnail_status`, and the background worker runs Pillow under the global `THUMBNAIL_CPU_CONCURRENCY` slot limit
 - Prompt Optimizer uses its own server-side Chat Completions-compatible endpoint config and user-configurable request timeout/response-size cap, resolves API key env refs on the backend, stores its editable system prompt in `DATA_DIR/prompt_optimizer_system_prompt.md`, and does not consume generation/edit queue capacity.
 - R2 Backup uses boto3 against a Cloudflare R2 S3-compatible endpoint under `asyncio.to_thread`; sync jobs list only the configured prefix, retain only keys that match local gallery filenames, fall back to per-file `HeadObject` checks for very large prefixes, upload missing local gallery filenames, and never serve, overwrite, or delete gallery images from R2.
 - SSE is the primary progress channel; `/api/generate/jobs` provides list/history (`include_finished=true`, optional `limit`/`offset`, optional `failed_only=true`), `/api/generate/jobs/history` clears terminal history, and `/api/generate/jobs/events` streams SQLite-backed live job-list changes with sub-second polling
-- terminal job history includes `stage_timings` for `upstream_wait`, `download_decode`, `validate`, and `db_insert`; slow gallery queries are logged with prompt presence/length/hash plus other filters and totals and counted in metrics; optional metrics include `worker_id`, recent worker snapshots, queue depth, running jobs, failure ratios, job-stage latencies, SQLite busy/slow counters, SSE poll query counters, claim misses, active SSE slots, and worker heartbeat age; terminal job statuses distinguish `cancelled`, `interrupted`, and `upstream_error` in addition to the generic `error`
+- terminal job history includes `stage_timings` for `upstream_wait`, `download_decode`, `validate`, and `db_insert`; slow gallery queries are logged with prompt presence/length/hash plus other filters, totals, cursor/count flags, and rows/count/total-bytes/filter-options timings and counted in metrics; optional metrics include `worker_id`, recent worker snapshots, queue depth, running jobs, failure ratios, job-stage latencies, SQLite busy/slow counters, SSE poll query counters, claim misses, active SSE slots, and worker heartbeat age; terminal job statuses distinguish `cancelled`, `interrupted`, and `upstream_error` in addition to the generic `error`
 - upstream JSON/SSE bodies are read with a `MAX_UPSTREAM_JSON_MB` cap before parsing, JSON request bodies are capped by `MAX_JSON_BODY_MB`, and upstream image URL downloads are revalidated (SSRF-aware, no blind redirect follow), fully decoded with Pillow, pixel-limited by `MAX_IMAGE_PIXELS`, and bounded by `MAX_FILE_SIZE_MB`
 - `/api/import` enforces ZIP safety/size/count/compression checks; `/api/download-all` keeps the low-memory streaming path with SQLite-backed direct export jobs/slots and reports server-side prepare/output progress over SSE when called with `export_job_id`. Tracked export jobs still write temp ZIP files for selected/small download flows with `Content-Length` transfer progress. ZIP metadata uses stored `sha256`/`bytes` when available and does not re-read image files only to backfill missing hashes during export.
-- gallery stores byte-size metadata and thumbnails (`THUMBNAILS_DIR`), with older thumbnails queued for background backfill on access and opt-in byte-size backfill for older images; with Compose, nginx serves immutable frontend assets directly and serves image/thumb/download file bytes only after FastAPI returns an authorized `X-Accel-Redirect`; with `PUBLIC_IMAGE_BASE_URL`/`PUBLIC_THUMBNAIL_BASE_URL`, Gallery and job responses can point directly at object storage/CDN URLs
+- gallery stores byte-size metadata and thumbnails (`THUMBNAILS_DIR`), with older thumbnails queued for background backfill on access, opt-in byte-size backfill for older images, and a background file GC that removes unreferenced orphan images/thumbnails after a short TTL while preserving SQLite-referenced filenames; with Compose, nginx serves immutable frontend assets directly and serves image/thumb/download file bytes only after FastAPI returns an authorized `X-Accel-Redirect`; with `PUBLIC_IMAGE_BASE_URL`/`PUBLIC_THUMBNAIL_BASE_URL`, Gallery and job responses can point directly at object storage/CDN URLs
 - startup reconciliation removes gallery rows for missing files and marks previously running/queued jobs as interrupted
 
 ## Testing
@@ -996,7 +996,7 @@ curl http://localhost:9090/health
 | `VERSION_CHECK_TIMEOUT_SECONDS` | `3` | 每次请求 GitHub latest release 或分支 `VERSION` 的超时时间 |
 | `VERSION_CHECK_BRANCH` | `main` | latest release 失败后，用于回退读取 raw `VERSION` 文件的分支 |
 | `ENABLE_METRICS` | `false` | 启用 `/api/metrics` JSON counters/gauges/rates/延迟摘要和 Prometheus 文本输出 |
-| `SLOW_GALLERY_QUERY_MS` | `200` | `/api/gallery` 达到该阈值时记录筛选条件、页码、total 和 DB 查询耗时 |
+| `SLOW_GALLERY_QUERY_MS` | `200` | `/api/gallery` 达到该阈值时记录筛选条件、页码、total、DB 查询耗时，以及 rows/count/total-bytes/filter-options 分段耗时 |
 | `ENABLE_NGINX_ACCEL_REDIRECT` | `false` | nginx internal alias 在前置时，为已授权的图片/缩略图/下载响应返回 `X-Accel-Redirect`；Compose 默认启用 |
 | `PUBLIC_IMAGE_BASE_URL` | 空 | 可选图片公开/CDN base URL；设置后 Gallery 和 job 的图片 URL 指向该地址，`/api/image` 仍保留为鉴权兜底 |
 | `PUBLIC_THUMBNAIL_BASE_URL` | 空 | 可选缩略图公开/CDN base URL；设置后 Gallery 缩略图 URL 指向该地址，`/api/thumb` 仍保留为鉴权兜底 |
@@ -1084,7 +1084,7 @@ curl http://localhost:9090/health
 | `GET` | `/api/generate/{job_id}` | 查询任务状态或结果 |
 | `GET` | `/api/generate/{job_id}/events` | 通过 SSE 推送单个任务状态和进度 |
 | `DELETE` | `/api/generate/{job_id}` | 取消并移除排队/运行中的生成或编辑任务 |
-| `GET` | `/api/gallery` | 通过页码或 cursor 分页查询 Gallery 图片，可选 `prompt`、`model`、`preset`、`size`、`date_from`、`date_to`、`favorite`、`include_total_bytes` 筛选 |
+| `GET` | `/api/gallery` | 通过页码或 cursor 分页查询 Gallery 图片，可选 `prompt`、`model`、`preset`、`size`、`date_from`、`date_to`、`favorite`、`include_total_bytes`、`include_counts`、`include_filter_options` 筛选；图片行包含 `thumbnail_status`（`ready`、`queued` 或 `missing`） |
 | `PATCH` | `/api/gallery/{id}/favorite` | 设置或取消 Gallery 收藏标记 |
 | `GET` | `/api/gallery/{image_id}` | 按 ID 获取单个 Gallery 条目 |
 | `GET` | `/api/image/{filename}` | 访问图片文件 |
@@ -1119,14 +1119,14 @@ curl http://localhost:9090/health
 - 批量生成/编辑（`n > 1`）会占用 `n` 个队列单位；父任务会把成功 unit 结果聚合到 `images[]`，Gallery 元数据保留用户请求的 `n`，不同 unit 可被不同 Granian worker 认领执行
 - 可跟踪 Gallery export job 和手动/定时 R2 sync job 持久化在 SQLite；`GRANIAN_WORKERS>1` 下创建、查询、SSE、下载都可跨进程工作；worker 通过 SQLite lease 认领 queued 或 lease 过期的 running job，空队列 dispatcher 会退避，GC/定时同步使用后台 leader lease，导出 ZIP 存在共享 `DATA_DIR/exports`，direct ZIP 下载也会通过短生命周期 SQLite slot 行占用同一个全局 export 容量
 - SSE 订阅上限通过 SQLite `sse_slots` 执行，所以 `MAX_SSE_SUBSCRIBERS_GLOBAL` 不再随 Granian worker 数量倍增；worker 异常退出时 stale slot 会过期释放
-- Gallery 缩略图是懒生成：图片保存和 DB insert 只排队缩略图任务，`/api/thumb/{filename}` 只返回已存在文件或为缺失缩略图排队，后台 worker 按 `THUMBNAIL_CPU_CONCURRENCY` 全局 slot 限制运行 Pillow
+- Gallery 缩略图会在图片保存/import 和访问缺失缩略图时排队：`/api/thumb/{filename}` 只返回已存在文件或为缺失缩略图排队，Gallery 行返回 `thumbnail_status`，后台 worker 按 `THUMBNAIL_CPU_CONCURRENCY` 全局 slot 限制运行 Pillow
 - 提示词优化器使用独立的服务端 Chat Completions 兼容 endpoint 配置和用户可配置请求超时/响应体积上限，在后端解析 API Key 环境变量引用，不占用生成/编辑任务队列容量。
 - R2 Backup 通过 boto3 访问 Cloudflare R2 S3 兼容 endpoint，并用 `asyncio.to_thread` 隔离阻塞调用；同步任务只列出配置的 prefix，只保留匹配本地 Gallery filename 的远端 key，远端 prefix 极大时会降级为按文件 `HeadObject` 检查，只上传缺失的本地 Gallery filename，不会从 R2 服务、覆盖或删除 Gallery 图片。
 - SSE 是主进度通道；`/api/generate/jobs` 提供列表/历史（`include_finished=true`，可选 `limit`/`offset`，可选 `failed_only=true`），`/api/generate/jobs/history` 清空终态历史，`/api/generate/jobs/events` 通过 SQLite 亚秒级轮询推送实时任务列表变化
-- 任务终态历史包含 `stage_timings`：`upstream_wait`、`download_decode`、`validate`、`db_insert`；慢 Gallery 查询日志只记录提示词是否存在/长度/hash，以及其他筛选条件与 total，并计入 metrics；可选 metrics 包含 `worker_id`、最近 worker snapshots、队列深度、运行中任务数、失败率、任务分段耗时、SQLite busy/慢查询数、SSE poll 查询数、claim miss、活跃 SSE slots 和 worker heartbeat age；终态状态区分 `cancelled`、`interrupted` 和 `upstream_error`，同时保留通用 `error`
+- 任务终态历史包含 `stage_timings`：`upstream_wait`、`download_decode`、`validate`、`db_insert`；慢 Gallery 查询日志记录提示词是否存在/长度/hash、其他筛选条件、total、cursor/count flags，以及 rows/count/total-bytes/filter-options 分段耗时，并计入 metrics；可选 metrics 包含 `worker_id`、最近 worker snapshots、队列深度、运行中任务数、失败率、任务分段耗时、SQLite busy/慢查询数、SSE poll 查询数、claim miss、活跃 SSE slots 和 worker heartbeat age；终态状态区分 `cancelled`、`interrupted` 和 `upstream_error`，同时保留通用 `error`
 - 上游 JSON/SSE 响应会在解析前受 `MAX_UPSTREAM_JSON_MB` 限制，JSON 请求体受 `MAX_JSON_BODY_MB` 限制；上游图片 URL 下载会做 SSRF/重定向目标复核，并会经过 Pillow 完整解码、`MAX_IMAGE_PIXELS` 像素限制和 `MAX_FILE_SIZE_MB` 体积限制
 - `/api/import` 做 ZIP 安全与体积校验；`/api/download-all` 保留低内存流式导出，并通过 SQLite-backed direct export job/slot 在传入 `export_job_id` 时用 SSE 汇报服务端准备/输出进度。tracked export job 仍用于所选/小体积下载流程，会写入临时 ZIP 并借助 `Content-Length` 展示传输进度。ZIP metadata 会使用已保存的 `sha256`/`bytes`，导出时不会为了补缺失 hash 额外完整读取图片文件。
-- Gallery 持久化图片字节数和缩略图（`THUMBNAILS_DIR`），旧图访问时会排队补缩略图；使用 Compose 时，nginx 会直接返回 immutable 前端资源，并且只在 FastAPI 返回已授权的 `X-Accel-Redirect` 后发送图片/缩略图/下载文件字节；配置 `PUBLIC_IMAGE_BASE_URL`/`PUBLIC_THUMBNAIL_BASE_URL` 后，Gallery 和 job 响应可直接返回对象存储/CDN URL
+- Gallery 持久化图片字节数和缩略图（`THUMBNAILS_DIR`），旧图访问时会排队补缩略图，后台 file GC 会在短 TTL 后删除未被 SQLite 引用的孤儿图片/缩略图并保护仍被引用的 filename；使用 Compose 时，nginx 会直接返回 immutable 前端资源，并且只在 FastAPI 返回已授权的 `X-Accel-Redirect` 后发送图片/缩略图/下载文件字节；配置 `PUBLIC_IMAGE_BASE_URL`/`PUBLIC_THUMBNAIL_BASE_URL` 后，Gallery 和 job 响应可直接返回对象存储/CDN URL
 - 启动时会清理缺失文件对应的 Gallery 记录，并把上次进程遗留的 running/queued 任务标记为 interrupted
 
 ## 测试

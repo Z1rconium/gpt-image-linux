@@ -69,6 +69,7 @@ GALLERY_JOB_DISPATCH_INTERVAL_SECONDS = 0.5
 GALLERY_JOB_DISPATCH_MAX_IDLE_BACKOFF_SECONDS = 5.0
 THUMBNAIL_DISPATCH_INTERVAL_SECONDS = 1.0
 THUMBNAIL_DISPATCH_MAX_IDLE_BACKOFF_SECONDS = 5.0
+GALLERY_FILE_GC_INTERVAL_SECONDS = 300
 BACKGROUND_TASK_LEASE_SECONDS = 120
 GALLERY_PROGRESS_MIN_INTERVAL_SECONDS = 0.5
 GALLERY_PROGRESS_MIN_ITEMS = 50
@@ -1147,6 +1148,37 @@ async def run_thumbnail_dispatcher(worker_id: str) -> None:
             await asyncio.sleep(THUMBNAIL_DISPATCH_INTERVAL_SECONDS)
 
 
+def kick_gallery_file_gc() -> None:
+    task = getattr(app.state, "gallery_file_gc_task", None)
+    if task and not task.done():
+        get_gallery_file_gc_kick_event().set()
+        return
+    worker_id = getattr(app.state, "worker_id", f"{os.getpid()}-{id(app)}")
+    app.state.gallery_file_gc_task = asyncio.create_task(
+        run_gallery_file_gc(worker_id, initial_delay_seconds=0.0)
+    )
+
+
+def get_gallery_file_gc_kick_event() -> asyncio.Event:
+    event = getattr(app.state, "gallery_file_gc_kick", None)
+    if event is None:
+        event = asyncio.Event()
+        app.state.gallery_file_gc_kick = event
+    return event
+
+
+async def _wait_for_gallery_file_gc_wakeup(delay: float) -> None:
+    if delay <= 0:
+        return
+    event = get_gallery_file_gc_kick_event()
+    try:
+        await asyncio.wait_for(event.wait(), timeout=delay)
+    except asyncio.TimeoutError:
+        return
+    finally:
+        event.clear()
+
+
 def kick_gallery_job_dispatchers() -> None:
     for name, starter in (
         ("gallery_export_dispatcher_task", run_gallery_export_dispatcher),
@@ -1258,6 +1290,43 @@ async def run_gallery_r2_scheduled_sync(worker_id: str) -> None:
             logger.warning("Scheduled R2 gallery sync failed before job creation", exc_info=True)
 
 
+async def run_gallery_file_gc(
+    worker_id: str,
+    *,
+    initial_delay_seconds: float = GALLERY_FILE_GC_INTERVAL_SECONDS,
+) -> None:
+    lease_name = "gallery_file_gc"
+    delay = max(0.0, initial_delay_seconds)
+    while True:
+        try:
+            await _wait_for_gallery_file_gc_wakeup(delay)
+            acquired = await asyncio.to_thread(
+                storage.acquire_background_lease,
+                name=lease_name,
+                owner=worker_id,
+                lease_expires_at=_background_task_lease_expires_at(),
+            )
+            if not acquired:
+                delay = GALLERY_FILE_GC_INTERVAL_SECONDS
+                continue
+            try:
+                result = await asyncio.to_thread(storage.cleanup_orphan_gallery_files)
+                if result.get("removed_images") or result.get("removed_thumbnails") or result.get("failed"):
+                    metrics.increment("gallery.file_gc_runs")
+            finally:
+                await asyncio.to_thread(
+                    storage.release_background_lease,
+                    name=lease_name,
+                    owner=worker_id,
+                )
+            delay = GALLERY_FILE_GC_INTERVAL_SECONDS
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("Gallery file GC error", exc_info=True)
+            delay = GALLERY_FILE_GC_INTERVAL_SECONDS
+
+
 async def gc_gallery_export_jobs(worker_id: str) -> None:
     """Periodically clean up completed export/sync jobs and orphan ZIP files."""
     lease_name = "gallery_export_gc"
@@ -1342,6 +1411,8 @@ async def get_gallery_handler(
     date_to: str | None = Query(default=None),
     favorite: bool | None = Query(default=None),
     include_total_bytes: bool = Query(default=False),
+    include_counts: bool = Query(default=True),
+    include_filter_options: bool = Query(default=True),
     cursor: str | None = Query(default=None, max_length=512),
     direction: str = Query(default="next"),
 ):
@@ -1362,6 +1433,8 @@ async def get_gallery_handler(
             page_size=page_size,
             filters=filters,
             include_total_bytes=include_total_bytes,
+            include_counts=include_counts,
+            include_filter_options=include_filter_options,
             cursor=cursor,
             direction=direction,
         )
@@ -1371,16 +1444,26 @@ async def get_gallery_handler(
     metrics.increment("gallery.requests")
     metrics.observe_ms("gallery.request", elapsed_ms)
     metrics.observe_ms("gallery.db_query", gallery_page.query_elapsed_ms)
+    for timing_name, timing_ms in gallery_page.timings_ms.items():
+        metrics.observe_ms(f"gallery.{timing_name.removesuffix('_ms')}", timing_ms)
     if elapsed_ms >= config.SLOW_GALLERY_QUERY_MS:
         metrics.increment("gallery.slow_queries")
         metrics.increment("sqlite.slow_queries")
         logger.warning(
-            "Slow /api/gallery query: elapsed_ms=%.2f db_query_ms=%.2f page=%s page_size=%s total=%s filters=%s",
+            "Slow /api/gallery query: elapsed_ms=%.2f db_query_ms=%.2f rows_ms=%.2f count_ms=%.2f total_bytes_ms=%.2f filter_options_ms=%.2f page=%s page_size=%s total=%s cursor=%s direction=%s include_counts=%s include_filter_options=%s filters=%s",
             elapsed_ms,
             gallery_page.query_elapsed_ms,
+            gallery_page.timings_ms.get("rows_ms", 0.0),
+            gallery_page.timings_ms.get("count_ms", 0.0),
+            gallery_page.timings_ms.get("total_bytes_ms", 0.0),
+            gallery_page.timings_ms.get("filter_options_ms", 0.0),
             gallery_page.page,
             gallery_page.page_size,
             gallery_page.total,
+            bool(cursor),
+            direction,
+            gallery_page.counts_included,
+            gallery_page.filter_options_included,
             _gallery_filters_for_log(filters),
         )
 
@@ -1407,6 +1490,7 @@ async def delete_gallery_batch(req: GalleryBatchRequest):
     deleted_entries, deleted_files = await asyncio.to_thread(storage.delete_gallery_images, req.ids)
     if deleted_entries == 0:
         raise HTTPException(status_code=404, detail="Gallery entries not found")
+    kick_gallery_file_gc()
     return GalleryBatchResponse(
         status="ok",
         count=deleted_entries,
@@ -1918,6 +2002,7 @@ async def import_gallery_archive(archive: UploadFile = File(...)):
 
     if imported_count == 0:
         raise HTTPException(status_code=400, detail="No importable images found")
+    kick_thumbnail_dispatcher()
     return {
         "status": "success",
         "imported": imported_count,
@@ -1927,6 +2012,7 @@ async def import_gallery_archive(archive: UploadFile = File(...)):
 @router.delete("/api/gallery", response_model=MessageResponse)
 async def delete_all_gallery_images():
     total, deleted_count = await asyncio.to_thread(storage.delete_all_gallery_images)
+    kick_gallery_file_gc()
     return MessageResponse(
         status="ok",
         message=f"Deleted {deleted_count} image file(s) and {total} gallery entries",
@@ -1940,6 +2026,7 @@ async def delete_gallery_item(image_id: str):
     if not deleted_entry:
         raise HTTPException(status_code=404, detail="Gallery entry not found")
 
+    kick_gallery_file_gc()
     return MessageResponse(
         status="ok",
         message=f"Deleted gallery entry and {deleted_file_count} image file(s)",

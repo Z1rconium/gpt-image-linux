@@ -3445,7 +3445,7 @@ def test_schema_migrations_are_recorded_and_idempotent(tmp_path):
         versions = conn.execute(
             "SELECT version, name FROM schema_migrations ORDER BY version"
         ).fetchall()
-    assert [row["version"] for row in versions] == [1, 2, 3, 4]
+    assert [row["version"] for row in versions] == [1, 2, 3, 4, 5]
 
     storage.close_database_connections()
     storage._db_initialized = False
@@ -3656,6 +3656,28 @@ def test_orphan_gallery_files_are_not_directly_served(client):
     assert image.status_code == 404
     assert thumb.status_code == 404
     assert download.status_code == 404
+
+
+def test_orphan_gallery_file_gc_removes_unreferenced_files(client):
+    kept = _fake_gallery_entry("kept-gc", "kept", "1024x1024", "kept.png")
+    kept_path = Path(config.IMAGES_DIR) / kept.filename
+    orphan_path = Path(config.IMAGES_DIR) / "orphan-gc.png"
+    orphan_path.write_bytes(PNG_BYTES)
+
+    thumbnail_filename = storage.generate_thumbnail_for_image("orphan-gc.png")
+    assert thumbnail_filename
+    orphan_thumbnail_path = storage.safe_thumbnail_path(thumbnail_filename)
+    assert orphan_thumbnail_path is not None
+    assert orphan_thumbnail_path.exists()
+
+    result = storage.cleanup_orphan_gallery_files(ttl_seconds=0, batch_size=20)
+
+    assert result["removed_images"] == 1
+    assert result["removed_thumbnails"] == 1
+    assert not orphan_path.exists()
+    assert not orphan_thumbnail_path.exists()
+    assert kept_path.exists()
+    assert storage.get_gallery_entry("kept-gc") is not None
 
 
 def test_download_all_deduplicates_shared_filenames(client):

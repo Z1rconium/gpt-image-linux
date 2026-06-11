@@ -11,6 +11,7 @@ type GalleryImageFixture = {
   size: string;
   filename: string;
   thumbnail_url: string;
+  thumbnail_status?: 'ready' | 'queued' | 'missing';
   created_at: string;
   completed_at: string;
   image_width: number;
@@ -263,7 +264,13 @@ function galleryCursor(image: GalleryImageFixture | undefined) {
   return Buffer.from(JSON.stringify({ sort_seq: 1, id: image.id }), 'utf8').toString('base64url');
 }
 
-function galleryResponse(images = baseGalleryImages, includeTotalBytes = false, requestedPage = 1) {
+function galleryResponse(
+  images = baseGalleryImages,
+  includeTotalBytes = false,
+  requestedPage = 1,
+  includeCounts = true,
+  includeFilterOptions = true
+) {
   const pageSize = 9;
   const totalPages = Math.max(Math.ceil(images.length / pageSize), 1);
   const parsedPage = Number.isFinite(requestedPage) ? requestedPage : 1;
@@ -271,21 +278,27 @@ function galleryResponse(images = baseGalleryImages, includeTotalBytes = false, 
   const pageImages = images.slice((page - 1) * pageSize, page * pageSize);
 
   return {
-    total: images.length,
+    total: includeCounts ? images.length : 0,
     total_bytes: includeTotalBytes ? images.reduce((sum, image) => sum + image.bytes, 0) : 0,
     page,
     page_size: pageSize,
-    total_pages: totalPages,
+    total_pages: includeCounts ? totalPages : Math.max(page + (page < totalPages ? 1 : 0), 1),
     has_prev: page > 1,
     has_next: page < totalPages,
     next_cursor: page < totalPages ? galleryCursor(pageImages[pageImages.length - 1]) : null,
     prev_cursor: page > 1 ? galleryCursor(pageImages[0]) : null,
     images: pageImages,
-    filter_options: {
-      models: ['gpt-image-2'],
-      presets: ['Default'],
-      sizes: ['1024x1024', '1536x1024']
-    }
+    filter_options: includeFilterOptions
+      ? {
+          models: ['gpt-image-2'],
+          presets: ['Default'],
+          sizes: ['1024x1024', '1536x1024']
+        }
+      : {
+          models: [],
+          presets: [],
+          sizes: []
+        }
   };
 }
 
@@ -385,7 +398,8 @@ function manyGalleryImages(count: number) {
     id: `paged-img-${index + 1}`,
     prompt: `Paged gallery image ${index + 1}`,
     filename: `paged-img-${index + 1}.png`,
-    thumbnail_url: `/api/thumb/paged-img-${index + 1}.png`
+    thumbnail_url: `/api/thumb/paged-img-${index + 1}.png`,
+    thumbnail_status: 'ready' as const
   }));
 }
 
@@ -588,7 +602,17 @@ async function mockApi(page: Page, options: MockOptions = {}) {
       const images = prompt
         ? galleryImages.filter((image) => image.prompt.toLowerCase().includes(prompt.toLowerCase()))
         : galleryImages;
-      await route.fulfill(json(galleryResponse(images, url.searchParams.get('include_total_bytes') === 'true', requestedPage)));
+      await route.fulfill(
+        json(
+          galleryResponse(
+            images,
+            url.searchParams.get('include_total_bytes') === 'true',
+            requestedPage,
+            url.searchParams.get('include_counts') !== 'false',
+            url.searchParams.get('include_filter_options') !== 'false'
+          )
+        )
+      );
       return;
     }
     if (url.pathname.match(/^\/api\/gallery\/[^/]+$/) && request.method() === 'GET') {
@@ -898,7 +922,12 @@ test('generation, gallery edit source, batch favorite, and lightbox flows work w
   await page.getByRole('button', { name: 'Edits' }).click();
   await expect(page.getByRole('img', { name: 'Generated preview' })).toBeVisible();
 
+  const filterRequest = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return response.request().method() === 'GET' && url.pathname === '/api/gallery' && url.searchParams.get('prompt') === 'First';
+  });
   await page.getByLabel('Filter prompt').fill('First');
+  await filterRequest;
   await expect(page.getByRole('img', { name: 'First gallery image' })).toBeVisible();
 
   await page.getByRole('button', { name: 'Select' }).click();
@@ -1234,6 +1263,95 @@ test('gallery page input jumps to the requested page on Enter', async ({ page })
   await expect(page.getByRole('img', { name: 'Paged gallery image 1', exact: true })).toBeHidden();
   await expect(pageInput).toHaveValue('2');
   await expect(page).toHaveURL(/page=2/);
+});
+
+test('gallery handles 500 mocked images with lightweight cursor paging, filtering, and selection', async ({ page }) => {
+  await loadApp(page, { galleryImages: manyGalleryImages(500) });
+
+  await expect(page.getByRole('img', { name: 'Paged gallery image 1', exact: true })).toBeVisible();
+  const nextPageRequest = page.waitForRequest((request) => {
+    const url = new URL(request.url());
+    return (
+      request.method() === 'GET' &&
+      url.pathname === '/api/gallery' &&
+      url.searchParams.get('page') === '2' &&
+      url.searchParams.get('direction') === 'next' &&
+      Boolean(url.searchParams.get('cursor'))
+    );
+  });
+  await page.getByRole('button', { name: 'Next' }).click();
+  const nextRequest = await nextPageRequest;
+  const nextUrl = new URL(nextRequest.url());
+  expect(nextUrl.searchParams.get('include_counts')).toBe('false');
+  expect(nextUrl.searchParams.get('include_filter_options')).toBe('false');
+  await expect(page.getByRole('img', { name: 'Paged gallery image 10', exact: true })).toBeVisible();
+
+  await page.getByRole('button', { name: 'Select' }).click();
+  await page.getByRole('button', { name: 'Select page' }).click();
+  await page.getByRole('button', { name: 'Favorite selected', exact: true }).click();
+  await expect(page.getByRole('status')).toContainText('Updated');
+  await page.getByRole('button', { name: 'Cancel selection' }).click();
+
+  const filterRequest = page.waitForRequest((request) => {
+    const url = new URL(request.url());
+    return request.method() === 'GET' && url.pathname === '/api/gallery' && url.searchParams.get('prompt') === '500';
+  });
+  await page.getByLabel('Filter prompt').fill('500');
+  await filterRequest;
+  await expect(page.getByRole('img', { name: 'Paged gallery image 500', exact: true })).toBeVisible();
+  await expect(page.getByRole('img', { name: 'Paged gallery image 10', exact: true })).toBeHidden();
+});
+
+test('gallery queued thumbnails use placeholders without loading full-size images', async ({ page }) => {
+  const fullImageRequests: string[] = [];
+  page.on('request', (request) => {
+    const url = new URL(request.url());
+    if (url.pathname === '/api/image/queued-thumb.png') fullImageRequests.push(url.pathname);
+  });
+
+  await loadApp(page, {
+    galleryImages: [
+      {
+        ...baseGalleryImages[0],
+        id: 'queued-thumb',
+        prompt: 'Queued thumbnail image',
+        filename: 'queued-thumb.png',
+        thumbnail_url: '/api/thumb/queued-thumb.png',
+        thumbnail_status: 'queued'
+      }
+    ]
+  });
+
+  await expect(page.getByRole('button', { name: 'Queued thumbnail image' })).toBeVisible();
+  await page.waitForTimeout(100);
+  expect(fullImageRequests).toHaveLength(0);
+});
+
+test('lightbox navigates across pages with 2000 mocked images', async ({ page }) => {
+  await loadApp(page, { galleryImages: manyGalleryImages(2000) });
+
+  await page.getByRole('img', { name: 'Paged gallery image 9', exact: true }).click();
+  const lightbox = page.getByRole('dialog', { name: 'Image Details' });
+  await expect(lightbox).toContainText('paged-img-9.png');
+
+  const nextPageRequest = page.waitForRequest((request) => {
+    const url = new URL(request.url());
+    return (
+      request.method() === 'GET' &&
+      url.pathname === '/api/gallery' &&
+      url.searchParams.get('page') === '2' &&
+      url.searchParams.get('direction') === 'next' &&
+      url.searchParams.get('include_counts') === 'false' &&
+      url.searchParams.get('include_filter_options') === 'false' &&
+      Boolean(url.searchParams.get('cursor'))
+    );
+  });
+  await page.keyboard.press('ArrowRight');
+  await nextPageRequest;
+
+  await expect(lightbox).toContainText('paged-img-10.png');
+  await expect(page).toHaveURL(/page=2/);
+  await expect(page).toHaveURL(/image=paged-img-10/);
 });
 
 test('single image delete uses custom confirmation and can be undone before the server delete', async ({ page }) => {

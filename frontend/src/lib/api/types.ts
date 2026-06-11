@@ -262,6 +262,7 @@ export type GalleryEntry = {
   image_url?: string | null;
   thumbnail_filename?: string | null;
   thumbnail_url?: string | null;
+  thumbnail_status?: 'ready' | 'queued' | 'missing';
   created_at: string;
   completed_at?: string | null;
   image_width?: number | null;

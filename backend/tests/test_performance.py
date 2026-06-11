@@ -37,27 +37,31 @@ def _configure_runtime(tmp_path: Path):
 
 def _seed_gallery_rows(row_count: int):
     now_prefix = "2026-05-18T12:"
-    rows = [
-        {
-            "id": f"img-{index:05d}",
-            "prompt": f"benchmark prompt {index % 100}",
-            "size": "1024x1024",
-            "filename": f"img-{index:05d}.png",
-            "created_at": f"{now_prefix}{index % 60:02d}:{index % 60:02d}",
-            "model": "gpt-image-2",
-            "quality": "auto",
-            "output_format": "png",
-            "n": 1,
-            "api_path": "/v1/images/generations",
-            "api_preset_name": "Default",
-            "favorite": index % 7 == 0,
-            "bytes": 128,
-        }
-        for index in range(row_count)
-    ]
+    sizes = ("1024x1024", "1536x1024", "1024x1536")
+    models = ("gpt-image-2", "gpt-image-1")
+    presets = ("Default", "Studio", "Draft")
     with storage._connect() as conn:
-        with storage._transaction(conn):
-            storage._insert_gallery_entries_on_conn(conn, rows)
+        for start in range(0, row_count, 5_000):
+            rows = [
+                {
+                    "id": f"img-{index:06d}",
+                    "prompt": f"benchmark prompt {index % 100} p{index % 10}",
+                    "size": sizes[index % len(sizes)],
+                    "filename": f"img-{index:06d}.png",
+                    "created_at": f"{now_prefix}{index % 60:02d}:{index % 60:02d}",
+                    "model": models[index % len(models)],
+                    "quality": "auto",
+                    "output_format": "png",
+                    "n": 1,
+                    "api_path": "/v1/images/generations",
+                    "api_preset_name": presets[index % len(presets)],
+                    "favorite": index % 7 == 0,
+                    "bytes": 128 + (index % 8192),
+                }
+                for index in range(start, min(start + 5_000, row_count))
+            ]
+            with storage._transaction(conn):
+                storage._insert_gallery_entries_on_conn(conn, rows)
 
 
 def _seed_job_rows(row_count: int):
@@ -109,6 +113,80 @@ def test_gallery_page_query_baseline(tmp_path, row_count, record_property):
     record_property(f"gallery_{row_count}_rows_p50_ms", round(p50, 2))
     record_property(f"gallery_{row_count}_rows_p95_ms", round(p95, 2))
     assert p95 < 500
+
+
+@pytest.mark.parametrize("row_count", [50_000, 100_000])
+@pytest.mark.parametrize(
+    ("case_name", "page", "filters", "include_total_bytes", "include_counts", "include_filter_options"),
+    [
+        ("first_page_no_prompt", 1, {}, False, True, True),
+        ("deep_page_no_prompt", 5_000, {}, False, True, False),
+        (
+            "combined_filters",
+            1,
+            {
+                "model": "gpt-image-2",
+                "preset": "Default",
+                "size": "1024x1024",
+                "favorite": True,
+            },
+            False,
+            True,
+            False,
+        ),
+        ("short_prompt_like", 1, {"prompt": "p4"}, False, True, False),
+        ("total_bytes", 1, {}, True, True, False),
+        ("lightweight_cursor_page", 2, {}, False, False, False),
+    ],
+)
+def test_gallery_large_query_baselines(
+    tmp_path,
+    row_count,
+    case_name,
+    page,
+    filters,
+    include_total_bytes,
+    include_counts,
+    include_filter_options,
+    record_property,
+):
+    _configure_runtime(tmp_path)
+    _seed_gallery_rows(row_count)
+    cursor = None
+    direction = "next"
+    if case_name == "lightweight_cursor_page":
+        first_page = storage.get_gallery_page(
+            page=1,
+            page_size=9,
+            filters=filters,
+            include_counts=False,
+            include_filter_options=False,
+        )
+        assert first_page.next_cursor
+        cursor = first_page.next_cursor
+
+    def query():
+        gallery_page = storage.get_gallery_page(
+            page=page,
+            page_size=9,
+            filters=filters,
+            include_total_bytes=include_total_bytes,
+            include_counts=include_counts,
+            include_filter_options=include_filter_options,
+            cursor=cursor,
+            direction=direction,
+        )
+        assert gallery_page.images or page > gallery_page.total_pages
+        if include_counts:
+            assert gallery_page.total >= 0
+        if include_total_bytes:
+            assert gallery_page.total_bytes > 0
+
+    p50, p95 = _measure_ms(query, iterations=12)
+    prefix = f"gallery_{row_count}_rows_{case_name}"
+    record_property(f"{prefix}_p50_ms", round(p50, 2))
+    record_property(f"{prefix}_p95_ms", round(p95, 2))
+    assert p95 < 3000
 
 
 def test_gallery_cursor_query_baseline(tmp_path, record_property):
