@@ -132,6 +132,20 @@ function batchToastMessage(action: 'delete' | 'favorite', result: GalleryBatchRe
   return get(t).messages.selectedImagesFavorited(updatedCount, missingCount);
 }
 
+function selectedCount(state: GalleryState) {
+  return state.selectionToken?.count || state.selectedIds.size;
+}
+
+function selectedVisibleIds(state: GalleryState) {
+  if (state.selectionToken) return state.gallery?.images.map((image) => image.id) || [];
+  return state.gallery?.images.filter((image) => state.selectedIds.has(image.id)).map((image) => image.id) || [];
+}
+
+function batchRequestBody(state: GalleryState) {
+  if (state.selectionToken) return { selection_token: state.selectionToken.token };
+  return { ids: [...state.selectedIds] };
+}
+
 function waitForGalleryExportJob(
   jobId: string,
   onJob: (job: GalleryExportJobStatus) => void,
@@ -315,19 +329,19 @@ export function createGalleryActions(deps: GalleryActionDeps) {
 
   async function batchFavorite(favorite: boolean, showToast: (message: string) => void, onAffected?: (ids: string[], favorite: boolean) => void) {
     const state = deps.getState();
-    const ids = [...state.selectedIds];
-    if (!ids.length) return;
+    const count = selectedCount(state);
+    if (!count) return;
     const result = await apiFetch<GalleryBatchResponse>(
       '/api/gallery/batch/favorite',
       {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ids, favorite })
+        body: JSON.stringify({ ...batchRequestBody(state), favorite })
       },
       'updating selected favorites'
     );
     await deps.loadGallery(state.page);
-    onAffected?.(ids, favorite);
+    onAffected?.(selectedVisibleIds(state), favorite);
     showToast(batchToastMessage('favorite', result));
   }
 
@@ -336,17 +350,18 @@ export function createGalleryActions(deps: GalleryActionDeps) {
     onDeleted?: (ids: string[]) => void
   ) {
     const state = deps.getState();
-    const ids = [...state.selectedIds];
-    if (!ids.length) return;
-    const selectedEntries = state.gallery?.images.filter((image) => ids.includes(image.id)) || [];
+    const count = selectedCount(state);
+    if (!count) return;
+    const visibleIds = selectedVisibleIds(state);
+    const selectedEntries = state.gallery?.images.filter((image) => visibleIds.includes(image.id)) || [];
     const selectedBytes = selectedEntries.reduce((sum, image) => sum + (image.bytes || 0), 0);
     const details = [
-      get(t).confirm.deleteSelectedDetail(ids.length),
+      get(t).confirm.deleteSelectedDetail(count),
       selectedEntries.length ? get(t).confirm.deleteSelectedSize(formatBytes(selectedBytes)) : ''
     ].filter(Boolean);
     const confirmed = await confirmStore.confirm({
-      title: get(t).confirm.deleteSelectedTitle(ids.length),
-      message: get(t).confirm.deleteSelectedMessage(ids.length),
+      title: get(t).confirm.deleteSelectedTitle(count),
+      message: get(t).confirm.deleteSelectedMessage(count),
       details,
       confirmLabel: get(t).gallery.deleteSelected,
       cancelLabel: get(t).confirm.cancel,
@@ -359,11 +374,11 @@ export function createGalleryActions(deps: GalleryActionDeps) {
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ids })
+        body: JSON.stringify(batchRequestBody(state))
       },
       'deleting selected images'
     );
-    onDeleted?.(ids);
+    onDeleted?.(visibleIds);
     deps.clearSelection();
     await deps.loadGallery(state.page);
     showToast(batchToastMessage('delete', result));
@@ -371,28 +386,29 @@ export function createGalleryActions(deps: GalleryActionDeps) {
 
   async function batchDownload(showToast?: (message: string) => void) {
     const state = deps.getState();
-    const ids = [...state.selectedIds];
-    if (!ids.length) return;
+    const count = selectedCount(state);
+    if (!count) return;
     const label = get(t).gallery.downloadingSelected;
-    const selectedEntries = state.gallery?.images.filter((image) => ids.includes(image.id)) || [];
+    const visibleIds = selectedVisibleIds(state);
+    const selectedEntries = state.selectionToken ? [] : state.gallery?.images.filter((image) => visibleIds.includes(image.id)) || [];
     const selectedBytes = selectedEntries.reduce((sum, image) => sum + (image.bytes || 0), 0);
     deps.setOperationStatus({
       kind: 'download',
       label,
-      detail: get(t).gallery.downloadPreparing(ids.length),
+      detail: get(t).gallery.downloadPreparing(count),
       progress: 0
     });
     try {
-      if (selectedBytes >= STREAMING_ZIP_DOWNLOAD_BYTES_THRESHOLD && canUseFileSystemAccess()) {
+      if (!state.selectionToken && selectedBytes >= STREAMING_ZIP_DOWNLOAD_BYTES_THRESHOLD && canUseFileSystemAccess()) {
         const response = await fetch('/api/gallery/batch/download', {
           method: 'POST',
           credentials: 'same-origin',
           headers: { 'Content-Type': 'application/json', Accept: 'application/zip' },
-          body: JSON.stringify({ ids })
+          body: JSON.stringify(batchRequestBody(state))
         });
         if (!response.ok) throw new Error(get(t).messages.requestFailed);
         await saveResponseStreamToFile(response, 'download', label, get(t).gallery.browserSavingDownload, 'gpt-images-selected.zip');
-        const requestedCount = parseHeaderInt(response.headers, 'X-Gallery-Requested-Count') || ids.length;
+        const requestedCount = parseHeaderInt(response.headers, 'X-Gallery-Requested-Count') || count;
         const exportedCount = parseHeaderInt(response.headers, 'X-Gallery-Exported-Count') || requestedCount;
         const missingCount = parseHeaderInt(response.headers, 'X-Gallery-Missing-Count');
         showToast?.(get(t).messages.selectedImagesDownloaded(exportedCount, missingCount));
@@ -404,7 +420,7 @@ export function createGalleryActions(deps: GalleryActionDeps) {
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ids })
+          body: JSON.stringify(batchRequestBody(state))
         },
         'preparing selected image download'
       );
@@ -425,7 +441,7 @@ export function createGalleryActions(deps: GalleryActionDeps) {
       const downloadUrl = readyJob.download_url || `/api/gallery/export-jobs/${encodeURIComponent(readyJob.job_id)}/download`;
       if (readyJob.bytes_total >= STREAMING_ZIP_DOWNLOAD_BYTES_THRESHOLD) {
         startNativeDownload(downloadUrl, 'gpt-images-selected.zip');
-        const requestedCount = readyJob.requested_count || ids.length;
+        const requestedCount = readyJob.requested_count || count;
         const exportedCount = readyJob.exported_count || requestedCount;
         const missingCount = readyJob.missing_count || 0;
         showToast?.(get(t).messages.selectedImagesDownloaded(exportedCount, missingCount));
@@ -447,7 +463,7 @@ export function createGalleryActions(deps: GalleryActionDeps) {
         { start: 50, end: 100 }
       );
       downloadBlob(blob, filenameFromContentDisposition(response.headers.get('Content-Disposition'), 'gpt-images-selected.zip'));
-      const requestedCount = readyJob.requested_count || parseHeaderInt(response.headers, 'X-Gallery-Requested-Count') || ids.length;
+      const requestedCount = readyJob.requested_count || parseHeaderInt(response.headers, 'X-Gallery-Requested-Count') || count;
       const exportedCount = readyJob.exported_count || parseHeaderInt(response.headers, 'X-Gallery-Exported-Count') || requestedCount;
       const missingCount = readyJob.missing_count || parseHeaderInt(response.headers, 'X-Gallery-Missing-Count');
       showToast?.(get(t).messages.selectedImagesDownloaded(exportedCount, missingCount));

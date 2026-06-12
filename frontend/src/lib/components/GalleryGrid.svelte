@@ -25,9 +25,11 @@
   export let onUseAll: (image: GalleryEntry) => void = () => {};
   export let selectionMode = false;
   export let selectedIds: Set<string> = new Set();
+  export let selectionTokenCount = 0;
   export let onSelectionMode: (enabled: boolean) => void = () => {};
   export let onToggleSelection: (image: GalleryEntry) => void = () => {};
   export let onSelectPage: () => void = () => {};
+  export let onSelectFiltered: () => void = () => {};
   export let onClearSelection: () => void = () => {};
   export let onBatchDelete: () => void = () => {};
   export let onBatchFavorite: (favorite: boolean) => void = () => {};
@@ -46,8 +48,15 @@
   $: pageInput = String(currentPage);
   $: initialLoading = loading && images.length === 0;
   $: busy = loading || Boolean(operationStatus);
-  $: selectedCount = selectedIds.size;
+  $: selectedAllFiltered = selectionTokenCount > 0;
+  $: selectedCount = selectedAllFiltered ? selectionTokenCount : selectedIds.size;
+  $: pageSelectedCount = selectedAllFiltered ? images.length : images.filter((image) => selectedIds.has(image.id)).length;
   $: hasSelection = selectedCount > 0;
+  $: selectionSummary = selectedAllFiltered
+    ? $t.gallery.filteredSelection(selectedCount)
+    : selectedCount > pageSelectedCount
+      ? $t.gallery.crossPageSelection(pageSelectedCount, selectedCount)
+      : $t.gallery.pageSelection(selectedCount);
   $: hasFilters = Boolean(
     filters.prompt.trim() ||
       filters.model ||
@@ -129,6 +138,10 @@
     img.dataset.fallbackSrc = fallback;
     img.srcset = '';
     img.src = fallback;
+  }
+
+  function isImageSelected(image: GalleryEntry) {
+    return selectedAllFiltered || selectedIds.has(image.id);
   }
 </script>
 
@@ -230,14 +243,15 @@
 
   {#if selectionMode}
     <div class="mb-4 flex flex-col gap-3 rounded-xl border border-emerald-500/30 bg-emerald-500/5 p-3 sm:flex-row sm:items-center sm:justify-between">
-      <div class="text-xs font-medium text-emerald-200">{$t.gallery.selectedCount(selectedCount)}</div>
+      <div class="text-xs font-medium text-emerald-200">{selectionSummary}</div>
       <div class="flex flex-wrap gap-2">
-        <button type="button" class="control-focus rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800" on:click={onSelectPage}>{$t.gallery.selectAllPage}</button>
-        <button type="button" class="control-focus rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40" disabled={!hasSelection} on:click={onClearSelection}>{$t.gallery.clearSelection}</button>
-        <button type="button" class="control-focus rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40" disabled={!hasSelection || busy} on:click={onBatchDownload}>{operationStatus?.kind === 'download' ? $t.gallery.downloading : $t.gallery.downloadSelected}</button>
-        <button type="button" class="control-focus rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40" disabled={!hasSelection || busy} on:click={() => onBatchFavorite(true)}>{$t.gallery.favoriteSelected}</button>
-        <button type="button" class="control-focus rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40" disabled={!hasSelection || busy} on:click={() => onBatchFavorite(false)}>{$t.gallery.unfavoriteSelected}</button>
-        <button type="button" class="control-focus rounded-lg border border-red-500/40 px-3 py-2 text-xs text-red-300 hover:bg-red-500/10 disabled:opacity-40" disabled={!hasSelection || busy} on:click={onBatchDelete}>{$t.gallery.deleteSelected}</button>
+        <button type="button" class="control-focus rounded-lg border border-zinc-700 px-2.5 py-2 text-xs text-zinc-300 hover:bg-zinc-800" on:click={onSelectPage}>{$t.gallery.selectAllPage}</button>
+        <button type="button" class="control-focus rounded-lg border border-zinc-700 px-2.5 py-2 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40" disabled={!gallery?.total || busy} on:click={onSelectFiltered}>{$t.gallery.selectFiltered}</button>
+        <button type="button" class="control-focus rounded-lg border border-zinc-700 px-2.5 py-2 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40" disabled={!hasSelection} on:click={onClearSelection}>{$t.gallery.clearSelection}</button>
+        <button type="button" class="control-focus rounded-lg border border-zinc-700 px-2.5 py-2 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40" disabled={!hasSelection || busy} on:click={onBatchDownload}>{operationStatus?.kind === 'download' ? $t.gallery.downloading : $t.gallery.downloadSelected}</button>
+        <button type="button" class="control-focus rounded-lg border border-zinc-700 px-2.5 py-2 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40" disabled={!hasSelection || busy} on:click={() => onBatchFavorite(true)}>{$t.gallery.favoriteSelected}</button>
+        <button type="button" class="control-focus rounded-lg border border-zinc-700 px-2.5 py-2 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40" disabled={!hasSelection || busy} on:click={() => onBatchFavorite(false)}>{$t.gallery.unfavoriteSelected}</button>
+        <button type="button" class="control-focus rounded-lg border border-red-500/40 px-2.5 py-2 text-xs text-red-300 hover:bg-red-500/10 disabled:opacity-40" disabled={!hasSelection || busy} on:click={onBatchDelete}>{$t.gallery.deleteSelected}</button>
       </div>
     </div>
   {/if}
@@ -294,11 +308,11 @@
 
       <div class={`grid gap-4 sm:grid-cols-2 md:gap-5 lg:grid-cols-3 lg:gap-4 ${loading ? 'opacity-70' : ''}`}>
         {#each images as image, index (image.id)}
-          <article class={`gallery-card overflow-hidden rounded-xl border ${selectedIds.has(image.id) ? 'border-emerald-400 bg-emerald-500/10' : 'border-zinc-800 bg-zinc-950/45'}`}>
+          <article class={`gallery-card overflow-hidden rounded-xl border ${isImageSelected(image) ? 'border-emerald-400 bg-emerald-500/10' : 'border-zinc-800 bg-zinc-950/45'}`}>
             <button type="button" class="control-focus relative block aspect-square w-full bg-zinc-950" aria-label={image.prompt} on:click={() => handleImageClick(image)}>
               {#if selectionMode}
                 <span class="absolute left-2 top-2 z-10 rounded-md bg-zinc-950/80 px-2 py-1 text-xs font-medium text-zinc-100">
-                  {selectedIds.has(image.id) ? '✓' : ''}
+                  {isImageSelected(image) ? '✓' : ''}
                 </span>
               {/if}
               {#if thumbnailReady(image)}
@@ -324,18 +338,66 @@
                 <div class="h-full w-full bg-[radial-gradient(circle_at_30%_25%,rgba(16,185,129,0.14),transparent_28%),linear-gradient(135deg,rgba(39,39,42,0.9),rgba(9,9,11,0.96))]" aria-label={image.prompt}></div>
               {/if}
             </button>
-            <div class="space-y-3 p-3">
+            <div class="space-y-2 p-2.5">
               <div class="min-w-0">
-                <p class="line-clamp-2 text-sm text-zinc-200">{image.prompt}</p>
-                <p class="mt-1 text-xs text-zinc-500">{displayImageSize(image)} / {image.model || '-'}</p>
+                <p class="line-clamp-2 text-xs leading-5 text-zinc-200">{image.prompt}</p>
+                <p class="mt-1 truncate text-[11px] leading-4 text-zinc-500">{displayImageSize(image)} / {image.model || '-'}</p>
               </div>
-              <div class="flex flex-wrap gap-2">
-                <button type="button" class="gallery-card-action control-focus rounded-md border border-emerald-500/40 px-2 py-1 text-xs text-emerald-200 hover:bg-emerald-500/10" on:click={(event) => handleGalleryAction(event, () => onUsePrompt(image))}>{$t.common.usePrompt}</button>
-                <button type="button" class="gallery-card-action control-focus rounded-md border border-emerald-500/40 px-2 py-1 text-xs text-emerald-200 hover:bg-emerald-500/10" on:click={(event) => handleGalleryAction(event, () => onUseAll(image))}>{$t.common.useAllParams}</button>
-                <button type="button" class="gallery-card-action control-focus rounded-md border border-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800" on:click={(event) => handleGalleryAction(event, () => onEdit(image))}>{$t.common.edit}</button>
-                <button type="button" class="gallery-card-action control-focus rounded-md border border-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800" on:click={(event) => handleGalleryAction(event, () => onFavorite(image))}>{image.favorite ? $t.common.unfavorite : $t.common.favorite}</button>
-                <a href={`/api/download/${encodeURIComponent(image.filename)}`} class="gallery-card-action control-focus rounded-md border border-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800" on:click|stopPropagation>{$t.common.download}</a>
-                <button type="button" class="gallery-card-action control-focus rounded-md border border-red-500/40 px-2 py-1 text-xs text-red-300 hover:bg-red-500/10" on:click={(event) => handleGalleryAction(event, () => onDelete(image))}>{$t.common.delete}</button>
+              <div class="grid grid-cols-6 gap-1">
+                <button
+                  type="button"
+                  class="gallery-icon-action control-focus border-emerald-500/40 text-emerald-200 hover:bg-emerald-500/10"
+                  aria-label={$t.common.usePrompt}
+                  title={$t.common.usePrompt}
+                  on:click={(event) => handleGalleryAction(event, () => onUsePrompt(image))}
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4h10a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z"/><path d="M8 8h8M8 12h8M8 16h5"/></svg>
+                </button>
+                <button
+                  type="button"
+                  class="gallery-icon-action control-focus border-emerald-500/40 text-emerald-200 hover:bg-emerald-500/10"
+                  aria-label={$t.common.useAllParams}
+                  title={$t.common.useAllParams}
+                  on:click={(event) => handleGalleryAction(event, () => onUseAll(image))}
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></svg>
+                </button>
+                <button
+                  type="button"
+                  class="gallery-icon-action control-focus border-zinc-700 text-zinc-300 hover:bg-zinc-800"
+                  aria-label={$t.common.edit}
+                  title={$t.common.edit}
+                  on:click={(event) => handleGalleryAction(event, () => onEdit(image))}
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4l10.5-10.5a2.1 2.1 0 0 0-3-3L5 17v3Z"/><path d="m14 7 3 3"/></svg>
+                </button>
+                <button
+                  type="button"
+                  class="gallery-icon-action control-focus border-zinc-700 text-zinc-300 hover:bg-zinc-800"
+                  aria-label={image.favorite ? $t.common.unfavorite : $t.common.favorite}
+                  title={image.favorite ? $t.common.unfavorite : $t.common.favorite}
+                  on:click={(event) => handleGalleryAction(event, () => onFavorite(image))}
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9L12 3Z"/></svg>
+                </button>
+                <a
+                  href={`/api/download/${encodeURIComponent(image.filename)}`}
+                  class="gallery-icon-action control-focus border-zinc-700 text-zinc-300 hover:bg-zinc-800"
+                  aria-label={$t.common.download}
+                  title={$t.common.download}
+                  on:click|stopPropagation
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v10"/><path d="m8 10 4 4 4-4"/><path d="M5 20h14"/></svg>
+                </a>
+                <button
+                  type="button"
+                  class="gallery-icon-action control-focus border-red-500/40 text-red-300 hover:bg-red-500/10"
+                  aria-label={$t.common.delete}
+                  title={$t.common.delete}
+                  on:click={(event) => handleGalleryAction(event, () => onDelete(image))}
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16"/><path d="M9 7V5h6v2"/><path d="M7 7l1 13h8l1-13"/><path d="M10 11v5M14 11v5"/></svg>
+                </button>
               </div>
             </div>
           </article>

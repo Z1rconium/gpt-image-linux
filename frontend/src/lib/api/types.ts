@@ -314,6 +314,12 @@ export type GalleryBatchResponse = {
   missing_ids?: string[];
 };
 
+export type GallerySelectionTokenResponse = {
+  selection_token: string;
+  count: number;
+  expires_at: string;
+};
+
 export type GalleryExportJobStatus = {
   job_id: string;
   status: GalleryExportJobStatusValue;

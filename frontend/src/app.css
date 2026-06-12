@@ -85,6 +85,33 @@ input::placeholder {
     box-shadow 0.2s;
 }
 
+.gallery-icon-action {
+  display: inline-flex;
+  height: 30px;
+  min-width: 0;
+  align-items: center;
+  justify-content: center;
+  border-width: 1px;
+  border-style: solid;
+  border-color: currentColor;
+  border-radius: 6px;
+  background: rgba(9, 9, 11, 0.28);
+  transition:
+    background-color 0.15s,
+    border-color 0.15s,
+    color 0.15s;
+}
+
+.gallery-icon-action svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
 @media (hover: hover) and (pointer: fine) {
   .gallery-card:hover {
     transform: translateY(-2px);

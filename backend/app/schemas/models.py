@@ -533,26 +533,29 @@ class GalleryFavoriteRequest(StrictRequestModel):
     favorite: bool
 
 
+class GallerySelectionFilterRequest(StrictRequestModel):
+    prompt: Optional[str] = Field(default="", max_length=4000)
+    model: Optional[str] = Field(default="", max_length=200)
+    preset: Optional[str] = Field(default="", max_length=200)
+    size: Optional[str] = Field(default="", max_length=64)
+    date_from: Optional[str] = Field(default="", max_length=64)
+    date_to: Optional[str] = Field(default="", max_length=64)
+    favorite: Optional[bool] = None
+
+
+class GallerySelectionTokenRequest(StrictRequestModel):
+    filters: GallerySelectionFilterRequest = Field(default_factory=GallerySelectionFilterRequest)
+
+
+class GallerySelectionTokenResponse(BaseModel):
+    selection_token: str
+    count: int
+    expires_at: str
+
+
 class GalleryBatchRequest(StrictRequestModel):
-    ids: list[ShortId] = Field(..., min_length=1, max_length=1000)
-
-    @field_validator("ids")
-    @classmethod
-    def validate_ids(cls, value: list[str]) -> list[str]:
-        ids = [image_id.strip() for image_id in value if image_id.strip()]
-        if not ids:
-            raise ValueError("ids must include at least one gallery entry id")
-        if len(set(ids)) != len(ids):
-            raise ValueError("ids must not contain duplicates")
-        return ids
-
-
-class GalleryBatchFavoriteRequest(GalleryBatchRequest):
-    favorite: bool
-
-
-class GalleryExportRequest(StrictRequestModel):
     ids: Optional[list[ShortId]] = Field(default=None, max_length=1000)
+    selection_token: Optional[ShortId] = None
 
     @field_validator("ids")
     @classmethod
@@ -565,6 +568,51 @@ class GalleryExportRequest(StrictRequestModel):
         if len(set(ids)) != len(ids):
             raise ValueError("ids must not contain duplicates")
         return ids
+
+    @field_validator("selection_token")
+    @classmethod
+    def validate_selection_token(cls, value: Optional[str]) -> Optional[str]:
+        token = str(value or "").strip()
+        return token or None
+
+    @model_validator(mode="after")
+    def validate_batch_target(self):
+        if bool(self.ids) == bool(self.selection_token):
+            raise ValueError("Provide exactly one of ids or selection_token")
+        return self
+
+
+class GalleryBatchFavoriteRequest(GalleryBatchRequest):
+    favorite: bool
+
+
+class GalleryExportRequest(StrictRequestModel):
+    ids: Optional[list[ShortId]] = Field(default=None, max_length=1000)
+    selection_token: Optional[ShortId] = None
+
+    @field_validator("ids")
+    @classmethod
+    def validate_ids(cls, value: Optional[list[str]]) -> Optional[list[str]]:
+        if value is None:
+            return None
+        ids = [image_id.strip() for image_id in value if image_id.strip()]
+        if not ids:
+            raise ValueError("ids must include at least one gallery entry id")
+        if len(set(ids)) != len(ids):
+            raise ValueError("ids must not contain duplicates")
+        return ids
+
+    @field_validator("selection_token")
+    @classmethod
+    def validate_selection_token(cls, value: Optional[str]) -> Optional[str]:
+        token = str(value or "").strip()
+        return token or None
+
+    @model_validator(mode="after")
+    def validate_export_target(self):
+        if self.ids and self.selection_token:
+            raise ValueError("Provide ids or selection_token, not both")
+        return self
 
 
 class GallerySyncRequest(StrictRequestModel):

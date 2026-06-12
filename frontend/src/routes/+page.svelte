@@ -65,6 +65,8 @@
   let applyingUrlState = false;
   let urlSyncQueued = false;
   let queuedUrlSyncMode: 'replace' | 'push' = 'replace';
+  let urlSyncTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastUrlSyncPrompt = '';
   let lightboxLookupSeq = 0;
   let lightboxNavigating = false;
   let lastActivePresetApiPath: ApiPath = initialPromptFormState.apiPath;
@@ -141,7 +143,18 @@
     window.history[mode === 'push' ? 'pushState' : 'replaceState']({}, '', nextUrl);
   }
 
-  function queueUrlSync(mode: 'replace' | 'push' = 'replace') {
+  function queueUrlSync(mode: 'replace' | 'push' = 'replace', debounceMs = 0) {
+    if (urlSyncTimer) {
+      clearTimeout(urlSyncTimer);
+      urlSyncTimer = null;
+    }
+    if (debounceMs > 0 && mode !== 'push') {
+      urlSyncTimer = setTimeout(() => {
+        urlSyncTimer = null;
+        queueUrlSync(mode);
+      }, debounceMs);
+      return;
+    }
     if (mode === 'push') queuedUrlSyncMode = 'push';
     if (urlSyncQueued) return;
     urlSyncQueued = true;
@@ -190,6 +203,46 @@
   function closeLightbox() {
     lightboxStore.close();
     queueUrlSync('replace');
+  }
+
+  const prefetchedImageUrls = new Set<string>();
+
+  function prefetchImage(image: GalleryEntry | null | undefined) {
+    if (!image || typeof window === 'undefined') return;
+    const url = imageUrl(image.filename, image.image_url);
+    if (prefetchedImageUrls.has(url)) return;
+    prefetchedImageUrls.add(url);
+    if (prefetchedImageUrls.size > 24) {
+      const oldestUrl = prefetchedImageUrls.values().next().value;
+      if (oldestUrl) prefetchedImageUrls.delete(oldestUrl);
+    }
+    const img = new Image();
+    img.decoding = 'async';
+    img.src = url;
+  }
+
+  function prefetchLightboxNeighbors() {
+    if (!$lightboxStore.image || !$galleryStore.gallery) return;
+
+    const gallery = $galleryStore.gallery;
+    const images = gallery.images;
+    const currentIndex = images.findIndex((image) => image.id === $lightboxStore.image?.id);
+    if (currentIndex < 0) return;
+
+    prefetchImage(images[currentIndex - 1]);
+    prefetchImage(images[currentIndex + 1]);
+
+    if (currentIndex >= images.length - 2 && gallery.has_next) {
+      void galleryStore.prefetchGalleryPage(gallery.page + 1, 'next').then((nextGallery) => {
+        prefetchImage(nextGallery?.images[0]);
+      });
+    }
+
+    if (currentIndex <= 1 && gallery.has_prev) {
+      void galleryStore.prefetchGalleryPage(Math.max(1, gallery.page - 1), 'prev').then((prevGallery) => {
+        prefetchImage(prevGallery?.images.at(-1));
+      });
+    }
   }
 
   function lightboxNavigationBlocked() {
@@ -735,7 +788,17 @@
     $uiStore.jobsOpen;
     jobsTab;
     $lightboxStore.image?.id;
-    queueUrlSync();
+    const promptChanged = $galleryStore.filters.prompt !== lastUrlSyncPrompt;
+    lastUrlSyncPrompt = $galleryStore.filters.prompt;
+    queueUrlSync('replace', promptChanged ? 300 : 0);
+  }
+
+  $: if ($lightboxStore.image && $galleryStore.gallery) {
+    $lightboxStore.image.id;
+    $galleryStore.gallery.page;
+    $galleryStore.gallery.next_cursor;
+    $galleryStore.gallery.prev_cursor;
+    prefetchLightboxNeighbors();
   }
 
   onMount(() => {
@@ -771,6 +834,7 @@
     return () => {
       window.removeEventListener('popstate', popstate);
       window.removeEventListener('keydown', keydown);
+      if (urlSyncTimer) clearTimeout(urlSyncTimer);
       jobsStore.cleanup();
       galleryStore.cleanup();
       previewStore.cleanup();
@@ -929,9 +993,11 @@
     onUseAll={useGalleryParams}
     selectionMode={$galleryStore.selectionMode}
     selectedIds={$galleryStore.selectedIds}
+    selectionTokenCount={$galleryStore.selectionToken?.count || 0}
     onSelectionMode={galleryStore.setSelectionMode}
     onToggleSelection={galleryStore.toggleSelection}
     onSelectPage={galleryStore.selectPage}
+    onSelectFiltered={galleryStore.selectFiltered}
     onClearSelection={galleryStore.clearSelection}
     onBatchDelete={batchDeleteGallery}
     onBatchFavorite={batchFavoriteGallery}

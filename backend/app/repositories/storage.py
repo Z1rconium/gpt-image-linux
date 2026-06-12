@@ -101,6 +101,7 @@ __all__ = [
     "get_all_gallery_ids",
     "get_gallery",
     "get_gallery_count",
+    "get_gallery_ids",
     "get_gallery_entry",
     "get_gallery_entries_by_ids",
     "get_gallery_filter_options",
@@ -3321,6 +3322,22 @@ def get_gallery_count(filters: dict[str, Any] | None = None) -> int:
     with _connect() as conn:
         where_sql, params = _build_gallery_filter_where(filters)
         return _get_gallery_count_on_conn(conn, where_sql, params)
+
+
+def get_gallery_ids(filters: dict[str, Any] | None = None) -> list[str]:
+    _ensure_database()
+    with _connect() as conn:
+        where_sql, params = _build_gallery_filter_where(filters)
+        rows = conn.execute(
+            f"""
+            SELECT id
+            FROM gallery_entries
+            {where_sql}
+            ORDER BY sort_seq DESC, id DESC
+            """,
+            tuple(params),
+        ).fetchall()
+    return [str(row["id"]) for row in rows if row["id"]]
 
 
 def _get_gallery_total_bytes_on_conn(

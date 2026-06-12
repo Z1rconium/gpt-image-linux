@@ -411,8 +411,26 @@ async function mockApi(page: Page, options: MockOptions = {}) {
   let mockedSettings = cloneSettings(options.settings ?? settingsResponse);
   let mockedOverallConfig: any = structuredClone(overallConfigResponse);
   let optimizerSystemPrompt = 'Default optimizer system prompt';
+  let selectionTokenSeq = 0;
+  const selectionTokens = new Map<string, { prompt: string; favorite?: boolean | null }>();
   const runningJobs = options.runningJobs ?? [];
   let historyJobs = options.historyJobs ?? [job('history-1', 'saved prompt')];
+
+  function matchesGalleryFilters(image: GalleryImageFixture, filters: { prompt?: string; favorite?: boolean | null }) {
+    const prompt = String(filters.prompt || '').trim().toLowerCase();
+    if (prompt && !image.prompt.toLowerCase().includes(prompt)) return false;
+    if (filters.favorite === true && !image.favorite) return false;
+    if (filters.favorite === false && image.favorite) return false;
+    return true;
+  }
+
+  function resolveBatchIds(body: { ids?: string[]; selection_token?: string }) {
+    if (body.selection_token) {
+      const filters = selectionTokens.get(body.selection_token) || { prompt: '' };
+      return galleryImages.filter((image) => matchesGalleryFilters(image, filters)).map((image) => image.id);
+    }
+    return body.ids || [];
+  }
 
   await page.addInitScript(() => {
     localStorage.setItem('gpt-image-panel-language', 'en');
@@ -600,7 +618,7 @@ async function mockApi(page: Page, options: MockOptions = {}) {
       const prompt = url.searchParams.get('prompt') || '';
       const requestedPage = Number.parseInt(url.searchParams.get('page') || '1', 10);
       const images = prompt
-        ? galleryImages.filter((image) => image.prompt.toLowerCase().includes(prompt.toLowerCase()))
+        ? galleryImages.filter((image) => matchesGalleryFilters(image, { prompt }))
         : galleryImages;
       await route.fulfill(
         json(
@@ -611,6 +629,27 @@ async function mockApi(page: Page, options: MockOptions = {}) {
             url.searchParams.get('include_counts') !== 'false',
             url.searchParams.get('include_filter_options') !== 'false'
           )
+        )
+      );
+      return;
+    }
+    if (url.pathname === '/api/gallery/batch/selection-tokens' && request.method() === 'POST') {
+      const body = JSON.parse(request.postData() || '{}');
+      const filters = body.filters || {};
+      const token = `sel-${++selectionTokenSeq}`;
+      selectionTokens.set(token, {
+        prompt: String(filters.prompt || ''),
+        favorite: filters.favorite ?? null
+      });
+      const count = galleryImages.filter((image) => matchesGalleryFilters(image, selectionTokens.get(token) || {})).length;
+      await route.fulfill(
+        json(
+          {
+            selection_token: token,
+            count,
+            expires_at: '2026-05-18T13:00:00Z'
+          },
+          201
         )
       );
       return;
@@ -634,14 +673,16 @@ async function mockApi(page: Page, options: MockOptions = {}) {
     }
     if (url.pathname === '/api/gallery/batch/delete') {
       const body = JSON.parse(request.postData() || '{}');
-      const ids = new Set<string>(body.ids || []);
+      const ids = new Set<string>(resolveBatchIds(body));
       galleryImages = galleryImages.filter((entry) => !ids.has(entry.id));
-      await route.fulfill(json({ status: 'ok', count: body.ids?.length || 0, file_count: body.ids?.length || 0 }));
+      await route.fulfill(json({ status: 'ok', count: ids.size, file_count: ids.size, requested_count: ids.size, updated_count: ids.size }));
       return;
     }
     if (url.pathname === '/api/gallery/batch/favorite') {
       const body = JSON.parse(request.postData() || '{}');
-      await route.fulfill(json({ status: 'ok', count: body.ids?.length || 0, file_count: 0 }));
+      const ids = new Set<string>(resolveBatchIds(body));
+      galleryImages = galleryImages.map((entry) => (ids.has(entry.id) ? { ...entry, favorite: Boolean(body.favorite) } : entry));
+      await route.fulfill(json({ status: 'ok', count: ids.size, file_count: 0, requested_count: ids.size, updated_count: ids.size }));
       return;
     }
     if (url.pathname.match(/^\/api\/gallery\/[^/]+\/favorite$/)) {
@@ -1090,8 +1131,6 @@ test('lightbox navigates images across gallery pages', async ({ page }) => {
   await page.keyboard.press('Escape');
   await expect(lightbox).toBeHidden();
 
-  await page.getByRole('img', { name: 'Paged gallery image 9', exact: true }).click();
-  await expect(lightbox).toContainText('paged-img-9.png');
   const nextPageRequest = page.waitForRequest((request) => {
     const url = new URL(request.url());
     return (
@@ -1102,6 +1141,8 @@ test('lightbox navigates images across gallery pages', async ({ page }) => {
       Boolean(url.searchParams.get('cursor'))
     );
   });
+  await page.getByRole('img', { name: 'Paged gallery image 9', exact: true }).click();
+  await expect(lightbox).toContainText('paged-img-9.png');
   await page.keyboard.press('ArrowRight');
   await nextPageRequest;
 
@@ -1212,8 +1253,8 @@ test('gallery url state restores filters, lightbox, and job history tab', async 
   await mockApi(page);
   await page.goto('/?prompt=Second&favorite=true&image=img-2&jobs=history');
 
-  await expect(page.getByLabel('Filter prompt')).toHaveValue('');
-  await expect(page).not.toHaveURL(/prompt=Second/);
+  await expect(page.getByLabel('Filter prompt')).toHaveValue('Second');
+  await expect(page).toHaveURL(/prompt=Second/);
   await expect(page).toHaveURL(/favorite=true/);
 
   const lightbox = page.getByRole('dialog', { name: 'Image Details' });
@@ -1236,7 +1277,7 @@ test('gallery url state restores filters, lightbox, and job history tab', async 
   });
   await page.getByLabel('Filter prompt').fill('First');
   await promptFilterRequest;
-  await expect(page).not.toHaveURL(/prompt=First/);
+  await expect(page).toHaveURL(/prompt=First/);
 });
 
 test('gallery page input jumps to the requested page on Enter', async ({ page }) => {
@@ -1302,6 +1343,32 @@ test('gallery handles 500 mocked images with lightweight cursor paging, filterin
   await expect(page.getByRole('img', { name: 'Paged gallery image 10', exact: true })).toBeHidden();
 });
 
+test('gallery selects current filtered results through a batch token', async ({ page }) => {
+  await loadApp(page, { galleryImages: manyGalleryImages(10) });
+
+  await page.getByLabel('Filter prompt').fill('Paged gallery image');
+  await expect(page.getByRole('img', { name: 'Paged gallery image 1', exact: true })).toBeVisible();
+
+  const tokenRequest = page.waitForRequest((request) => {
+    const url = new URL(request.url());
+    return request.method() === 'POST' && url.pathname === '/api/gallery/batch/selection-tokens';
+  });
+  await page.getByRole('button', { name: 'Select' }).click();
+  await page.getByRole('button', { name: 'Select filtered' }).click();
+  await tokenRequest;
+  await expect(page.getByText('10 selected from current filters')).toBeVisible();
+
+  const favoriteRequest = page.waitForRequest((request) => {
+    const url = new URL(request.url());
+    if (request.method() !== 'PATCH' || url.pathname !== '/api/gallery/batch/favorite') return false;
+    const body = JSON.parse(request.postData() || '{}');
+    return typeof body.selection_token === 'string' && body.favorite === true;
+  });
+  await page.getByRole('button', { name: 'Favorite selected', exact: true }).click();
+  await favoriteRequest;
+  await expect(page.getByRole('status')).toContainText('Updated 10 selected images');
+});
+
 test('gallery queued thumbnails use placeholders without loading full-size images', async ({ page }) => {
   const fullImageRequests: string[] = [];
   page.on('request', (request) => {
@@ -1330,10 +1397,6 @@ test('gallery queued thumbnails use placeholders without loading full-size image
 test('lightbox navigates across pages with 2000 mocked images', async ({ page }) => {
   await loadApp(page, { galleryImages: manyGalleryImages(2000) });
 
-  await page.getByRole('img', { name: 'Paged gallery image 9', exact: true }).click();
-  const lightbox = page.getByRole('dialog', { name: 'Image Details' });
-  await expect(lightbox).toContainText('paged-img-9.png');
-
   const nextPageRequest = page.waitForRequest((request) => {
     const url = new URL(request.url());
     return (
@@ -1346,6 +1409,9 @@ test('lightbox navigates across pages with 2000 mocked images', async ({ page })
       Boolean(url.searchParams.get('cursor'))
     );
   });
+  await page.getByRole('img', { name: 'Paged gallery image 9', exact: true }).click();
+  const lightbox = page.getByRole('dialog', { name: 'Image Details' });
+  await expect(lightbox).toContainText('paged-img-9.png');
   await page.keyboard.press('ArrowRight');
   await nextPageRequest;
 

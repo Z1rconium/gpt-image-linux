@@ -1,6 +1,6 @@
 services:
   web:
-    image: ${GPT_IMAGE_PANEL_IMAGE:-ghcr.io/z1rconium/gpt-image-linux:v1.0.3}
+    image: ${GPT_IMAGE_PANEL_IMAGE:-ghcr.io/z1rconium/gpt-image-linux:v1.0.4}
     container_name: gpt-image-panel-web
     ports:
       - "127.0.0.1:9090:9090"

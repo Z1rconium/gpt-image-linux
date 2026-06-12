@@ -4,7 +4,7 @@ import { t } from '$lib/i18n';
 import { confirmStore } from '$lib/stores/confirm';
 import { createGalleryActions } from '$lib/stores/galleryActions';
 import type { ToastOptions, ToastVariant } from '$lib/stores/ui';
-import type { GalleryEntry, GalleryResponse } from '$lib/api/types';
+import type { GalleryEntry, GalleryResponse, GallerySelectionTokenResponse } from '$lib/api/types';
 
 export type GalleryFilters = {
   prompt: string;
@@ -24,6 +24,7 @@ export type GalleryState = {
   filters: GalleryFilters;
   selectionMode: boolean;
   selectedIds: Set<string>;
+  selectionToken: GallerySelectionToken | null;
 };
 
 export type GalleryOperationStatus = {
@@ -34,6 +35,13 @@ export type GalleryOperationStatus = {
 };
 
 export type GalleryNavigation = 'next' | 'prev' | 'jump';
+
+export type GallerySelectionToken = {
+  token: string;
+  count: number;
+  expiresAt: string;
+  filters: GalleryFilters;
+};
 
 export const defaultGalleryFilters: GalleryFilters = {
   prompt: '',
@@ -52,7 +60,8 @@ const initialGalleryState: GalleryState = {
   page: 1,
   filters: { ...defaultGalleryFilters },
   selectionMode: false,
-  selectedIds: new Set()
+  selectedIds: new Set(),
+  selectionToken: null
 };
 
 function buildGalleryParams(
@@ -86,12 +95,38 @@ function isAbortError(error: unknown) {
   return error instanceof Error && error.name === 'AbortError';
 }
 
+function galleryFiltersToSelectionPayload(filters: GalleryFilters) {
+  return {
+    prompt: filters.prompt.trim(),
+    model: filters.model,
+    preset: filters.preset,
+    size: filters.size,
+    date_from: filters.dateFrom,
+    date_to: filters.dateTo,
+    favorite: filters.favorite ? true : null
+  };
+}
+
+function sameGalleryFilters(left: GalleryFilters, right: GalleryFilters) {
+  return (
+    left.prompt === right.prompt &&
+    left.model === right.model &&
+    left.preset === right.preset &&
+    left.size === right.size &&
+    left.dateFrom === right.dateFrom &&
+    left.dateTo === right.dateTo &&
+    left.favorite === right.favorite
+  );
+}
+
 function createGalleryStore() {
   const { subscribe, update } = writable<GalleryState>(initialGalleryState);
   let state = initialGalleryState;
   let filterTimer: ReturnType<typeof setTimeout> | null = null;
   let requestSeq = 0;
   let abortController: AbortController | null = null;
+  const prefetchedPages = new Map<string, GalleryResponse>();
+  const prefetchRequests = new Map<string, Promise<GalleryResponse | null>>();
   const pendingSingleDeletes = new Map<string, { image: GalleryEntry; timer: ReturnType<typeof setTimeout> }>();
 
   subscribe((value) => {
@@ -103,11 +138,13 @@ function createGalleryStore() {
   }
 
   function setPageAndFilters(page: number, filters: GalleryFilters) {
+    prefetchedPages.clear();
     update((current) => ({
       ...current,
       page,
       filters: { ...filters },
       selectedIds: new Set(),
+      selectionToken: null,
       selectionMode: false
     }));
   }
@@ -162,6 +199,56 @@ function createGalleryStore() {
     );
     const requestKey = params.toString();
     const seq = ++requestSeq;
+    const cachedGallery = prefetchedPages.get(requestKey);
+    if (cachedGallery) {
+      prefetchedPages.delete(requestKey);
+      const mergedGallery =
+        lightweightCursorPage && state.gallery
+          ? {
+              ...cachedGallery,
+              total: state.gallery.total,
+              total_bytes: state.gallery.total_bytes,
+              total_pages: state.gallery.total_pages,
+              filter_options: state.gallery.filter_options
+            }
+          : cachedGallery;
+      const filteredGallery = filterPendingGallery(mergedGallery, includeTotalBytes, filters);
+      update((current) => ({
+        ...current,
+        gallery: filteredGallery,
+        page: filteredGallery.page
+      }));
+      return;
+    }
+    const pendingPrefetch = prefetchRequests.get(requestKey);
+    if (pendingPrefetch) {
+      update((current) => ({ ...current, loading: true, page }));
+      try {
+        const gallery = await pendingPrefetch;
+        if (seq !== requestSeq) return;
+        if (gallery) {
+          const mergedGallery =
+            lightweightCursorPage && state.gallery
+              ? {
+                  ...gallery,
+                  total: state.gallery.total,
+                  total_bytes: state.gallery.total_bytes,
+                  total_pages: state.gallery.total_pages,
+                  filter_options: state.gallery.filter_options
+                }
+              : gallery;
+          const filteredGallery = filterPendingGallery(mergedGallery, includeTotalBytes, filters);
+          update((current) => ({
+            ...current,
+            gallery: filteredGallery,
+            page: filteredGallery.page
+          }));
+          return;
+        }
+      } finally {
+        if (seq === requestSeq) update((current) => ({ ...current, loading: false }));
+      }
+    }
     abortController?.abort();
     abortController = new AbortController();
     update((current) => ({ ...current, loading: true, page }));
@@ -183,14 +270,10 @@ function createGalleryStore() {
             }
           : gallery;
       const filteredGallery = filterPendingGallery(mergedGallery, includeTotalBytes, filters);
-      const visibleIds = new Set(filteredGallery.images.map((image) => image.id));
-      const selectedIds = new Set([...state.selectedIds].filter((id) => visibleIds.has(id)));
       update((current) => ({
         ...current,
         gallery: filteredGallery,
-        page: filteredGallery.page,
-        selectedIds,
-        selectionMode: selectedIds.size > 0 ? current.selectionMode : false
+        page: filteredGallery.page
       }));
     } catch (error) {
       if (seq !== requestSeq) return;
@@ -202,6 +285,41 @@ function createGalleryStore() {
         update((current) => ({ ...current, loading: false }));
       }
     }
+  }
+
+  async function prefetchGalleryPage(page: number, navigation: GalleryNavigation = 'jump') {
+    if (!state.gallery) return null;
+    const filters = { ...state.filters };
+    const cursor =
+      navigation === 'next' ? state.gallery.next_cursor : navigation === 'prev' ? state.gallery.prev_cursor : null;
+    const direction = navigation === 'next' || navigation === 'prev' ? navigation : undefined;
+    if ((navigation === 'next' || navigation === 'prev') && !cursor) return null;
+
+    const params = buildGalleryParams(page, filters, false, cursor, direction, !direction, !direction);
+    const requestKey = params.toString();
+    const cached = prefetchedPages.get(requestKey);
+    if (cached) return cached;
+    const pending = prefetchRequests.get(requestKey);
+    if (pending) return pending;
+
+    const request = apiFetch<GalleryResponse>(`/api/gallery?${requestKey}`, {}, 'prefetching gallery').then(
+      (gallery) => {
+        prefetchRequests.delete(requestKey);
+        prefetchedPages.set(requestKey, gallery);
+        while (prefetchedPages.size > 4) {
+          const oldestKey = prefetchedPages.keys().next().value;
+          if (!oldestKey) break;
+          prefetchedPages.delete(oldestKey);
+        }
+        return gallery;
+      },
+      () => {
+        prefetchRequests.delete(requestKey);
+        return null;
+      }
+    );
+    prefetchRequests.set(requestKey, request);
+    return request;
   }
 
   function removeGalleryEntryFromCurrentPage(image: GalleryEntry) {
@@ -227,13 +345,17 @@ function createGalleryStore() {
   }
 
   function updateFilter(key: keyof GalleryFilters, value: string | boolean) {
+    prefetchedPages.clear();
     update((current) => ({
       ...current,
       page: 1,
       filters: {
         ...current.filters,
         [key]: key === 'favorite' ? Boolean(value) : String(value || '')
-      }
+      },
+      selectedIds: new Set(),
+      selectionToken: null,
+      selectionMode: false
     }));
     if (filterTimer) clearTimeout(filterTimer);
     filterTimer = setTimeout(() => {
@@ -242,27 +364,71 @@ function createGalleryStore() {
   }
 
   function resetFilters() {
-    update((current) => ({ ...current, page: 1, filters: { ...defaultGalleryFilters } }));
+    prefetchedPages.clear();
+    update((current) => ({
+      ...current,
+      page: 1,
+      filters: { ...defaultGalleryFilters },
+      selectedIds: new Set(),
+      selectionToken: null,
+      selectionMode: false
+    }));
     void loadGallery(1);
   }
 
   function setSelectionMode(selectionMode: boolean) {
-    update((current) => ({ ...current, selectionMode, selectedIds: selectionMode ? current.selectedIds : new Set() }));
+    update((current) => ({
+      ...current,
+      selectionMode,
+      selectedIds: selectionMode ? current.selectedIds : new Set(),
+      selectionToken: selectionMode ? current.selectionToken : null
+    }));
   }
 
   function toggleSelection(image: GalleryEntry) {
-    const selectedIds = new Set(state.selectedIds);
+    const selectedIds = state.selectionToken
+      ? new Set(state.gallery?.images.map((entry) => entry.id) || [])
+      : new Set(state.selectedIds);
     if (selectedIds.has(image.id)) selectedIds.delete(image.id);
     else selectedIds.add(image.id);
-    update((current) => ({ ...current, selectedIds }));
+    update((current) => ({ ...current, selectedIds, selectionToken: null }));
   }
 
   function selectPage() {
-    update((current) => ({ ...current, selectedIds: new Set(current.gallery?.images.map((image) => image.id) || []) }));
+    update((current) => {
+      const selectedIds = new Set(current.selectedIds);
+      current.gallery?.images.forEach((image) => selectedIds.add(image.id));
+      return { ...current, selectedIds, selectionToken: null, selectionMode: true };
+    });
+  }
+
+  async function selectFiltered() {
+    const filters = { ...state.filters };
+    const response = await apiFetch<GallerySelectionTokenResponse>(
+      '/api/gallery/batch/selection-tokens',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filters: galleryFiltersToSelectionPayload(filters) })
+      },
+      'creating gallery selection token'
+    );
+    if (!sameGalleryFilters(filters, state.filters)) return;
+    update((current) => ({
+      ...current,
+      selectionMode: true,
+      selectedIds: new Set(),
+      selectionToken: {
+        token: response.selection_token,
+        count: response.count,
+        expiresAt: response.expires_at,
+        filters
+      }
+    }));
   }
 
   function clearSelection() {
-    update((current) => ({ ...current, selectedIds: new Set() }));
+    update((current) => ({ ...current, selectedIds: new Set(), selectionToken: null }));
   }
 
   async function toggleFavorite(image: GalleryEntry, onChanged?: (image: GalleryEntry) => void) {
@@ -354,6 +520,8 @@ function createGalleryStore() {
     requestSeq += 1;
     abortController?.abort();
     abortController = null;
+    prefetchedPages.clear();
+    prefetchRequests.clear();
     setOperationStatus(null);
   }
 
@@ -368,12 +536,14 @@ function createGalleryStore() {
   return {
     subscribe,
     loadGallery,
+    prefetchGalleryPage,
     setPageAndFilters,
     updateFilter,
     resetFilters,
     setSelectionMode,
     toggleSelection,
     selectPage,
+    selectFiltered,
     clearSelection,
     ...galleryActions,
     toggleFavorite,

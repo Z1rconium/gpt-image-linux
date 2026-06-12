@@ -19,7 +19,7 @@ export function readGalleryUrlState(searchParams: URLSearchParams): GalleryUrlSt
   return {
     page: parsePage(searchParams.get('page')),
     filters: {
-      prompt: '',
+      prompt: searchParams.get('prompt') || '',
       model: searchParams.get('model') || '',
       preset: searchParams.get('preset') || '',
       size: searchParams.get('size') || '',
@@ -41,6 +41,7 @@ export function writeGalleryUrlState(searchParams: URLSearchParams, page: number
   searchParams.delete('favorite');
 
   if (page > 1) searchParams.set('page', String(page));
+  if (filters.prompt.trim()) searchParams.set('prompt', filters.prompt.trim());
   if (filters.model) searchParams.set('model', filters.model);
   if (filters.preset) searchParams.set('preset', filters.preset);
   if (filters.size) searchParams.set('size', filters.size);

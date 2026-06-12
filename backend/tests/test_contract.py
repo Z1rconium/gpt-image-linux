@@ -4319,6 +4319,78 @@ def test_gallery_batch_favorite_and_download(client):
     assert storage.get_gallery_entry("batch-fav-3").favorite is False
 
 
+def test_gallery_batch_selection_token_favorite_download_and_export(client):
+    _fake_gallery_entry("token-fav-1", "token match one", "1024x1024", "token-fav-1.png")
+    _fake_gallery_entry("token-fav-2", "outside prompt", "1024x1024", "token-fav-2.png")
+    _fake_gallery_entry("token-fav-3", "token match three", "1024x1024", "token-fav-3.png")
+
+    token_resp = client.post(
+        "/api/gallery/batch/selection-tokens",
+        json={"filters": {"prompt": "token match"}},
+    )
+    assert token_resp.status_code == 201
+    token_body = token_resp.json()
+    assert token_body["count"] == 2
+    token = token_body["selection_token"]
+
+    favorite = client.patch(
+        "/api/gallery/batch/favorite",
+        json={"selection_token": token, "favorite": True},
+    )
+    assert favorite.status_code == 200
+    assert favorite.json()["requested_count"] == 2
+    assert favorite.json()["updated_count"] == 2
+    assert storage.get_gallery_entry("token-fav-1").favorite is True
+    assert storage.get_gallery_entry("token-fav-2").favorite is False
+    assert storage.get_gallery_entry("token-fav-3").favorite is True
+
+    archive = client.post(
+        "/api/gallery/batch/download",
+        json={"selection_token": token},
+    )
+    assert archive.status_code == 200
+    assert archive.headers["x-gallery-requested-count"] == "2"
+    with zipfile.ZipFile(io.BytesIO(archive.content)) as zf:
+        assert "images/token-fav-1.png" in zf.namelist()
+        assert "images/token-fav-2.png" not in zf.namelist()
+        assert "images/token-fav-3.png" in zf.namelist()
+
+    export_created = client.post("/api/gallery/export-jobs", json={"selection_token": token})
+    assert export_created.status_code == 202
+    finished = _wait_for_gallery_export_job(client, export_created.json()["job_id"])
+    assert finished["status"] == "success"
+    assert finished["requested_count"] == 2
+    export_archive = client.get(finished["download_url"])
+    assert export_archive.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(export_archive.content)) as zf:
+        assert "images/token-fav-1.png" in zf.namelist()
+        assert "images/token-fav-2.png" not in zf.namelist()
+        assert "images/token-fav-3.png" in zf.namelist()
+
+
+def test_gallery_batch_selection_token_delete_only_filtered_entries(client):
+    _fake_gallery_entry("token-delete-1", "delete token keep", "1024x1024", "token-delete-1.png")
+    _fake_gallery_entry("token-delete-2", "unmatched keep", "1024x1024", "token-delete-2.png")
+    _fake_gallery_entry("token-delete-3", "delete token remove", "1024x1024", "token-delete-3.png")
+
+    token_resp = client.post(
+        "/api/gallery/batch/selection-tokens",
+        json={"filters": {"prompt": "delete token"}},
+    )
+    assert token_resp.status_code == 201
+
+    deleted = client.post(
+        "/api/gallery/batch/delete",
+        json={"selection_token": token_resp.json()["selection_token"]},
+    )
+    assert deleted.status_code == 200
+    assert deleted.json()["requested_count"] == 2
+    assert deleted.json()["updated_count"] == 2
+    assert storage.get_gallery_entry("token-delete-1") is None
+    assert storage.get_gallery_entry("token-delete-2") is not None
+    assert storage.get_gallery_entry("token-delete-3") is None
+
+
 def test_gallery_batch_operations_report_partial_missing(client):
     _fake_gallery_entry("batch-partial-1", "one", "1024x1024", "batch-partial-1.png")
 

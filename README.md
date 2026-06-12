@@ -40,7 +40,7 @@ Key characteristics:
 - preview + job history with SSE progress, multi-image result previews, `completed_at`, elapsed time, per-job stage timings, loading states, detailed terminal statuses, an errors-only history filter, clear-all for persisted history, cancel for queued/running jobs, and reuse/retry from persisted history
 - shared queue and concurrency limits for generation/edit jobs
 - optional global Webhook URL with HTTPS-only validation, SSRF checks, signing, retry, and masked settings responses
-- gallery with filters (FTS-backed prompt search, model, preset, size, date range, favorite), URL-synced page/non-prompt-filter/lightbox/job-history state, direct page-number jump, lightbox previous/next navigation and left/right keyboard shortcuts, “Edit this image”, download, custom delete confirmations with 5-second undo for single images, batch actions with partial-success feedback, delete/delete-all, prompt/image-url copy, and on-demand total-size metadata
+- gallery with filters (FTS-backed prompt search, model, preset, size, date range, favorite), debounced URL-synced page/prompt/filter/lightbox/job-history state, cross-page selection plus server-side filtered-selection batch tokens, direct page-number jump, lightbox previous/next navigation with adjacent image/page prefetch and left/right keyboard shortcuts, “Edit this image”, download, custom delete confirmations with 5-second undo for single images, batch actions with partial-success feedback, delete/delete-all, prompt/image-url copy, and on-demand total-size metadata
 - prompt snippets drawer for reusable prompt templates, stored separately from gallery images in SQLite
 - ZIP export/import (`metadata.json` plus streaming `metadata.ndjson` for new archives) with streaming upload, safety validation, low-memory direct export by default, skipped-entry metadata for partial batch downloads, and visible import/export/download progress states
 - Cloudflare R2 gallery backup sync: configurable in `.env` or Web Settings, health-probed from Settings, dry-run preflighted before manual sync, and manually or periodically synced from Gallery without changing local gallery storage as the source of truth
@@ -512,7 +512,8 @@ All variables listed in `.env.example` are also tracked in SQLite for Overall Co
 | `POST` | `/api/gallery/direct-export-jobs` | Reserve a direct streaming ZIP export job for the full gallery and return its `download_url` |
 | `GET` | `/api/gallery/direct-export-jobs/{job_id}` | Get direct streaming ZIP export job status |
 | `GET` | `/api/gallery/direct-export-jobs/{job_id}/events` | Stream direct ZIP prepare/output progress over SSE |
-| `POST` | `/api/gallery/export-jobs` | Start a tracked gallery ZIP export job; optionally pass `ids` for selected images |
+| `POST` | `/api/gallery/batch/selection-tokens` | Create a short-lived server-side token for the current gallery filter snapshot so batch favorite/delete/download/export can target large filtered results without sending thousands of IDs |
+| `POST` | `/api/gallery/export-jobs` | Start a tracked gallery ZIP export job; optionally pass `ids` or `selection_token` for selected images |
 | `GET` | `/api/gallery/export-jobs/{job_id}` | Get tracked ZIP export job status |
 | `GET` | `/api/gallery/export-jobs/{job_id}/events` | Stream ZIP export pack progress over SSE |
 | `GET` | `/api/gallery/export-jobs/{job_id}/download` | Download a completed tracked ZIP export with `Content-Length` transfer progress |
@@ -536,7 +537,7 @@ All variables listed in `.env.example` are also tracked in SQLite for Overall Co
 - SQLite repository operations use short-lived connections with WAL enabled at startup; `DATA_DIR` is chmodded to `0700`, the SQLite DB/sidecars are chmodded to `0600`, and app shutdown/tests call the storage close hook so connection lifecycle stays explicit
 - generation and edit share one SQLite queue measured in image units (`MAX_ACTIVE_GENERATE_JOBS` + `MAX_QUEUED_GENERATE_JOBS`); enqueue capacity, parent job creation, unit insertion, and edit-source byte reservation are committed atomically in SQLite. Edit source images are staged under `DATA_DIR/edit-sources`, globally capped by `MAX_PENDING_EDIT_SOURCE_MB`, released on terminal/cancelled jobs, support cancellation, and persist terminal history including `completed_at`
 - batch generation/edit (`n > 1`) consumes `n` queue units; the parent job aggregates successful unit results into `images[]`, Gallery metadata keeps the user-requested `n`, and units can be claimed by different Granian workers
-- tracked Gallery export jobs and manual/scheduled R2 sync jobs persist in SQLite, so create/query/SSE/download work across `GRANIAN_WORKERS>1`; workers claim queued or expired running jobs with SQLite leases, empty dispatchers back off, GC/scheduled sync use background leader leases, export ZIP files live under shared `DATA_DIR/exports`, and direct ZIP downloads reserve the same global export capacity through short-lived SQLite slot rows
+- tracked Gallery export jobs, short-lived filtered-selection batch tokens, and manual/scheduled R2 sync jobs persist in SQLite, so create/query/SSE/download and large filtered batch actions work across `GRANIAN_WORKERS>1`; workers claim queued or expired running jobs with SQLite leases, empty dispatchers back off, GC/scheduled sync use background leader leases, export ZIP files live under shared `DATA_DIR/exports`, and direct ZIP downloads reserve the same global export capacity through short-lived SQLite slot rows
 - SSE subscriber limits are enforced through SQLite `sse_slots`, so `MAX_SSE_SUBSCRIBERS_GLOBAL` is no longer multiplied by Granian worker count; stale slots expire if a worker dies before release
 - Gallery thumbnails are queued on image save/import and on missing-thumbnail access: `/api/thumb/{filename}` only serves an existing file or queues a missing one, Gallery rows expose `thumbnail_status`, and the background worker runs Pillow under the global `THUMBNAIL_CPU_CONCURRENCY` slot limit
 - Prompt Optimizer uses its own server-side Chat Completions-compatible endpoint config and user-configurable request timeout/response-size cap, resolves API key env refs on the backend, stores its editable system prompt in `DATA_DIR/prompt_optimizer_system_prompt.md`, and does not consume generation/edit queue capacity.
@@ -628,7 +629,7 @@ GPT Image Panel 是一个轻量级 FastAPI Web 界面，用于图像生成和图
 - 预览 + 历史任务：SSE 进度、多图结果预览、`completed_at`、耗时、任务分段耗时、加载状态、细分终态状态、仅错误历史筛选、清空持久化历史、排队/运行任务取消，以及从持久化历史复用/重试
 - 生成与编辑共享并发和排队限制
 - 可选全局 Webhook URL：HTTPS 校验、SSRF 防护、签名、重试，以及设置响应打码
-- Gallery：筛选（FTS 提示词搜索、模型、预设、尺寸、日期区间、收藏）、URL 同步的 page/非提示词筛选/lightbox/job history 状态、页码输入跳转、Lightbox 上一张/下一张导航和左右方向键快捷键、”Edit this image”、下载/删除、批量操作部分成功反馈、单图 5 秒撤销删除、复制提示词/图片链接、按需总大小统计
+- Gallery：筛选（FTS 提示词搜索、模型、预设、尺寸、日期区间、收藏）、debounce 后 URL 同步的 page/prompt/filter/lightbox/job history 状态、跨页选择和服务端筛选结果 batch token、页码输入跳转、Lightbox 上一张/下一张导航及相邻图片/页预取、左右方向键快捷键、”Edit this image”、下载/删除、批量操作部分成功反馈、单图 5 秒撤销删除、复制提示词/图片链接、按需总大小统计
 - 提示词收藏夹：可复用 prompt 模板，与 Gallery 图片分开存储和管理
 - ZIP 导出导入（含 `metadata.json`）+ 流式上传 + 安全校验 + 低内存导出路径 + 批量下载 skipped metadata + 可见导入/导出/下载进度状态
 - Cloudflare R2 Gallery 备份同步：可通过 `.env` 或 Web Settings 配置，可在 Settings 测试连通性，并可从 Gallery 手动或定时增量同步；本地 Gallery 存储仍是唯一源数据
@@ -1097,7 +1098,8 @@ curl http://localhost:9090/health
 | `POST` | `/api/gallery/direct-export-jobs` | 为完整 Gallery 预留 direct streaming ZIP 导出任务，并返回 `download_url` |
 | `GET` | `/api/gallery/direct-export-jobs/{job_id}` | 查询 direct streaming ZIP 导出任务状态 |
 | `GET` | `/api/gallery/direct-export-jobs/{job_id}/events` | 通过 SSE 推送 direct ZIP 准备/输出进度 |
-| `POST` | `/api/gallery/export-jobs` | 创建可跟踪进度的 Gallery ZIP 导出任务；可传 `ids` 导出所选图片 |
+| `POST` | `/api/gallery/batch/selection-tokens` | 为当前 Gallery 筛选快照创建短生命周期服务端 token，批量收藏/删除/下载/导出大筛选结果时无需发送大量 ID |
+| `POST` | `/api/gallery/export-jobs` | 创建可跟踪进度的 Gallery ZIP 导出任务；可传 `ids` 或 `selection_token` 导出所选图片 |
 | `GET` | `/api/gallery/export-jobs/{job_id}` | 查询 ZIP 导出任务状态 |
 | `GET` | `/api/gallery/export-jobs/{job_id}/events` | 通过 SSE 推送 ZIP 打包进度 |
 | `GET` | `/api/gallery/export-jobs/{job_id}/download` | 下载已完成的 ZIP 导出，并通过 `Content-Length` 支持传输进度 |
@@ -1121,7 +1123,7 @@ curl http://localhost:9090/health
 - SQLite 仓储操作使用短连接，并在启动时启用 WAL；`DATA_DIR` 会 chmod 为 `0700`，SQLite 数据库和 sidecar 文件会 chmod 为 `0600`；应用 shutdown 和测试 reset 会调用 storage close hook，连接生命周期保持显式
 - 生成与编辑共用按 image units 计量的 SQLite 队列（`MAX_ACTIVE_GENERATE_JOBS` + `MAX_QUEUED_GENERATE_JOBS`）；入队容量检查、父任务创建、unit 插入和编辑源字节预留会在 SQLite 里原子提交；所有编辑源图先落到 `DATA_DIR/edit-sources`，并额外受 `MAX_PENDING_EDIT_SOURCE_MB` 全局限制，任务终态/取消时释放；支持取消，并持久化终态历史（含 `completed_at`）
 - 批量生成/编辑（`n > 1`）会占用 `n` 个队列单位；父任务会把成功 unit 结果聚合到 `images[]`，Gallery 元数据保留用户请求的 `n`，不同 unit 可被不同 Granian worker 认领执行
-- 可跟踪 Gallery export job 和手动/定时 R2 sync job 持久化在 SQLite；`GRANIAN_WORKERS>1` 下创建、查询、SSE、下载都可跨进程工作；worker 通过 SQLite lease 认领 queued 或 lease 过期的 running job，空队列 dispatcher 会退避，GC/定时同步使用后台 leader lease，导出 ZIP 存在共享 `DATA_DIR/exports`，direct ZIP 下载也会通过短生命周期 SQLite slot 行占用同一个全局 export 容量
+- 可跟踪 Gallery export job、短生命周期筛选结果 batch token 和手动/定时 R2 sync job 持久化在 SQLite；`GRANIAN_WORKERS>1` 下创建、查询、SSE、下载和大筛选结果批量操作都可跨进程工作；worker 通过 SQLite lease 认领 queued 或 lease 过期的 running job，空队列 dispatcher 会退避，GC/定时同步使用后台 leader lease，导出 ZIP 存在共享 `DATA_DIR/exports`，direct ZIP 下载也会通过短生命周期 SQLite slot 行占用同一个全局 export 容量
 - SSE 订阅上限通过 SQLite `sse_slots` 执行，所以 `MAX_SSE_SUBSCRIBERS_GLOBAL` 不再随 Granian worker 数量倍增；worker 异常退出时 stale slot 会过期释放
 - Gallery 缩略图会在图片保存/import 和访问缺失缩略图时排队：`/api/thumb/{filename}` 只返回已存在文件或为缺失缩略图排队，Gallery 行返回 `thumbnail_status`，后台 worker 按 `THUMBNAIL_CPU_CONCURRENCY` 全局 slot 限制运行 Pillow
 - 提示词优化器使用独立的服务端 Chat Completions 兼容 endpoint 配置和用户可配置请求超时/响应体积上限，在后端解析 API Key 环境变量引用，不占用生成/编辑任务队列容量。

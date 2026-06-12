@@ -43,6 +43,8 @@ from ...schemas.models import (
     GalleryFavoriteRequest,
     GalleryImportJobStatus,
     GalleryResponse,
+    GallerySelectionTokenRequest,
+    GallerySelectionTokenResponse,
     GallerySyncRequest,
     GallerySyncJobStatus,
     MessageResponse,
@@ -83,6 +85,8 @@ GALLERY_JOB_SSE_IDLE_CHECK_SECONDS = 1.0
 GALLERY_JOB_SSE_QUEUE_MAXSIZE = 20
 TRACKED_EXPORT_STREAMING_BYTES_THRESHOLD = 64 * 1024 * 1024
 EXPORT_FILE_STREAM_CHUNK_SIZE = 1024 * 1024
+GALLERY_SELECTION_TOKEN_KIND = "batch_selection"
+GALLERY_SELECTION_TOKEN_TTL_SECONDS = 15 * 60
 
 
 class GalleryProgressThrottler:
@@ -230,6 +234,87 @@ def build_gallery_filters(
         "date_to": normalize_gallery_date_filter(date_to, end_of_day=True),
         "favorite": favorite,
     }
+
+
+def build_gallery_filters_from_selection_request(req: GallerySelectionTokenRequest) -> dict:
+    filters = req.filters
+    return build_gallery_filters(
+        filters.prompt,
+        filters.model,
+        filters.preset,
+        filters.size,
+        filters.date_from,
+        filters.date_to,
+        filters.favorite,
+    )
+
+
+def _parse_gallery_token_timestamp(value: str | None) -> datetime | None:
+    raw_value = str(value or "").strip()
+    if not raw_value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw_value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _gallery_selection_token_expires_at() -> str:
+    return (
+        datetime.now(timezone.utc) + timedelta(seconds=GALLERY_SELECTION_TOKEN_TTL_SECONDS)
+    ).isoformat()
+
+
+async def _cleanup_gallery_selection_tokens() -> None:
+    await asyncio.to_thread(
+        storage.cleanup_stale_gallery_jobs,
+        GALLERY_SELECTION_TOKEN_KIND,
+        GALLERY_SELECTION_TOKEN_TTL_SECONDS,
+    )
+
+
+async def _gallery_filters_from_selection_token(selection_token: str | None) -> dict:
+    token = str(selection_token or "").strip()
+    if not token:
+        raise HTTPException(status_code=422, detail="selection_token is required")
+
+    job = await asyncio.to_thread(
+        storage.get_gallery_job,
+        GALLERY_SELECTION_TOKEN_KIND,
+        token,
+    )
+    if not job:
+        raise HTTPException(status_code=404, detail="Gallery selection token not found")
+
+    payload = job.get("payload") or {}
+    expires_at = _parse_gallery_token_timestamp(payload.get("expires_at"))
+    if not expires_at or expires_at <= datetime.now(timezone.utc):
+        await asyncio.to_thread(storage.delete_gallery_job, GALLERY_SELECTION_TOKEN_KIND, token)
+        raise HTTPException(status_code=404, detail="Gallery selection token expired")
+
+    filters = payload.get("filters")
+    if not isinstance(filters, dict):
+        await asyncio.to_thread(storage.delete_gallery_job, GALLERY_SELECTION_TOKEN_KIND, token)
+        raise HTTPException(status_code=404, detail="Gallery selection token not found")
+    return filters
+
+
+async def _resolve_gallery_batch_ids(req: GalleryBatchRequest) -> tuple[list[str], list[GalleryEntry], int, list[str]]:
+    if req.ids:
+        entries = await asyncio.to_thread(storage.get_gallery_entries_by_ids, req.ids)
+        missing_ids = _missing_gallery_ids(req.ids, entries)
+        return req.ids, entries, len(req.ids), missing_ids
+
+    filters = await _gallery_filters_from_selection_token(req.selection_token)
+    ids = await asyncio.to_thread(storage.get_gallery_ids, filters)
+    if not ids:
+        return [], [], 0, []
+    entries = await asyncio.to_thread(storage.get_gallery_entries_by_ids, ids)
+    missing_ids = _missing_gallery_ids(ids, entries)
+    return ids, entries, len(ids), missing_ids
 
 
 def _gallery_filters_for_log(filters: dict) -> dict:
@@ -761,6 +846,10 @@ def _call_gallery_r2_sync(
 
 def _build_export_job_entries(job: dict) -> tuple[Iterable[GalleryEntry | dict], int, list[dict]]:
     payload = job.get("payload") or {}
+    filters = payload.get("filters")
+    if isinstance(filters, dict):
+        requested_count = storage.get_gallery_count(filters)
+        return storage.iter_gallery_export_rows(filters), requested_count, []
     ids = payload.get("ids")
     if ids:
         entries = storage.get_gallery_entries_by_ids(ids)
@@ -1712,12 +1801,39 @@ async def get_gallery_handler(
     )
 
 
+@router.post("/api/gallery/batch/selection-tokens", response_model=GallerySelectionTokenResponse, status_code=201)
+async def create_gallery_batch_selection_token(req: GallerySelectionTokenRequest):
+    filters = build_gallery_filters_from_selection_request(req)
+    count = await asyncio.to_thread(storage.get_gallery_count, filters)
+    if count <= 0:
+        raise HTTPException(status_code=404, detail="No images match selection")
+
+    await _cleanup_gallery_selection_tokens()
+    token = f"sel-{os.urandom(16).hex()}"
+    expires_at = _gallery_selection_token_expires_at()
+    await asyncio.to_thread(
+        storage.create_gallery_job,
+        job_id=token,
+        kind=GALLERY_SELECTION_TOKEN_KIND,
+        status="success",
+        stage="ready",
+        message="Gallery batch selection token",
+        progress=100,
+        requested_count=count,
+        completed_at=utc_now(),
+        payload={"filters": filters, "expires_at": expires_at},
+    )
+    return GallerySelectionTokenResponse(
+        selection_token=token,
+        count=count,
+        expires_at=expires_at,
+    )
+
+
 @router.post("/api/gallery/batch/delete", response_model=GalleryBatchResponse)
 async def delete_gallery_batch(req: GalleryBatchRequest):
-    requested_count = len(req.ids)
-    entries = await asyncio.to_thread(storage.get_gallery_entries_by_ids, req.ids)
-    missing_ids = _missing_gallery_ids(req.ids, entries)
-    deleted_entries, deleted_files = await asyncio.to_thread(storage.delete_gallery_images, req.ids)
+    ids, entries, requested_count, missing_ids = await _resolve_gallery_batch_ids(req)
+    deleted_entries, deleted_files = await asyncio.to_thread(storage.delete_gallery_images, ids)
     if deleted_entries == 0:
         raise HTTPException(status_code=404, detail="Gallery entries not found")
     kick_gallery_file_gc()
@@ -1734,10 +1850,8 @@ async def delete_gallery_batch(req: GalleryBatchRequest):
 
 @router.patch("/api/gallery/batch/favorite", response_model=GalleryBatchResponse)
 async def update_gallery_batch_favorite(req: GalleryBatchFavoriteRequest):
-    requested_count = len(req.ids)
-    entries = await asyncio.to_thread(storage.get_gallery_entries_by_ids, req.ids)
-    missing_ids = _missing_gallery_ids(req.ids, entries)
-    updated_entries = await asyncio.to_thread(storage.update_gallery_entries_favorite, req.ids, req.favorite)
+    ids, entries, requested_count, missing_ids = await _resolve_gallery_batch_ids(req)
+    updated_entries = await asyncio.to_thread(storage.update_gallery_entries_favorite, ids, req.favorite)
     if updated_entries == 0:
         raise HTTPException(status_code=404, detail="Gallery entries not found")
     return GalleryBatchResponse(
@@ -1752,11 +1866,10 @@ async def update_gallery_batch_favorite(req: GalleryBatchFavoriteRequest):
 
 @router.post("/api/gallery/batch/download")
 async def download_gallery_batch(req: GalleryBatchRequest):
-    entries = await asyncio.to_thread(storage.get_gallery_entries_by_ids, req.ids)
+    ids, entries, requested_count, missing_ids = await _resolve_gallery_batch_ids(req)
     if not entries:
         raise HTTPException(status_code=404, detail="Gallery entries not found")
 
-    missing_ids = _missing_gallery_ids(req.ids, entries)
     skipped_entries = [
         {
             "id": image_id,
@@ -1775,12 +1888,12 @@ async def download_gallery_batch(req: GalleryBatchRequest):
         "gpt-images-selected",
         skipped=skipped_entries,
         extra_headers={
-            "X-Gallery-Requested-Count": str(len(req.ids)),
+            "X-Gallery-Requested-Count": str(requested_count),
             "X-Gallery-Exported-Count": str(len(exportable_entries)),
             "X-Gallery-Missing-Count": str(len(skipped_entries)),
         },
         reserve_export_slot=True,
-        requested_count=len(req.ids),
+        requested_count=requested_count,
     )
 
 
@@ -1811,7 +1924,20 @@ async def get_gallery_direct_export_job(job_id: str):
 @router.post("/api/gallery/export-jobs", response_model=GalleryExportJobStatus, status_code=202)
 async def create_gallery_export_job(req: GalleryExportRequest | None = Body(default=None)):
     ids = req.ids if req else None
-    if ids:
+    selection_token = req.selection_token if req else None
+    if selection_token:
+        filters = await _gallery_filters_from_selection_token(selection_token)
+        requested_count = await asyncio.to_thread(storage.get_gallery_count, filters)
+        if requested_count <= 0:
+            raise HTTPException(status_code=404, detail="Gallery entries not found")
+        filename_prefix = "gpt-images-selected"
+        payload = {
+            "ids": None,
+            "selection_token": selection_token,
+            "filters": filters,
+            "filename_prefix": filename_prefix,
+        }
+    elif ids:
         entries = await asyncio.to_thread(storage.get_gallery_entries_by_ids, ids)
         if not entries:
             raise HTTPException(status_code=404, detail="Gallery entries not found")
