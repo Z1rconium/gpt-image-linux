@@ -115,8 +115,11 @@
     onFilter('prompt', value);
   }
 
+  function galleryImageSrc(image: GalleryEntry) {
+    return thumbnailReady(image) ? thumbnailUrl(image.filename, image.thumbnail_url) : imageUrl(image.filename, image.image_url);
+  }
+
   function thumbnailSrcset(image: GalleryEntry) {
-    if (!thumbnailReady(image)) return '';
     const fullWidth = image.image_width && image.image_width > 512 ? image.image_width : 1024;
     return `${thumbnailUrl(image.filename, image.thumbnail_url)} 512w, ${imageUrl(image.filename, image.image_url)} ${fullWidth}w`;
   }
@@ -127,14 +130,14 @@
 
   function handleThumbnailError(event: Event, image: GalleryEntry) {
     const img = event.currentTarget as HTMLImageElement;
-    if (image.thumbnail_status) {
+    const fallback = imageUrl(image.filename, image.image_url);
+    const absoluteFallback = new URL(fallback, window.location.origin).href;
+    if (img.dataset.fallbackSrc === fallback || img.getAttribute('src') === fallback || img.src === absoluteFallback) {
       img.removeAttribute('srcset');
       img.removeAttribute('src');
       img.classList.add('opacity-0');
       return;
     }
-    const fallback = imageUrl(image.filename, image.image_url);
-    if (img.dataset.fallbackSrc === fallback) return;
     img.dataset.fallbackSrc = fallback;
     img.srcset = '';
     img.src = fallback;
@@ -315,28 +318,26 @@
                   {isImageSelected(image) ? '✓' : ''}
                 </span>
               {/if}
-              {#if thumbnailReady(image)}
-                <picture class="block h-full w-full">
+              <picture class="block h-full w-full">
+                {#if thumbnailReady(image)}
                   <source
                     media="(max-width: 1023px)"
                     srcset={thumbnailSrcset(image)}
                     sizes="(max-width: 639px) calc(100vw - 32px), calc((100vw - 64px) / 2)"
                   />
-                  <img
-                    src={thumbnailUrl(image.filename, image.thumbnail_url)}
-                    alt={image.prompt}
-                    class="h-full w-full object-cover"
-                    loading={index < EAGER_THUMB_COUNT ? 'eager' : 'lazy'}
-                    fetchpriority={index < EAGER_THUMB_COUNT ? 'high' : 'auto'}
-                    decoding="async"
-                    width={image.image_width || undefined}
-                    height={image.image_height || undefined}
-                    on:error={(event) => handleThumbnailError(event, image)}
-                  />
-                </picture>
-              {:else}
-                <div class="h-full w-full bg-[radial-gradient(circle_at_30%_25%,rgba(16,185,129,0.14),transparent_28%),linear-gradient(135deg,rgba(39,39,42,0.9),rgba(9,9,11,0.96))]" aria-label={image.prompt}></div>
-              {/if}
+                {/if}
+                <img
+                  src={galleryImageSrc(image)}
+                  alt={image.prompt}
+                  class="h-full w-full object-cover"
+                  loading={index < EAGER_THUMB_COUNT ? 'eager' : 'lazy'}
+                  fetchpriority={index < EAGER_THUMB_COUNT ? 'high' : 'auto'}
+                  decoding="async"
+                  width={image.image_width || undefined}
+                  height={image.image_height || undefined}
+                  on:error={(event) => handleThumbnailError(event, image)}
+                />
+              </picture>
             </button>
             <div class="space-y-2 p-2.5">
               <div class="min-w-0">

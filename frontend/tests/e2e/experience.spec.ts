@@ -10,6 +10,7 @@ type GalleryImageFixture = {
   prompt: string;
   size: string;
   filename: string;
+  image_url?: string;
   thumbnail_url: string;
   thumbnail_status?: 'ready' | 'queued' | 'missing';
   created_at: string;
@@ -984,6 +985,25 @@ test('generation, gallery edit source, batch favorite, and lightbox flows work w
   await expect(lightbox).toBeHidden();
 });
 
+test('gallery shows the source image while thumbnail generation is still queued', async ({ page }) => {
+  await loadApp(page, {
+    galleryImages: [
+      {
+        ...baseGalleryImages[0],
+        id: 'pending-thumbnail',
+        prompt: 'Pending thumbnail image',
+        filename: 'pending-thumbnail.png',
+        thumbnail_url: '/api/thumb/pending-thumbnail.png',
+        thumbnail_status: 'queued'
+      }
+    ]
+  });
+
+  const image = page.getByRole('img', { name: 'Pending thumbnail image' });
+  await expect(image).toBeVisible();
+  await expect(image).toHaveAttribute('src', '/api/image/pending-thumbnail.png');
+});
+
 test('empty quantity falls back to 1 on generate', async ({ page }) => {
   await loadApp(page);
 
@@ -1369,7 +1389,7 @@ test('gallery selects current filtered results through a batch token', async ({ 
   await expect(page.getByRole('status')).toContainText('Updated 10 selected images');
 });
 
-test('gallery queued thumbnails use placeholders without loading full-size images', async ({ page }) => {
+test('gallery queued thumbnails use source images until thumbnails are ready', async ({ page }) => {
   const fullImageRequests: string[] = [];
   page.on('request', (request) => {
     const url = new URL(request.url());
@@ -1389,9 +1409,10 @@ test('gallery queued thumbnails use placeholders without loading full-size image
     ]
   });
 
-  await expect(page.getByRole('button', { name: 'Queued thumbnail image' })).toBeVisible();
-  await page.waitForTimeout(100);
-  expect(fullImageRequests).toHaveLength(0);
+  const image = page.getByRole('img', { name: 'Queued thumbnail image' });
+  await expect(image).toBeVisible();
+  await expect(image).toHaveAttribute('src', '/api/image/queued-thumb.png');
+  expect(fullImageRequests).toContain('/api/image/queued-thumb.png');
 });
 
 test('lightbox navigates across pages with 2000 mocked images', async ({ page }) => {
