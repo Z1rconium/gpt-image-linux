@@ -74,6 +74,7 @@ def _get_private_ip_ranges() -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Netw
 
 
 PRIVATE_RANGES = _get_private_ip_ranges()
+R2_ENDPOINT_HOST_SUFFIX = ".r2.cloudflarestorage.com"
 
 BLOCKED_HOSTNAMES = {
     "localhost",
@@ -86,6 +87,21 @@ BLOCKED_HOSTNAMES = {
     "detectportal.safari.com",
     "captive.apple.com",
 }
+
+
+def _parse_host_allowlist(allowlist: str | None) -> list[str]:
+    return [
+        h.strip().lower().rstrip(".")
+        for h in str(allowlist or "").split(",")
+        if h.strip()
+    ]
+
+
+def _ip_literal(hostname: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    try:
+        return ipaddress.ip_address(hostname)
+    except ValueError:
+        return None
 
 
 def is_private_ip(ip_str: str) -> bool:
@@ -141,6 +157,23 @@ def validate_response_peer_ip(response: object, context: str) -> None:
         raise ValueError(f"{context} connected to private/internal IP: {peer_ip}")
 
 
+def _validate_public_dns_resolution(
+    hostname: str,
+    *,
+    private_ip_error: str,
+) -> None:
+    _, resolved_ips = resolve_hostname(hostname)
+    for ip in resolved_ips:
+        if is_private_ip(ip):
+            resolved_info = ", ".join(f"'{resolved_ip}'" for resolved_ip in resolved_ips)
+            raise ValueError(
+                private_ip_error.format(
+                    hostname=hostname,
+                    resolved_info=resolved_info,
+                )
+            )
+
+
 def _validate_url_base(
     url: str,
     *,
@@ -174,17 +207,13 @@ def _validate_url_base(
         raise ValueError(blocked_hostname_error.format(hostname=hostname))
 
     if allowlist:
-        allowed_hosts = [h.strip().lower() for h in allowlist.split(",") if h.strip()]
+        allowed_hosts = _parse_host_allowlist(allowlist)
         if hostname not in allowed_hosts:
             raise ValueError(
                 f"{allowlist_error_prefix} '{hostname}' is not in the allowlist. Allowed: {', '.join(allowed_hosts)}"
             )
 
-    _, resolved_ips = resolve_hostname(hostname)
-    for ip in resolved_ips:
-        if is_private_ip(ip):
-            resolved_info = ", ".join(f"'{resolved_ip}'" for resolved_ip in resolved_ips)
-            raise ValueError(private_ip_error.format(hostname=hostname, resolved_info=resolved_info))
+    _validate_public_dns_resolution(hostname, private_ip_error=private_ip_error)
 
 
 def validate_upstream_url(url: str, allowlist: str) -> None:
@@ -229,6 +258,59 @@ def normalize_upstream_base_url(url: str | None) -> str:
     return urlunsplit(("https", host, path, "", ""))
 
 
+def _is_default_r2_endpoint_hostname(hostname: str) -> bool:
+    normalized = hostname.lower().rstrip(".")
+    account_label = normalized.removesuffix(R2_ENDPOINT_HOST_SUFFIX)
+    return (
+        bool(account_label)
+        and normalized.endswith(R2_ENDPOINT_HOST_SUFFIX)
+        and "." not in account_label
+    )
+
+
+def validate_r2_endpoint_url(url: str, allowlist: str | None = None) -> None:
+    try:
+        parsed = urlsplit(url)
+        _ = parsed.port
+    except ValueError as e:
+        raise ValueError("R2 endpoint URL must include a valid port") from e
+
+    if parsed.scheme.lower() != "https":
+        raise ValueError("R2 endpoint URL must use https://")
+    if not parsed.hostname:
+        raise ValueError("R2 endpoint URL must include a hostname")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("R2 endpoint URL must not include username or password")
+    if parsed.query or parsed.fragment:
+        raise ValueError("R2 endpoint URL must not include query strings or fragments")
+
+    hostname = parsed.hostname.lower().rstrip(".")
+
+    if hostname in BLOCKED_HOSTNAMES:
+        raise ValueError(f"R2 endpoint hostname '{hostname}' is not allowed")
+
+    if _ip_literal(hostname) is not None:
+        raise ValueError("R2 endpoint URL must use a hostname, not an IP address")
+
+    allowed_hosts = _parse_host_allowlist(allowlist)
+    if not _is_default_r2_endpoint_hostname(hostname) and hostname not in allowed_hosts:
+        allowed_message = ", ".join(allowed_hosts) if allowed_hosts else "none"
+        raise ValueError(
+            "R2 endpoint hostname "
+            f"'{hostname}' must be a Cloudflare R2 hostname "
+            f"(*{R2_ENDPOINT_HOST_SUFFIX}) or be listed in "
+            f"R2_ENDPOINT_HOST_ALLOWLIST. Allowed: {allowed_message}"
+        )
+
+    _validate_public_dns_resolution(
+        hostname,
+        private_ip_error=(
+            "R2 endpoint hostname '{hostname}' resolves to private/internal "
+            "IP(s): {resolved_info}"
+        ),
+    )
+
+
 def normalize_r2_endpoint_url(url: str | None) -> str:
     value = str(url or "").strip()
     if not value:
@@ -254,7 +336,9 @@ def normalize_r2_endpoint_url(url: str | None) -> str:
     if port is not None:
         host = f"{host}:{port}"
     path = parsed.path.rstrip("/")
-    return urlunsplit(("https", host, path, "", ""))
+    normalized = urlunsplit(("https", host, path, "", ""))
+    validate_r2_endpoint_url(normalized, config.R2_ENDPOINT_HOST_ALLOWLIST)
+    return normalized
 
 
 def redact_url(url: str | None) -> str:

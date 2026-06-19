@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from backend.app.core import settings as config
+from backend.app.core.validators import normalize_r2_endpoint_url
 from backend.app.integrations import r2_sync
 from backend.app.repositories import storage
 
@@ -237,6 +238,61 @@ def test_r2_health_probe_success_and_cleanup_warning():
     ]
     assert client.put_objects[0].startswith("gallery/.r2-sync-probe-")
     assert client.deleted == client.put_objects
+
+
+def test_r2_endpoint_rejects_ip_literal(monkeypatch):
+    monkeypatch.setattr(config, "R2_ENDPOINT_HOST_ALLOWLIST", "")
+
+    with pytest.raises(ValueError, match="must use a hostname"):
+        normalize_r2_endpoint_url("https://127.0.0.1")
+
+
+def test_r2_endpoint_rejects_non_r2_hostname_without_allowlist(monkeypatch):
+    monkeypatch.setattr(config, "R2_ENDPOINT_HOST_ALLOWLIST", "")
+
+    with pytest.raises(ValueError, match="R2_ENDPOINT_HOST_ALLOWLIST"):
+        normalize_r2_endpoint_url("https://storage.example.com")
+
+
+def test_r2_endpoint_allows_cloudflare_r2_hostname(monkeypatch):
+    monkeypatch.setattr(config, "R2_ENDPOINT_HOST_ALLOWLIST", "")
+    monkeypatch.setattr(
+        "backend.app.core.validators.resolve_hostname",
+        lambda hostname: (hostname, ["104.18.0.1"]),
+    )
+
+    assert (
+        normalize_r2_endpoint_url("https://ACCOUNT.r2.cloudflarestorage.com/")
+        == "https://account.r2.cloudflarestorage.com"
+    )
+
+
+def test_r2_endpoint_rejects_cloudflare_suffix_without_account_label(monkeypatch):
+    monkeypatch.setattr(config, "R2_ENDPOINT_HOST_ALLOWLIST", "")
+
+    with pytest.raises(ValueError, match="R2_ENDPOINT_HOST_ALLOWLIST"):
+        normalize_r2_endpoint_url("https://r2.cloudflarestorage.com")
+
+
+def test_r2_endpoint_allowlist_still_blocks_private_dns(monkeypatch):
+    monkeypatch.setattr(config, "R2_ENDPOINT_HOST_ALLOWLIST", "storage.example.com")
+    monkeypatch.setattr(
+        "backend.app.core.validators.resolve_hostname",
+        lambda hostname: (hostname, ["10.0.0.5"]),
+    )
+
+    with pytest.raises(ValueError, match="private/internal IP"):
+        normalize_r2_endpoint_url("https://storage.example.com")
+
+
+def test_r2_endpoint_allowlist_allows_public_custom_hostname(monkeypatch):
+    monkeypatch.setattr(config, "R2_ENDPOINT_HOST_ALLOWLIST", "storage.example.com")
+    monkeypatch.setattr(
+        "backend.app.core.validators.resolve_hostname",
+        lambda hostname: (hostname, ["203.0.113.10"]),
+    )
+
+    assert normalize_r2_endpoint_url("https://storage.example.com") == "https://storage.example.com"
 
 
 def test_r2_sync_uploads_only_missing_and_leaves_bucket_only_keys(image_dir):

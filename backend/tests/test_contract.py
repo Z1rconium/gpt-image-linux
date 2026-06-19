@@ -173,6 +173,7 @@ def _configure_runtime(tmp_path: Path, *, access_key: str = "", allow_unauthenti
     config.PROMPT_OPTIMIZER_HOST_ALLOWLIST = ""
     config.R2_BACKUP_ENABLED = False
     config.R2_ENDPOINT_URL = ""
+    config.R2_ENDPOINT_HOST_ALLOWLIST = ""
     config.R2_BUCKET_NAME = ""
     config.R2_REGION = "auto"
     config.R2_KEY_PREFIX = "gallery/"
@@ -1591,6 +1592,99 @@ def test_r2_backup_settings_rejects_invalid_sync_interval(client):
         json=_settings_payload(settings, r2_backup={"sync_interval_hours": "6"}),
     )
     assert non_numeric.status_code == 422
+
+
+def test_r2_backup_settings_rejects_private_endpoint_before_probe(client, monkeypatch):
+    settings = client.get("/api/settings").json()
+
+    def fail_probe(_draft):
+        raise AssertionError("probe_r2_settings should not run for invalid endpoints")
+
+    monkeypatch.setattr(settings_router.r2_sync, "probe_r2_settings", fail_probe)
+    health = client.post(
+        "/api/settings/r2/health",
+        json={
+            "enabled": True,
+            "endpoint_url": "https://127.0.0.1",
+            "bucket_name": "image-backups",
+            "region": "auto",
+            "key_prefix": "gallery/",
+            "access_key_id": "${TEST_R2_ACCESS_KEY_ID}",
+            "secret_access_key": "${TEST_R2_SECRET_ACCESS_KEY}",
+        },
+    )
+    assert health.status_code == 422
+    assert "R2 endpoint URL must use a hostname" in health.text
+
+    save = client.post(
+        "/api/settings",
+        json=_settings_payload(
+            settings,
+            r2_backup={
+                "enabled": True,
+                "endpoint_url": "https://127.0.0.1",
+                "bucket_name": "image-backups",
+                "region": "auto",
+                "key_prefix": "gallery/",
+                "access_key_id": "${TEST_R2_ACCESS_KEY_ID}",
+                "secret_access_key": "${TEST_R2_SECRET_ACCESS_KEY}",
+            },
+        ),
+    )
+    assert save.status_code == 422
+    assert "R2 endpoint URL must use a hostname" in save.text
+
+
+def test_r2_backup_settings_allows_custom_endpoint_only_with_admin_allowlist(
+    client,
+    monkeypatch,
+):
+    monkeypatch.setattr(config, "R2_ENDPOINT_HOST_ALLOWLIST", "")
+    blocked = client.post(
+        "/api/settings/r2/health",
+        json={
+            "enabled": True,
+            "endpoint_url": "https://storage.example.com",
+            "bucket_name": "image-backups",
+            "region": "auto",
+            "key_prefix": "gallery/",
+            "access_key_id": "${TEST_R2_ACCESS_KEY_ID}",
+            "secret_access_key": "${TEST_R2_SECRET_ACCESS_KEY}",
+        },
+    )
+    assert blocked.status_code == 422
+    assert "R2_ENDPOINT_HOST_ALLOWLIST" in blocked.text
+
+    monkeypatch.setattr(config, "R2_ENDPOINT_HOST_ALLOWLIST", "storage.example.com")
+    monkeypatch.setattr(
+        "backend.app.core.validators.resolve_hostname",
+        lambda hostname: (hostname, ["203.0.113.10"]),
+    )
+
+    seen: dict[str, dict] = {}
+
+    def fake_probe(draft):
+        seen["draft"] = draft
+        return {
+            "status": "ok",
+            "checks": [{"name": "configuration", "status": "ok", "message": "ok"}],
+        }
+
+    monkeypatch.setattr(settings_router.r2_sync, "probe_r2_settings", fake_probe)
+    allowed = client.post(
+        "/api/settings/r2/health",
+        json={
+            "enabled": True,
+            "endpoint_url": "https://storage.example.com",
+            "bucket_name": "image-backups",
+            "region": "auto",
+            "key_prefix": "gallery/",
+            "access_key_id": "${TEST_R2_ACCESS_KEY_ID}",
+            "secret_access_key": "${TEST_R2_SECRET_ACCESS_KEY}",
+        },
+    )
+    assert allowed.status_code == 200
+    assert seen["draft"]["endpoint_url"] == "https://storage.example.com"
 
 
 def test_r2_env_defaults_fill_empty_persisted_settings(tmp_path, monkeypatch):
@@ -3859,6 +3953,62 @@ def test_gallery_export_startup_cleanup_preserves_tracked_finished_zip(client):
         assert "images/export-cleanup-1.png" in zf.namelist()
 
 
+def test_gallery_export_download_rejects_untrusted_db_path(client):
+    outside_path = Path(config.DATA_DIR).parent / "outside-export.zip"
+    outside_path.write_bytes(b"outside archive")
+    now = "2026-01-01T00:00:00Z"
+    storage.create_gallery_job(
+        job_id="polluted-export-path",
+        kind="export",
+        status="success",
+        stage="ready",
+        message="ZIP archive ready",
+        progress=100,
+        filename="polluted.zip",
+        path=str(outside_path),
+        requested_count=1,
+        processed_count=1,
+        exported_count=1,
+        missing_count=0,
+        bytes_total=outside_path.stat().st_size,
+        bytes_written=outside_path.stat().st_size,
+        created_at=now,
+        updated_at=now,
+        payload={},
+    )
+
+    archive = client.get("/api/gallery/export-jobs/polluted-export-path/download")
+
+    assert archive.status_code == 404
+    assert archive.json()["detail"] == "Gallery export archive not found"
+    assert outside_path.read_bytes() == b"outside archive"
+    assert storage.get_gallery_job("export", "polluted-export-path") is not None
+
+
+def test_gallery_export_cleanup_skips_untrusted_db_path(client):
+    outside_path = Path(config.DATA_DIR).parent / "outside-cleanup.zip"
+    outside_path.write_bytes(b"outside cleanup target")
+    now = "2026-01-01T00:00:00Z"
+    storage.create_gallery_job(
+        job_id="polluted-export-cleanup",
+        kind="export",
+        status="success",
+        stage="ready",
+        message="ZIP archive ready",
+        progress=100,
+        filename="polluted.zip",
+        path=str(outside_path),
+        created_at=now,
+        updated_at=now,
+        payload={},
+    )
+
+    gallery_router._cleanup_downloaded_gallery_export_job("polluted-export-cleanup")
+
+    assert outside_path.read_bytes() == b"outside cleanup target"
+    assert storage.get_gallery_job("export", "polluted-export-cleanup") is None
+
+
 def test_gallery_tracked_jobs_allow_granian_multi_worker(client, monkeypatch):
     _fake_gallery_entry("multi-export", "one", "1024x1024", "multi-export.png")
     storage.save_r2_backup_settings(
@@ -4479,6 +4629,36 @@ def test_import_archive_async_job_reports_progress_and_terminal_sse(client):
     assert events.headers["content-type"].startswith("text/event-stream")
     assert "event: import" in events.text
     assert job["job_id"] in events.text
+
+
+def test_gallery_import_job_rejects_untrusted_db_path(client):
+    outside_path = Path(config.DATA_DIR).parent / "outside-import.zip"
+    outside_path.write_bytes(_import_archive_bytes())
+    now = "2026-01-01T00:00:00Z"
+    storage.create_gallery_job(
+        job_id="polluted-import-path",
+        kind="import",
+        status="queued",
+        stage="queued",
+        message="Queued gallery ZIP import",
+        progress=0,
+        path=str(outside_path),
+        requested_count=1,
+        processed_count=0,
+        exported_count=0,
+        missing_count=0,
+        created_at=now,
+        updated_at=now,
+        payload={},
+    )
+
+    asyncio.run(gallery_router._run_gallery_import_job(storage.get_gallery_job("import", "polluted-import-path")))
+
+    assert outside_path.exists()
+    assert storage.get_gallery_entry("import-1") is None
+    job = storage.get_gallery_job("import", "polluted-import-path")
+    assert job["status"] == "error"
+    assert job["error"] == "Import archive path is invalid"
 
 
 def test_import_gallery_entries_dedupes_existing_rows_at_commit(client):

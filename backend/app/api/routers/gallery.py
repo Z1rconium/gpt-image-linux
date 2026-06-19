@@ -89,6 +89,38 @@ GALLERY_SELECTION_TOKEN_KIND = "batch_selection"
 GALLERY_SELECTION_TOKEN_TTL_SECONDS = 15 * 60
 
 
+def _trusted_gallery_job_dir(kind: str) -> Path:
+    if kind == "import":
+        return Path(config.DATA_DIR) / "imports"
+    return Path(config.DATA_DIR) / "exports"
+
+
+def _resolve_trusted_gallery_job_path(path_value, *, kind: str) -> Path | None:
+    if not path_value:
+        return None
+    try:
+        base_dir = _trusted_gallery_job_dir(kind).resolve()
+        path = Path(str(path_value)).resolve()
+        path.relative_to(base_dir)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return path
+
+
+def _unlink_trusted_gallery_job_path(path_value, *, kind: str, job_id: str | None = None) -> bool:
+    path = _resolve_trusted_gallery_job_path(path_value, kind=kind)
+    if not path:
+        logger.warning(
+            "Skipped cleanup for gallery %s job %s with untrusted path: %s",
+            kind,
+            job_id or "<unknown>",
+            path_value,
+        )
+        return False
+    path.unlink(missing_ok=True)
+    return True
+
+
 class GalleryProgressThrottler:
     def __init__(
         self,
@@ -1006,6 +1038,7 @@ async def _create_reserved_gallery_import_job(
 
 async def _run_gallery_export_job(job: dict) -> None:
     job_id = job["job_id"]
+    export_path = _resolve_trusted_gallery_job_path(job.get("path"), kind="export")
     loop = asyncio.get_running_loop()
 
     def publish_progress(updates: dict):
@@ -1022,6 +1055,8 @@ async def _run_gallery_export_job(job: dict) -> None:
         throttler.emit(updates, force=force)
 
     try:
+        if not export_path:
+            raise ValueError("Export archive path is invalid")
         entries, requested_count, skipped = await asyncio.to_thread(_build_export_job_entries, job)
         _publish_gallery_job(
             job_id,
@@ -1037,7 +1072,7 @@ async def _run_gallery_export_job(job: dict) -> None:
         result: GalleryZipFileResult = await asyncio.to_thread(
             write_gallery_zip_file,
             entries,
-            Path(str(job["path"])),
+            export_path,
             requested_count=requested_count,
             skipped=skipped,
             progress=progress,
@@ -1066,7 +1101,7 @@ async def _run_gallery_export_job(job: dict) -> None:
         raise
     except Exception as e:
         logger.warning("Failed to build gallery export ZIP job %s", job_id, exc_info=True)
-        Path(str(job.get("path") or "")).unlink(missing_ok=True)
+        _unlink_trusted_gallery_job_path(job.get("path"), kind="export", job_id=job_id)
         _publish_gallery_job(
             job_id,
             {
@@ -1194,7 +1229,7 @@ async def _run_gallery_sync_job(job: dict) -> None:
 
 async def _run_gallery_import_job(job: dict) -> None:
     job_id = job["job_id"]
-    zip_path = Path(str(job.get("path") or ""))
+    zip_path = _resolve_trusted_gallery_job_path(job.get("path"), kind="import")
     requested_count = int(job.get("requested_count") or 0)
     loop = asyncio.get_running_loop()
     last_counts = {
@@ -1232,6 +1267,8 @@ async def _run_gallery_import_job(job: dict) -> None:
         )
 
     try:
+        if not zip_path:
+            raise ValueError("Import archive path is invalid")
         if not zip_path.exists():
             raise FileNotFoundError("Import archive file is missing")
 
@@ -1311,7 +1348,7 @@ async def _run_gallery_import_job(job: dict) -> None:
             },
         )
     finally:
-        zip_path.unlink(missing_ok=True)
+        _unlink_trusted_gallery_job_path(job.get("path"), kind="import", job_id=job_id)
 
 
 async def _run_gallery_job_dispatcher(kind: str, worker_id: str, running_limit: int) -> None:
@@ -1685,11 +1722,19 @@ async def gc_gallery_export_jobs(worker_id: str) -> None:
                 for job in stale_exports:
                     path = job.get("path")
                     if path:
-                        Path(str(path)).unlink(missing_ok=True)
+                        _unlink_trusted_gallery_job_path(
+                            path,
+                            kind="export",
+                            job_id=str(job.get("job_id") or ""),
+                        )
                 for job in stale_imports:
                     path = job.get("path")
                     if path:
-                        Path(str(path)).unlink(missing_ok=True)
+                        _unlink_trusted_gallery_job_path(
+                            path,
+                            kind="import",
+                            job_id=str(job.get("job_id") or ""),
+                        )
                 if stale_exports or stale_syncs or stale_imports or stale_direct_exports or expired_direct_slots:
                     logger.info(
                         "GC cleaned up %d gallery export job(s), %d sync job(s), %d import job(s), %d completed direct export job(s), and %d direct export slot(s)",
@@ -2090,7 +2135,7 @@ async def stream_gallery_direct_export_job(job_id: str, request: Request):
 def _cleanup_downloaded_gallery_export_job(job_id: str) -> None:
     job = storage.delete_gallery_job("export", job_id)
     if job and job.get("path"):
-        Path(str(job["path"])).unlink(missing_ok=True)
+        _unlink_trusted_gallery_job_path(job["path"], kind="export", job_id=job_id)
 
 
 def _gallery_export_download_headers(job: dict) -> dict[str, str]:
@@ -2120,8 +2165,8 @@ async def download_gallery_export_job(job_id: str):
     if job.get("status") != "success":
         raise HTTPException(status_code=409, detail="Gallery export job is not ready")
 
-    path = Path(str(job.get("path") or ""))
-    if not path.exists():
+    path = _resolve_trusted_gallery_job_path(job.get("path"), kind="export")
+    if not path or not path.exists():
         raise HTTPException(status_code=404, detail="Gallery export archive not found")
 
     filename = str(job.get("filename") or f"gpt-images-{job_id}.zip")

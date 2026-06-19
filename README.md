@@ -149,7 +149,7 @@ Most runtime options live in `.env.example` and can also be managed through Web 
 | `IMAGES_DIR` | Saved image directory. |
 | `DATA_DIR` / `DATABASE_FILE` | SQLite runtime storage. |
 | `PROMPT_OPTIMIZER_*` | Optional server-side prompt optimizer settings. |
-| `R2_*` | Optional Cloudflare R2 gallery backup sync settings. |
+| `R2_*` | Optional Cloudflare R2 gallery backup sync settings; custom endpoint hosts require `R2_ENDPOINT_HOST_ALLOWLIST`. |
 | `PUBLIC_ORIGIN` / `ALLOWED_HOSTS` | Reverse-proxy Host/CSRF hardening. |
 | `ENABLE_METRICS` | Enables JSON/Prometheus metrics endpoints. |
 
@@ -210,6 +210,7 @@ The public API surface is contract-tested; keep paths, methods, status codes, SS
 - Upstream image URL downloads are HTTPS-only and SSRF-aware.
 - Generation/edit tasks share SQLite-backed queue/concurrency limits and work across multiple Granian workers.
 - Gallery ZIP import/export uses safety limits from `.env.example`.
+- R2 endpoints are HTTPS-only, SSRF-checked, and limited to `*.r2.cloudflarestorage.com` unless `R2_ENDPOINT_HOST_ALLOWLIST` names a custom host.
 - R2 sync is backup-only; the app never serves, overwrites, or deletes local gallery images from R2.
 
 ## Testing
@@ -390,7 +391,7 @@ granian --interface asgi backend.app.main:app --host 0.0.0.0 --port 9090 --reloa
 | `IMAGES_DIR` | 图片保存目录。 |
 | `DATA_DIR` / `DATABASE_FILE` | SQLite 运行时数据。 |
 | `PROMPT_OPTIMIZER_*` | 可选提示词优化器配置。 |
-| `R2_*` | 可选 Cloudflare R2 Gallery 备份配置。 |
+| `R2_*` | 可选 Cloudflare R2 Gallery 备份配置；自定义 endpoint host 需要配置 `R2_ENDPOINT_HOST_ALLOWLIST`。 |
 | `PUBLIC_ORIGIN` / `ALLOWED_HOSTS` | 反向代理 Host/CSRF 加固。 |
 | `ENABLE_METRICS` | 启用 JSON/Prometheus metrics 接口。 |
 
@@ -451,6 +452,7 @@ Secret 字段优先使用 `${ENV_VAR_NAME}` 引用。若要把明文 secret 写�
 - 上游图片 URL 下载只接受 HTTPS，并做 SSRF 防护。
 - 生成/编辑共享 SQLite 队列和并发限制，可跨多个 Granian worker 工作。
 - Gallery ZIP 导入导出受 `.env.example` 中的安全限制约束。
+- R2 endpoint 只接受 HTTPS，带 SSRF 校验，且默认限制为 `*.r2.cloudflarestorage.com`；自定义 host 需配置 `R2_ENDPOINT_HOST_ALLOWLIST`。
 - R2 同步只是备份路径；应用不会从 R2 服务、覆盖或删除本地 Gallery 图片。
 
 ## 测试

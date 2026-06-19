@@ -82,6 +82,7 @@ OVERALL_CONFIG_REGISTRY: tuple[OverallConfigSpec, ...] = (
     _spec("PROMPT_OPTIMIZER_HOST_ALLOWLIST", "string", "", "Prompt Optimizer", "Optimizer endpoint host allowlist.", validator="host_list"),
     _spec("R2_BACKUP_ENABLED", "bool", "false", "R2 Backup", "Enable R2 backup.", exposed_in_settings=True),
     _spec("R2_ENDPOINT_URL", "string", "", "R2 Backup", "R2 endpoint URL.", exposed_in_settings=True),
+    _spec("R2_ENDPOINT_HOST_ALLOWLIST", "string", "", "R2 Backup", "Additional allowed R2-compatible endpoint hostnames outside *.r2.cloudflarestorage.com.", validator="host_list"),
     _spec("R2_BUCKET_NAME", "string", "", "R2 Backup", "R2 bucket name.", exposed_in_settings=True),
     _spec("R2_REGION", "string", "auto", "R2 Backup", "R2 region.", exposed_in_settings=True),
     _spec("R2_KEY_PREFIX", "string", "gallery/", "R2 Backup", "R2 key prefix.", exposed_in_settings=True),

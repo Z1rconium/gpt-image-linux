@@ -134,6 +134,7 @@ PROMPT_OPTIMIZER_HOST_ALLOWLIST = os.getenv("PROMPT_OPTIMIZER_HOST_ALLOWLIST", "
 # ── Cloudflare R2 gallery backup ─────────────────────────────────
 R2_BACKUP_ENABLED = env_flag("R2_BACKUP_ENABLED")
 R2_ENDPOINT_URL = os.getenv("R2_ENDPOINT_URL", "").strip()
+R2_ENDPOINT_HOST_ALLOWLIST = os.getenv("R2_ENDPOINT_HOST_ALLOWLIST", "").strip()
 R2_BUCKET_NAME = os.getenv("R2_BUCKET_NAME", "").strip()
 R2_REGION = os.getenv("R2_REGION", "auto").strip() or "auto"
 R2_KEY_PREFIX = os.getenv("R2_KEY_PREFIX", "gallery/").strip()
