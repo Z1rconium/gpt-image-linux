@@ -183,10 +183,19 @@ async def list_generate_jobs(
     failed_only: bool = Query(default=False),
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
+    before_updated_at: str | None = Query(default=None, max_length=64),
+    before_job_id: str | None = Query(default=None, max_length=128),
 ):
     if include_finished:
         statuses = ERROR_GENERATE_JOB_STATUSES if failed_only else None
-        jobs = await asyncio.to_thread(storage.list_generate_jobs, statuses=statuses, limit=limit, offset=offset)
+        jobs = await asyncio.to_thread(
+            storage.list_generate_jobs,
+            statuses=statuses,
+            limit=limit,
+            offset=offset,
+            before_updated_at=before_updated_at,
+            before_job_id=before_job_id,
+        )
     else:
         jobs = await asyncio.to_thread(
             storage.list_generate_jobs,

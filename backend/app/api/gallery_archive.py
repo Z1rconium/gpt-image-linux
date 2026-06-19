@@ -171,56 +171,76 @@ def iter_gallery_zip_chunks(
     requested_count: int = 0,
     progress: GalleryZipProgressCallback | None = None,
 ) -> Generator[bytes, None, GalleryZipFileResult]:
+    chunks, result = prepare_gallery_zip_chunks(
+        entries,
+        skipped=skipped,
+        requested_count=requested_count,
+        progress=progress,
+    )
+    yield from chunks
+    return result
+
+
+def prepare_gallery_zip_chunks(
+    entries: Iterable[GalleryEntry | dict[str, Any]],
+    skipped: Iterable[dict[str, Any]] | None = None,
+    *,
+    requested_count: int = 0,
+    progress: GalleryZipProgressCallback | None = None,
+) -> tuple[Iterator[bytes], GalleryZipFileResult]:
     prepared = _prepare_gallery_zip_stream(
         entries,
         skipped=skipped,
         requested_count=requested_count,
         progress=progress,
     )
-    last_emit_at = 0.0
-    bytes_written = 0
-    _emit_zip_progress(
-        progress,
-        status="running",
-        stage="streaming",
-        message="Streaming ZIP archive",
-        progress=20,
-        bytes_total=prepared.bytes_total,
-        bytes_written=0,
-        exported_count=prepared.exported_count,
-        missing_count=prepared.missing_count,
-    )
-
-    try:
-        for chunk in prepared.stream:
-            if not chunk:
-                continue
-            bytes_written += len(chunk)
-            now = time.monotonic()
-            if now - last_emit_at >= 0.1 or bytes_written >= prepared.bytes_total:
-                last_emit_at = now
-                _emit_zip_progress(
-                    progress,
-                    status="running",
-                    stage="streaming",
-                    message="Streaming ZIP archive",
-                    progress=20 + round((bytes_written / max(prepared.bytes_total, 1)) * 80),
-                    bytes_total=prepared.bytes_total,
-                    bytes_written=bytes_written,
-                    exported_count=prepared.exported_count,
-                    missing_count=prepared.missing_count,
-                )
-            yield chunk
-    finally:
-        for path in prepared.cleanup_paths:
-            path.unlink(missing_ok=True)
-
-    return GalleryZipFileResult(
+    result = GalleryZipFileResult(
         requested_count=prepared.requested_count,
         exported_count=prepared.exported_count,
         missing_count=prepared.missing_count,
         bytes_total=prepared.bytes_total,
     )
+
+    def chunks():
+        last_emit_at = 0.0
+        bytes_written = 0
+        _emit_zip_progress(
+            progress,
+            status="running",
+            stage="streaming",
+            message="Streaming ZIP archive",
+            progress=20,
+            bytes_total=prepared.bytes_total,
+            bytes_written=0,
+            exported_count=prepared.exported_count,
+            missing_count=prepared.missing_count,
+        )
+
+        try:
+            for chunk in prepared.stream:
+                if not chunk:
+                    continue
+                bytes_written += len(chunk)
+                now = time.monotonic()
+                if now - last_emit_at >= 0.1 or bytes_written >= prepared.bytes_total:
+                    last_emit_at = now
+                    _emit_zip_progress(
+                        progress,
+                        status="running",
+                        stage="streaming",
+                        message="Streaming ZIP archive",
+                        progress=20 + round((bytes_written / max(prepared.bytes_total, 1)) * 80),
+                        bytes_total=prepared.bytes_total,
+                        bytes_written=bytes_written,
+                        exported_count=prepared.exported_count,
+                        missing_count=prepared.missing_count,
+                    )
+                yield chunk
+        finally:
+            for path in prepared.cleanup_paths:
+                path.unlink(missing_ok=True)
+
+    return chunks(), result
 
 
 def _emit_zip_progress(

@@ -94,6 +94,7 @@ __all__ = [
     "delete_all_gallery_images",
     "delete_gallery_image",
     "delete_gallery_images",
+    "delete_gallery_images_by_filters",
     "detect_image_format",
     "ensure_thumbnail_for_image",
     "generate_image_id",
@@ -183,6 +184,7 @@ __all__ = [
     "sync_gallery_with_image_files",
     "trim_generate_jobs",
     "update_gallery_entries_favorite",
+    "update_gallery_entries_favorite_by_filters",
     "update_gallery_entry",
     "update_gallery_entry_hash",
     "update_prompt_snippet",
@@ -341,6 +343,7 @@ GALLERY_SYNC_BATCH_SIZE = 500
 GALLERY_FTS_VERSION_KEY = "gallery_fts_version"
 GALLERY_FTS_VERSION = "trigram-v1"
 GALLERY_FTS_MIN_QUERY_LENGTH = 3
+SQLITE_IN_CLAUSE_CHUNK_SIZE = 900
 GALLERY_COUNT_CACHE_SECONDS = 2.0
 GALLERY_TOTAL_BYTES_CACHE_SECONDS = 2.0
 GALLERY_ORPHAN_FILE_TTL_SECONDS = 300
@@ -392,6 +395,29 @@ def _remove_verified_thumbnail(filename: str):
 def _clear_verified_thumbnails():
     with _verified_thumbnails_lock:
         _verified_thumbnails.clear()
+
+
+def _unique_sqlite_values(values: Iterable[Any]) -> list[str]:
+    unique: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        normalized = "" if value is None else str(value)
+        if not normalized.strip() or normalized in seen:
+            continue
+        seen.add(normalized)
+        unique.append(normalized)
+    return unique
+
+
+def _iter_sqlite_in_chunks(
+    values: Iterable[Any],
+    *,
+    chunk_size: int | None = None,
+) -> Iterator[list[str]]:
+    unique_values = _unique_sqlite_values(values)
+    normalized_chunk_size = max(1, int(chunk_size or SQLITE_IN_CLAUSE_CHUNK_SIZE))
+    for start in range(0, len(unique_values), normalized_chunk_size):
+        yield unique_values[start : start + normalized_chunk_size]
 
 
 def _normalize_stored_api_key(value: str | None) -> str:
@@ -1055,6 +1081,8 @@ def _ensure_database():
                     ON generate_jobs(status, updated_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_generate_jobs_updated_at
                     ON generate_jobs(updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_generate_jobs_seek
+                    ON generate_jobs(updated_at DESC, job_id DESC);
 
                 CREATE TABLE IF NOT EXISTS image_job_units (
                     unit_id TEXT PRIMARY KEY,
@@ -2338,29 +2366,46 @@ def _filter_option_values_from_mapping(
     return values
 
 
+def _add_gallery_filter_option_deltas(
+    deltas: dict[tuple[str, str], int],
+    mapping: dict[str, Any] | sqlite3.Row,
+    delta: int,
+) -> None:
+    for key in _filter_option_values_from_mapping(mapping):
+        deltas[key] = deltas.get(key, 0) + delta
+
+
+def _apply_gallery_filter_option_deltas_on_conn(
+    conn: sqlite3.Connection,
+    deltas: dict[tuple[str, str], int],
+) -> None:
+    deltas = {key: delta for key, delta in deltas.items() if delta}
+    if not deltas:
+        return
+
+    now = utc_now()
+    conn.executemany(
+        """
+        INSERT INTO gallery_filter_options (kind, value, ref_count, updated_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(kind, value) DO UPDATE SET
+            ref_count = ref_count + excluded.ref_count,
+            updated_at = excluded.updated_at
+        """,
+        [(kind, value, delta, now) for (kind, value), delta in deltas.items()],
+    )
+    conn.execute("DELETE FROM gallery_filter_options WHERE ref_count <= 0")
+    _invalidate_filter_options_cache()
+
+
 def _increment_gallery_filter_options_on_conn(
     conn: sqlite3.Connection,
     mapping: dict[str, Any] | sqlite3.Row,
     delta: int,
 ):
-    values = _filter_option_values_from_mapping(mapping)
-    if not values:
-        return
-
-    now = utc_now()
-    for kind, value in values:
-        conn.execute(
-            """
-            INSERT INTO gallery_filter_options (kind, value, ref_count, updated_at)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(kind, value) DO UPDATE SET
-                ref_count = ref_count + excluded.ref_count,
-                updated_at = excluded.updated_at
-            """,
-            (kind, value, delta, now),
-        )
-    conn.execute("DELETE FROM gallery_filter_options WHERE ref_count <= 0")
-    _invalidate_filter_options_cache()
+    deltas: dict[tuple[str, str], int] = {}
+    _add_gallery_filter_option_deltas(deltas, mapping, delta)
+    _apply_gallery_filter_option_deltas_on_conn(conn, deltas)
 
 
 def _rebuild_gallery_filter_options_on_conn(conn: sqlite3.Connection):
@@ -2402,17 +2447,17 @@ def _insert_gallery_entries_on_conn(
 
     incoming_ids = [entry["id"] for entry in normalized_entries]
     existing_by_id: dict[str, sqlite3.Row] = {}
-    if incoming_ids:
-        placeholders = ", ".join("?" for _ in incoming_ids)
+    for chunk in _iter_sqlite_in_chunks(incoming_ids):
+        placeholders = ", ".join("?" for _ in chunk)
         existing_rows = conn.execute(
             f"""
             SELECT id, model, api_preset_name, size
             FROM gallery_entries
             WHERE id IN ({placeholders})
             """,
-            tuple(incoming_ids),
+            tuple(chunk),
         ).fetchall()
-        existing_by_id = {row["id"]: row for row in existing_rows}
+        existing_by_id.update({row["id"]: row for row in existing_rows})
 
     row = conn.execute(
         "SELECT COALESCE(MAX(sort_seq), 0) FROM gallery_entries"
@@ -2438,12 +2483,14 @@ def _insert_gallery_entries_on_conn(
         """,
         [_gallery_row_values(entry) for entry in normalized_entries],
     )
+    filter_option_deltas: dict[tuple[str, str], int] = {}
     for entry in normalized_entries:
         existing = existing_by_id.get(entry["id"])
         if existing is not None:
-            _increment_gallery_filter_options_on_conn(conn, existing, -1)
-        _increment_gallery_filter_options_on_conn(conn, entry, 1)
+            _add_gallery_filter_option_deltas(filter_option_deltas, existing, -1)
+        _add_gallery_filter_option_deltas(filter_option_deltas, entry, 1)
         _enqueue_thumbnail_job_on_conn(conn, str(entry.get("filename") or ""))
+    _apply_gallery_filter_option_deltas_on_conn(conn, filter_option_deltas)
     _invalidate_gallery_query_caches()
 
 
@@ -2910,25 +2957,31 @@ def _dedupe_import_entries_on_conn(
 ):
     used_filenames: set[str] = set()
     used_ids: set[str] = set()
-    conflicts_possible = conn.execute(
-        "SELECT COUNT(*) FROM gallery_entries LIMIT 1"
-    ).fetchone()[0] > 0
+    conflicts_possible = (
+        conn.execute("SELECT 1 FROM gallery_entries LIMIT 1").fetchone() is not None
+    )
 
     if conflicts_possible:
-        incoming_filenames = {str(e["filename"]) for e in entries}
-        incoming_ids = {str(e["id"]) for e in entries}
-        placeholders_fn = ", ".join("?" for _ in incoming_filenames)
-        rows = conn.execute(
-            f"SELECT DISTINCT filename FROM gallery_entries WHERE filename IN ({placeholders_fn})",
-            tuple(incoming_filenames),
-        ).fetchall()
-        used_filenames = {row["filename"] for row in rows if row["filename"]}
-        placeholders_id = ", ".join("?" for _ in incoming_ids)
-        rows = conn.execute(
-            f"SELECT id FROM gallery_entries WHERE id IN ({placeholders_id})",
-            tuple(incoming_ids),
-        ).fetchall()
-        used_ids = {row["id"] for row in rows if row["id"]}
+        incoming_filenames = [str(e["filename"]) for e in entries]
+        incoming_ids = [str(e["id"]) for e in entries]
+        for chunk in _iter_sqlite_in_chunks(incoming_filenames):
+            placeholders_fn = ", ".join("?" for _ in chunk)
+            rows = conn.execute(
+                f"""
+                SELECT DISTINCT filename
+                FROM gallery_entries
+                WHERE filename IN ({placeholders_fn})
+                """,
+                tuple(chunk),
+            ).fetchall()
+            used_filenames.update(row["filename"] for row in rows if row["filename"])
+        for chunk in _iter_sqlite_in_chunks(incoming_ids):
+            placeholders_id = ", ".join("?" for _ in chunk)
+            rows = conn.execute(
+                f"SELECT id FROM gallery_entries WHERE id IN ({placeholders_id})",
+                tuple(chunk),
+            ).fetchall()
+            used_ids.update(row["id"] for row in rows if row["id"])
 
     seen_filenames: set[str] = set()
     seen_ids: set[str] = set()
@@ -3490,6 +3543,41 @@ def _get_gallery_rows_on_conn(
     return conn.execute(sql, query_params).fetchall()
 
 
+def _get_gallery_row_batch_after_cursor_on_conn(
+    conn: sqlite3.Connection,
+    where_sql: str,
+    params: Sequence[Any],
+    *,
+    last_sort_seq: int | None,
+    last_id: str | None,
+    limit: int,
+    columns: Sequence[str] = GALLERY_COLUMNS,
+) -> list[sqlite3.Row]:
+    if last_sort_seq is None or last_id is None:
+        sql = f"""
+            SELECT {", ".join(columns)}
+            FROM gallery_entries
+            {where_sql}
+            ORDER BY sort_seq DESC, id DESC
+            LIMIT ?
+        """
+        query_params = list(params) + [limit]
+    else:
+        combined_where = _combine_gallery_where(
+            where_sql,
+            "(sort_seq < ? OR (sort_seq = ? AND id < ?))",
+        )
+        sql = f"""
+            SELECT {", ".join(columns)}
+            FROM gallery_entries
+            {combined_where}
+            ORDER BY sort_seq DESC, id DESC
+            LIMIT ?
+        """
+        query_params = list(params) + [last_sort_seq, last_sort_seq, last_id, limit]
+    return conn.execute(sql, query_params).fetchall()
+
+
 def get_gallery(
     limit: int | None = None,
     offset: int | None = None,
@@ -3523,34 +3611,14 @@ def iter_gallery_export_rows(
     last_id: str | None = None
     while True:
         with _connect() as conn:
-            if last_sort_seq is None or last_id is None:
-                sql = f"""
-                    SELECT {", ".join(GALLERY_COLUMNS)}
-                    FROM gallery_entries
-                    {where_sql}
-                    ORDER BY sort_seq DESC, id DESC
-                    LIMIT ?
-                """
-                query_params = list(params) + [batch_size]
-            else:
-                combined_where = _combine_gallery_where(
-                    where_sql,
-                    "(sort_seq < ? OR (sort_seq = ? AND id < ?))",
-                )
-                sql = f"""
-                    SELECT {", ".join(GALLERY_COLUMNS)}
-                    FROM gallery_entries
-                    {combined_where}
-                    ORDER BY sort_seq DESC, id DESC
-                    LIMIT ?
-                """
-                query_params = list(params) + [
-                    last_sort_seq,
-                    last_sort_seq,
-                    last_id,
-                    batch_size,
-                ]
-            rows = conn.execute(sql, query_params).fetchall()
+            rows = _get_gallery_row_batch_after_cursor_on_conn(
+                conn,
+                where_sql,
+                params,
+                last_sort_seq=last_sort_seq,
+                last_id=last_id,
+                limit=batch_size,
+            )
         if not rows:
             return
         for row in rows:
@@ -3832,9 +3900,23 @@ def get_gallery_page(
     with _connect() as conn:
         where_sql, params = _build_gallery_filter_where(filters)
 
+        effective_page = requested_page
+        total = 0
+        total_pages = 1
+
+        if decoded_cursor is None and include_counts:
+            count_started_at = time.perf_counter()
+            total = _get_gallery_count_on_conn(conn, where_sql, params)
+            timings_ms["count_ms"] = round(
+                (time.perf_counter() - count_started_at) * 1000,
+                2,
+            )
+            total_pages = max((total + page_size - 1) // page_size, 1)
+            effective_page = min(requested_page, total_pages)
+
         rows_started_at = time.perf_counter()
         if decoded_cursor is None:
-            offset = (requested_page - 1) * page_size
+            offset = (effective_page - 1) * page_size
             rows = _get_gallery_rows_on_conn(
                 conn,
                 where_sql,
@@ -3846,7 +3928,9 @@ def get_gallery_page(
             has_next = len(rows) > page_size
             if has_next:
                 rows = rows[:page_size]
-            has_prev = requested_page > 1
+            if include_counts:
+                has_next = effective_page < total_pages
+            has_prev = effective_page > 1
         else:
             cursor_sort_seq, cursor_id = decoded_cursor
             if normalized_direction == "prev":
@@ -3910,14 +3994,13 @@ def get_gallery_page(
                 )
         timings_ms["rows_ms"] = round((time.perf_counter() - rows_started_at) * 1000, 2)
 
-        if include_counts:
+        if include_counts and decoded_cursor is not None:
             count_started_at = time.perf_counter()
             total = _get_gallery_count_on_conn(conn, where_sql, params)
             timings_ms["count_ms"] = round((time.perf_counter() - count_started_at) * 1000, 2)
             total_pages = max((total + page_size - 1) // page_size, 1)
             effective_page = min(requested_page, total_pages)
-        else:
-            total = 0
+        elif not include_counts:
             total_pages = max(requested_page + (1 if has_next else 0), 1)
             effective_page = requested_page
         prev_cursor = _gallery_cursor_from_row(rows[0]) if rows and has_prev else None
@@ -3979,26 +4062,28 @@ def get_gallery_entries_by_ids(image_ids: Sequence[str]) -> list[GalleryEntry]:
     Duplicate or missing ids are dropped.
     """
     _ensure_database()
-    unique_ids = [image_id for image_id in dict.fromkeys(image_ids) if image_id]
+    unique_ids = _unique_sqlite_values(image_ids)
     if not unique_ids:
         return []
 
-    placeholders = ", ".join("?" for _ in unique_ids)
+    rows_by_id: dict[str, sqlite3.Row] = {}
     with _connect() as conn:
-        rows = conn.execute(
-            f"""
-            SELECT {", ".join(GALLERY_COLUMNS)}
-            FROM gallery_entries
-            WHERE id IN ({placeholders})
-            """,
-            tuple(unique_ids),
-        ).fetchall()
+        for chunk in _iter_sqlite_in_chunks(unique_ids):
+            placeholders = ", ".join("?" for _ in chunk)
+            rows = conn.execute(
+                f"""
+                SELECT {", ".join(GALLERY_COLUMNS)}
+                FROM gallery_entries
+                WHERE id IN ({placeholders})
+                """,
+                tuple(chunk),
+            ).fetchall()
+            rows_by_id.update({row["id"]: row for row in rows})
 
-    by_id = {row["id"]: row for row in rows}
     return [
-        GalleryEntry(**_gallery_entry_from_row(by_id[image_id]))
+        GalleryEntry(**_gallery_entry_from_row(rows_by_id[image_id]))
         for image_id in unique_ids
-        if image_id in by_id
+        if image_id in rows_by_id
     ]
 
 
@@ -4104,26 +4189,81 @@ def update_gallery_entry(image_id: str, updates: dict[str, Any]) -> GalleryEntry
 
 def update_gallery_entries_favorite(image_ids: list[str], favorite: bool) -> int:
     _ensure_database()
-    if not image_ids:
+    unique_ids = _unique_sqlite_values(image_ids)
+    if not unique_ids:
         return 0
 
-    placeholders = ", ".join("?" for _ in image_ids)
     with _connect() as conn:
         with _transaction(conn):
-            rows = conn.execute(
-                f"SELECT id FROM gallery_entries WHERE id IN ({placeholders})",
-                tuple(image_ids),
-            ).fetchall()
-            found_ids = {row["id"] for row in rows}
+            found_ids: list[str] = []
+            for chunk in _iter_sqlite_in_chunks(unique_ids):
+                select_placeholders = ", ".join("?" for _ in chunk)
+                rows = conn.execute(
+                    f"SELECT id FROM gallery_entries WHERE id IN ({select_placeholders})",
+                    tuple(chunk),
+                ).fetchall()
+                found_ids.extend(str(row["id"]) for row in rows if row["id"])
+
             if not found_ids:
                 return 0
-            update_placeholders = ", ".join("?" for _ in found_ids)
-            conn.execute(
-                f"UPDATE gallery_entries SET favorite = ? WHERE id IN ({update_placeholders})",
-                (_normalize_gallery_favorite(favorite), *found_ids),
-            )
+
+            normalized_favorite = _normalize_gallery_favorite(favorite)
+            for chunk in _iter_sqlite_in_chunks(found_ids):
+                update_placeholders = ", ".join("?" for _ in chunk)
+                conn.execute(
+                    f"UPDATE gallery_entries SET favorite = ? WHERE id IN ({update_placeholders})",
+                    (normalized_favorite, *chunk),
+                )
             _invalidate_gallery_query_caches()
             return len(found_ids)
+
+
+def update_gallery_entries_favorite_by_filters(
+    filters: dict[str, Any] | None,
+    favorite: bool,
+    *,
+    batch_size: int = 500,
+) -> int:
+    _ensure_database()
+    normalized_favorite = _normalize_gallery_favorite(favorite)
+    where_sql, params = _build_gallery_filter_where(filters)
+    total_updated = 0
+    last_sort_seq: int | None = None
+    last_id: str | None = None
+    normalized_batch_size = max(1, int(batch_size or 1))
+
+    with _connect() as conn:
+        with _transaction(conn):
+            while True:
+                rows = _get_gallery_row_batch_after_cursor_on_conn(
+                    conn,
+                    where_sql,
+                    params,
+                    last_sort_seq=last_sort_seq,
+                    last_id=last_id,
+                    limit=normalized_batch_size,
+                    columns=("id", "sort_seq"),
+                )
+                if not rows:
+                    break
+
+                ids = [str(row["id"]) for row in rows if row["id"]]
+                conn.executemany(
+                    "UPDATE gallery_entries SET favorite = ? WHERE id = ?",
+                    [(normalized_favorite, image_id) for image_id in ids],
+                )
+                total_updated += len(ids)
+
+                if len(rows) < normalized_batch_size:
+                    break
+                last_row = rows[-1]
+                last_sort_seq = int(last_row["sort_seq"] or 0)
+                last_id = str(last_row["id"])
+
+            if total_updated:
+                _invalidate_gallery_query_caches()
+
+    return total_updated
 
 
 def upsert_generate_job(job: dict[str, Any]) -> dict[str, Any]:
@@ -4188,16 +4328,30 @@ def get_generate_jobs_updated_at_edges(
     _ensure_database()
     params: list[Any] = []
     where: list[str] = []
-    if statuses:
-        placeholders = ", ".join("?" for _ in statuses)
+    unique_statuses = _unique_sqlite_values(statuses or []) if statuses else []
+    if unique_statuses:
+        placeholders = ", ".join("?" for _ in unique_statuses)
         where.append(f"status IN ({placeholders})")
-        params.extend(sorted(statuses))
+        params.extend(unique_statuses)
+
     if job_ids is not None:
-        if not job_ids:
+        unique_job_ids = _unique_sqlite_values(job_ids)
+        if not unique_job_ids:
             return {}
-        placeholders = ", ".join("?" for _ in job_ids)
-        where.append(f"job_id IN ({placeholders})")
-        params.extend(sorted(job_ids))
+        rows_by_job_id: dict[str, str] = {}
+        base_sql = "SELECT job_id, updated_at FROM generate_jobs"
+        if where:
+            base_sql += " WHERE " + " AND ".join(where)
+        with _connect() as conn:
+            for chunk in _iter_sqlite_in_chunks(unique_job_ids):
+                placeholders = ", ".join("?" for _ in chunk)
+                sql = f"{base_sql}{' AND' if where else ' WHERE'} job_id IN ({placeholders})"
+                rows = conn.execute(sql, [*params, *chunk]).fetchall()
+                rows_by_job_id.update(
+                    {str(row["job_id"]): str(row["updated_at"]) for row in rows}
+                )
+        return rows_by_job_id
+
     sql = "SELECT job_id, updated_at FROM generate_jobs"
     if where:
         sql += " WHERE " + " AND ".join(where)
@@ -4236,19 +4390,23 @@ def get_gallery_job(kind: str, job_id: str) -> dict[str, Any] | None:
 
 def get_gallery_jobs_updated_at_edges(kind: str, job_ids: set[str]) -> dict[str, str]:
     _ensure_database()
-    if not job_ids:
+    unique_job_ids = _unique_sqlite_values(job_ids)
+    if not unique_job_ids:
         return {}
-    placeholders = ", ".join("?" for _ in job_ids)
+    rows_by_job_id: dict[str, str] = {}
     with _connect() as conn:
-        rows = conn.execute(
-            f"""
-            SELECT job_id, updated_at
-            FROM gallery_jobs
-            WHERE kind = ? AND job_id IN ({placeholders})
-            """,
-            (kind, *sorted(job_ids)),
-        ).fetchall()
-    return {str(row["job_id"]): str(row["updated_at"]) for row in rows}
+        for chunk in _iter_sqlite_in_chunks(unique_job_ids):
+            placeholders = ", ".join("?" for _ in chunk)
+            rows = conn.execute(
+                f"""
+                SELECT job_id, updated_at
+                FROM gallery_jobs
+                WHERE kind = ? AND job_id IN ({placeholders})
+                """,
+                (kind, *chunk),
+            ).fetchall()
+            rows_by_job_id.update({str(row["job_id"]): str(row["updated_at"]) for row in rows})
+    return rows_by_job_id
 
 
 def update_gallery_job(job_id: str, updates: dict[str, Any]) -> dict[str, Any] | None:
@@ -5023,46 +5181,48 @@ def get_runtime_coordination_metrics() -> dict[str, Any]:
     with _connect() as conn:
         with _transaction(conn):
             expired_sse_slots = _cleanup_expired_sse_slots_on_conn(conn, now)
-            active_sse_slots = _count_active_sse_slots_on_conn(conn, now=now)
 
-            heartbeat_rows = conn.execute(
-                """
-                SELECT worker_id, last_seen_at, active_units
-                FROM worker_heartbeats
-                """
-            ).fetchall()
-            heartbeat_ages = []
-            active_worker_count = 0
-            worker_active_units = 0
-            for row in heartbeat_rows:
-                seen_at = _coerce_iso_datetime(str(row["last_seen_at"] or ""))
-                if seen_at is None:
-                    continue
-                age_seconds = max(0.0, (now_dt - seen_at).total_seconds())
-                heartbeat_ages.append(age_seconds)
-                if age_seconds <= WORKER_METRIC_SNAPSHOT_TTL_SECONDS:
-                    active_worker_count += 1
-                    worker_active_units += max(0, int(row["active_units"] or 0))
+    with _connect() as conn:
+        active_sse_slots = _count_active_sse_slots_on_conn(conn, now=now)
 
-            lease_rows = conn.execute(
-                """
-                SELECT name, owner, lease_expires_at, updated_at, completed_at
-                FROM background_leases
-                ORDER BY name
-                """
-            ).fetchall()
-            active_leases = [
-                {
-                    "name": str(row["name"]),
-                    "owner": str(row["owner"]),
-                    "lease_expires_at": str(row["lease_expires_at"] or ""),
-                    "updated_at": str(row["updated_at"] or ""),
-                    "completed_at": str(row["completed_at"] or "") or None,
-                }
-                for row in lease_rows
-                if str(row["lease_expires_at"] or "") > now
-            ]
-            worker_snapshots = _worker_metric_snapshots_on_conn(conn, now_dt)
+        heartbeat_rows = conn.execute(
+            """
+            SELECT worker_id, last_seen_at, active_units
+            FROM worker_heartbeats
+            """
+        ).fetchall()
+        heartbeat_ages = []
+        active_worker_count = 0
+        worker_active_units = 0
+        for row in heartbeat_rows:
+            seen_at = _coerce_iso_datetime(str(row["last_seen_at"] or ""))
+            if seen_at is None:
+                continue
+            age_seconds = max(0.0, (now_dt - seen_at).total_seconds())
+            heartbeat_ages.append(age_seconds)
+            if age_seconds <= WORKER_METRIC_SNAPSHOT_TTL_SECONDS:
+                active_worker_count += 1
+                worker_active_units += max(0, int(row["active_units"] or 0))
+
+        lease_rows = conn.execute(
+            """
+            SELECT name, owner, lease_expires_at, updated_at, completed_at
+            FROM background_leases
+            ORDER BY name
+            """
+        ).fetchall()
+        active_leases = [
+            {
+                "name": str(row["name"]),
+                "owner": str(row["owner"]),
+                "lease_expires_at": str(row["lease_expires_at"] or ""),
+                "updated_at": str(row["updated_at"] or ""),
+                "completed_at": str(row["completed_at"] or "") or None,
+            }
+            for row in lease_rows
+            if str(row["lease_expires_at"] or "") > now
+        ]
+        worker_snapshots = _worker_metric_snapshots_on_conn(conn, now_dt)
 
     return {
         "gauges": {
@@ -5533,33 +5693,87 @@ def aggregate_image_job_units(parent_job_id: str) -> dict[str, Any]:
     }
 
 
+def _get_generate_job_rows_on_conn(
+    conn: sqlite3.Connection,
+    *,
+    statuses: set[str] | None = None,
+    limit: int | None = None,
+    before_updated_at: str | None = None,
+    before_job_id: str | None = None,
+) -> list[sqlite3.Row]:
+    params: list[Any] = []
+    where: list[str] = []
+    if statuses:
+        placeholders = ", ".join("?" for _ in statuses)
+        where.append(f"status IN ({placeholders})")
+        params.extend(sorted(statuses))
+    normalized_before_updated_at = str(before_updated_at or "").strip()
+    normalized_before_job_id = str(before_job_id or "").strip()
+    if normalized_before_updated_at and normalized_before_job_id:
+        where.append("(updated_at < ? OR (updated_at = ? AND job_id < ?))")
+        params.extend(
+            [
+                normalized_before_updated_at,
+                normalized_before_updated_at,
+                normalized_before_job_id,
+            ]
+        )
+
+    sql = f"""
+        SELECT {", ".join(GENERATE_JOB_COLUMNS)}
+        FROM generate_jobs
+    """
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY updated_at DESC, job_id DESC"
+    if limit is not None:
+        sql += " LIMIT ?"
+        params.append(limit)
+    return conn.execute(sql, params).fetchall()
+
+
 def list_generate_jobs(
     statuses: set[str] | None = None,
     limit: int | None = None,
     offset: int = 0,
+    before_updated_at: str | None = None,
+    before_job_id: str | None = None,
 ) -> list[dict[str, Any]]:
     _ensure_database()
+    normalized_offset = max(0, int(offset or 0))
+    seek_updated_at = str(before_updated_at or "").strip() or None
+    seek_job_id = str(before_job_id or "").strip() or None
+    if bool(seek_updated_at) != bool(seek_job_id):
+        seek_updated_at = None
+        seek_job_id = None
+
     with _connect() as conn:
-        params: list[Any] = []
-        sql = f"""
-            SELECT {", ".join(GENERATE_JOB_COLUMNS)}
-            FROM generate_jobs
-        """
-        if statuses:
-            placeholders = ", ".join("?" for _ in statuses)
-            sql += f" WHERE status IN ({placeholders})"
-            params.extend(sorted(statuses))
-        sql += " ORDER BY updated_at DESC, created_at DESC"
-        if limit is not None:
-            sql += " LIMIT ?"
-            params.append(limit)
-            if offset > 0:
-                sql += " OFFSET ?"
-                params.append(offset)
-        elif offset > 0:
-            sql += " LIMIT -1 OFFSET ?"
-            params.append(offset)
-        rows = conn.execute(sql, params).fetchall()
+        remaining_offset = normalized_offset
+        while remaining_offset > 0:
+            skip_limit = min(remaining_offset, 500)
+            skipped_rows = _get_generate_job_rows_on_conn(
+                conn,
+                statuses=statuses,
+                limit=skip_limit,
+                before_updated_at=seek_updated_at,
+                before_job_id=seek_job_id,
+            )
+            if not skipped_rows:
+                return []
+            remaining_offset -= len(skipped_rows)
+            last_skipped = skipped_rows[-1]
+            seek_updated_at = str(last_skipped["updated_at"] or "")
+            seek_job_id = str(last_skipped["job_id"] or "")
+            if len(skipped_rows) < skip_limit:
+                return []
+
+        rows = _get_generate_job_rows_on_conn(
+            conn,
+            statuses=statuses,
+            limit=limit,
+            before_updated_at=seek_updated_at,
+            before_job_id=seek_job_id,
+        )
     return [_generate_job_from_row(row) for row in rows]
 
 
@@ -5682,6 +5896,7 @@ def sync_gallery_with_image_files() -> int:
         with _connect() as conn:
             with _transaction(conn):
                 last_id = ""
+                filter_option_deltas: dict[tuple[str, str], int] = {}
                 while True:
                     rows = conn.execute(
                         """
@@ -5711,10 +5926,18 @@ def sync_gallery_with_image_files() -> int:
                     )
                     for row in rows:
                         if row["id"] in stale_ids:
-                            _increment_gallery_filter_options_on_conn(conn, row, -1)
+                            _add_gallery_filter_option_deltas(
+                                filter_option_deltas,
+                                row,
+                                -1,
+                            )
                     removed_count += len(stale_ids)
 
                 if removed_count:
+                    _apply_gallery_filter_option_deltas_on_conn(
+                        conn,
+                        filter_option_deltas,
+                    )
                     _invalidate_gallery_query_caches()
                     _clear_verified_thumbnails()
                 return removed_count
@@ -5728,50 +5951,128 @@ def _delete_gallery_entries_by_ids(
 
     File deletion is NOT performed here — caller handles it after commit.
     """
-    unique_ids = [image_id for image_id in dict.fromkeys(image_ids) if image_id]
+    unique_ids = _unique_sqlite_values(image_ids)
     if not unique_ids:
         return [], set()
 
-    placeholders = ", ".join("?" for _ in unique_ids)
-    rows = conn.execute(
-        f"""
-        SELECT id, filename, model, api_preset_name, size
-        FROM gallery_entries
-        WHERE id IN ({placeholders})
-        """,
-        tuple(unique_ids),
-    ).fetchall()
+    rows: list[sqlite3.Row] = []
+    for chunk in _iter_sqlite_in_chunks(unique_ids):
+        placeholders = ", ".join("?" for _ in chunk)
+        rows.extend(
+            conn.execute(
+                f"""
+                SELECT id, filename, model, api_preset_name, size
+                FROM gallery_entries
+                WHERE id IN ({placeholders})
+                """,
+                tuple(chunk),
+            ).fetchall()
+        )
     if not rows:
         return [], set()
 
     removed_ids = [row["id"] for row in rows]
     removed_filenames = {row["filename"] for row in rows if row["filename"]}
-    delete_placeholders = ", ".join("?" for _ in removed_ids)
-    conn.execute(
-        f"DELETE FROM gallery_entries WHERE id IN ({delete_placeholders})",
-        tuple(removed_ids),
-    )
+    for chunk in _iter_sqlite_in_chunks(removed_ids):
+        delete_placeholders = ", ".join("?" for _ in chunk)
+        conn.execute(
+            f"DELETE FROM gallery_entries WHERE id IN ({delete_placeholders})",
+            tuple(chunk),
+        )
+    filter_option_deltas: dict[tuple[str, str], int] = {}
     for row in rows:
-        _increment_gallery_filter_options_on_conn(conn, row, -1)
+        _add_gallery_filter_option_deltas(filter_option_deltas, row, -1)
+    _apply_gallery_filter_option_deltas_on_conn(conn, filter_option_deltas)
     _invalidate_gallery_query_caches()
 
     remaining_filenames: set[str] = set()
     if removed_filenames:
-        filename_placeholders = ", ".join("?" for _ in removed_filenames)
-        remaining_rows = conn.execute(
-            f"""
-            SELECT DISTINCT filename
-            FROM gallery_entries
-            WHERE filename IN ({filename_placeholders})
-            """,
-            tuple(removed_filenames),
-        ).fetchall()
-        remaining_filenames = {
-            row["filename"] for row in remaining_rows if row["filename"]
-        }
+        for chunk in _iter_sqlite_in_chunks(removed_filenames):
+            filename_placeholders = ", ".join("?" for _ in chunk)
+            remaining_rows = conn.execute(
+                f"""
+                SELECT DISTINCT filename
+                FROM gallery_entries
+                WHERE filename IN ({filename_placeholders})
+                """,
+                tuple(chunk),
+            ).fetchall()
+            remaining_filenames.update(
+                row["filename"] for row in remaining_rows if row["filename"]
+            )
 
     filenames_to_delete = removed_filenames - remaining_filenames
     return removed_ids, filenames_to_delete
+
+
+def _delete_gallery_entries_by_filters(
+    conn: sqlite3.Connection,
+    filters: dict[str, Any] | None,
+    *,
+    batch_size: int = 500,
+) -> tuple[int, set[str]]:
+    where_sql, params = _build_gallery_filter_where(filters)
+    normalized_batch_size = max(1, int(batch_size or 1))
+    last_sort_seq: int | None = None
+    last_id: str | None = None
+    removed_count = 0
+    removed_filenames: set[str] = set()
+    filter_option_deltas: dict[tuple[str, str], int] = {}
+
+    while True:
+        rows = _get_gallery_row_batch_after_cursor_on_conn(
+            conn,
+            where_sql,
+            params,
+            last_sort_seq=last_sort_seq,
+            last_id=last_id,
+            limit=normalized_batch_size,
+            columns=("id", "filename", "model", "api_preset_name", "size", "sort_seq"),
+        )
+        if not rows:
+            break
+
+        ids = [str(row["id"]) for row in rows if row["id"]]
+        removed_filenames.update(str(row["filename"]) for row in rows if row["filename"])
+        for chunk in _iter_sqlite_in_chunks(ids):
+            placeholders = ", ".join("?" for _ in chunk)
+            conn.execute(
+                f"DELETE FROM gallery_entries WHERE id IN ({placeholders})",
+                tuple(chunk),
+            )
+        for row in rows:
+            _add_gallery_filter_option_deltas(filter_option_deltas, row, -1)
+        removed_count += len(ids)
+
+        if len(rows) < normalized_batch_size:
+            break
+        last_row = rows[-1]
+        last_sort_seq = int(last_row["sort_seq"] or 0)
+        last_id = str(last_row["id"])
+
+    if not removed_count:
+        return 0, set()
+
+    _apply_gallery_filter_option_deltas_on_conn(conn, filter_option_deltas)
+    _invalidate_gallery_query_caches()
+
+    remaining_filenames: set[str] = set()
+    if removed_filenames:
+        for chunk in _iter_sqlite_in_chunks(removed_filenames):
+            filename_placeholders = ", ".join("?" for _ in chunk)
+            remaining_rows = conn.execute(
+                f"""
+                SELECT DISTINCT filename
+                FROM gallery_entries
+                WHERE filename IN ({filename_placeholders})
+                """,
+                tuple(chunk),
+            ).fetchall()
+            remaining_filenames.update(
+                row["filename"] for row in remaining_rows if row["filename"]
+            )
+
+    return removed_count, removed_filenames - remaining_filenames
 
 
 def delete_gallery_image(image_id: str) -> tuple[bool, int]:
@@ -5779,18 +6080,9 @@ def delete_gallery_image(image_id: str) -> tuple[bool, int]:
     return deleted_entries > 0, deleted_files
 
 
-def delete_gallery_images(image_ids: Sequence[str]) -> tuple[int, int]:
-    _ensure_database()
-    if not image_ids:
-        return 0, 0
-
-    with _storage_lock:
-        with _connect() as conn:
-            with _transaction(conn):
-                removed_ids, filenames_to_delete = _delete_gallery_entries_by_ids(conn, image_ids)
-
+def _delete_gallery_files_after_commit(filenames: Iterable[str]) -> int:
     deleted_count = 0
-    for filename in filenames_to_delete:
+    for filename in filenames:
         try:
             if _delete_image_unlocked(filename):
                 deleted_count += 1
@@ -5805,8 +6097,40 @@ def delete_gallery_images(image_ids: Sequence[str]) -> tuple[int, int]:
         thumbnail_filename = _thumbnail_filename_for_image(filename)
         if thumbnail_filename:
             _remove_verified_thumbnail(thumbnail_filename)
+    return deleted_count
 
+
+def delete_gallery_images(image_ids: Sequence[str]) -> tuple[int, int]:
+    _ensure_database()
+    if not image_ids:
+        return 0, 0
+
+    with _storage_lock:
+        with _connect() as conn:
+            with _transaction(conn):
+                removed_ids, filenames_to_delete = _delete_gallery_entries_by_ids(conn, image_ids)
+
+    deleted_count = _delete_gallery_files_after_commit(filenames_to_delete)
     return len(removed_ids), deleted_count
+
+
+def delete_gallery_images_by_filters(
+    filters: dict[str, Any] | None,
+    *,
+    batch_size: int = 500,
+) -> tuple[int, int]:
+    _ensure_database()
+    with _storage_lock:
+        with _connect() as conn:
+            with _transaction(conn):
+                removed_count, filenames_to_delete = _delete_gallery_entries_by_filters(
+                    conn,
+                    filters,
+                    batch_size=batch_size,
+                )
+
+    deleted_count = _delete_gallery_files_after_commit(filenames_to_delete)
+    return removed_count, deleted_count
 
 
 def _is_gallery_filename_referenced_on_conn(

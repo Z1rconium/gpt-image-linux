@@ -22,6 +22,7 @@ from ..gallery_archive import (
     import_archive_max_bytes,
     iter_gallery_zip_chunks,
     iter_import_gallery_entries,
+    prepare_gallery_zip_chunks,
     stream_upload_to_tempfile,
     write_gallery_zip_file,
 )
@@ -230,22 +231,31 @@ def normalize_gallery_date_filter(value: str | None, end_of_day: bool = False) -
 
     if len(raw_value) == 10:
         try:
-            datetime.strptime(raw_value, "%Y-%m-%d")
+            parsed_date = datetime.strptime(raw_value, "%Y-%m-%d")
         except ValueError as e:
             raise HTTPException(
                 status_code=422,
                 detail="Gallery date filters must use YYYY-MM-DD or ISO datetime",
             ) from e
-        return f"{raw_value}T{'23:59:59.999999' if end_of_day else '00:00:00'}"
+        parsed = parsed_date.replace(
+            hour=23 if end_of_day else 0,
+            minute=59 if end_of_day else 0,
+            second=59 if end_of_day else 0,
+            microsecond=999999 if end_of_day else 0,
+            tzinfo=timezone.utc,
+        )
+        return parsed.isoformat()
 
     try:
-        datetime.fromisoformat(raw_value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(raw_value.replace("Z", "+00:00"))
     except ValueError as e:
         raise HTTPException(
             status_code=422,
             detail="Gallery date filters must use YYYY-MM-DD or ISO datetime",
         ) from e
-    return raw_value
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).isoformat()
 
 
 def build_gallery_filters(
@@ -373,6 +383,7 @@ async def _gallery_zip_response(
     reserve_export_slot: bool = False,
     direct_export_job: dict | None = None,
     requested_count: int = 0,
+    prepare_before_response: bool = False,
 ) -> StreamingResponse:
     cleanup_direct_job = False
     if direct_export_job:
@@ -429,7 +440,9 @@ async def _gallery_zip_response(
         lambda updates: storage.update_gallery_job_progress(direct_job_id, updates)
     ) if direct_job_id else None
 
-    def zip_chunks():
+    prepared_chunks = None
+    prepared_result: GalleryZipFileResult | None = None
+    if prepare_before_response:
         try:
             if direct_job_id:
                 mark_direct_job(
@@ -446,12 +459,59 @@ async def _gallery_zip_response(
                         "error": None,
                     }
                 )
-            result = yield from iter_gallery_zip_chunks(
+            prepared_chunks, prepared_result = prepare_gallery_zip_chunks(
                 entries,
                 skipped=skipped,
                 requested_count=requested_count,
                 progress=progress if direct_job_id else None,
             )
+            headers.setdefault("X-Gallery-Requested-Count", str(prepared_result.requested_count))
+            headers.setdefault("X-Gallery-Exported-Count", str(prepared_result.exported_count))
+            headers.setdefault("X-Gallery-Missing-Count", str(prepared_result.missing_count))
+        except Exception as e:
+            if direct_job_id and not cleanup_direct_job:
+                mark_direct_job(
+                    {
+                        "status": "error",
+                        "stage": "error",
+                        "message": "Failed to prepare ZIP archive",
+                        "error": str(e),
+                        "completed_at": utc_now(),
+                        "lease_owner": None,
+                        "lease_expires_at": None,
+                    }
+                )
+            if cleanup_direct_job and direct_job_id:
+                _release_gallery_export_direct_slot(direct_job_id)
+            raise
+
+    def zip_chunks():
+        try:
+            if direct_job_id and prepared_result is None:
+                mark_direct_job(
+                    {
+                        "status": "running",
+                        "stage": "preparing",
+                        "message": "Preparing gallery ZIP entries",
+                        "progress": 0,
+                        "filename": filename,
+                        "download_url": f"/api/download-all?export_job_id={quote(direct_job_id)}",
+                        "requested_count": requested_count,
+                        "started_at": utc_now(),
+                        "lease_expires_at": _direct_export_slot_expires_at(),
+                        "error": None,
+                    }
+                )
+            if prepared_result is not None and prepared_chunks is not None:
+                yield from prepared_chunks
+                result = prepared_result
+            else:
+                result = yield from iter_gallery_zip_chunks(
+                    entries,
+                    skipped=skipped,
+                    requested_count=requested_count,
+                    progress=progress if direct_job_id else None,
+                )
             if direct_job_id:
                 mark_direct_job(
                     {
@@ -1877,8 +1937,17 @@ async def create_gallery_batch_selection_token(req: GallerySelectionTokenRequest
 
 @router.post("/api/gallery/batch/delete", response_model=GalleryBatchResponse)
 async def delete_gallery_batch(req: GalleryBatchRequest):
-    ids, entries, requested_count, missing_ids = await _resolve_gallery_batch_ids(req)
-    deleted_entries, deleted_files = await asyncio.to_thread(storage.delete_gallery_images, ids)
+    if req.selection_token:
+        filters = await _gallery_filters_from_selection_token(req.selection_token)
+        deleted_entries, deleted_files = await asyncio.to_thread(
+            storage.delete_gallery_images_by_filters,
+            filters,
+        )
+        requested_count = deleted_entries
+        missing_ids: list[str] = []
+    else:
+        ids, entries, requested_count, missing_ids = await _resolve_gallery_batch_ids(req)
+        deleted_entries, deleted_files = await asyncio.to_thread(storage.delete_gallery_images, ids)
     if deleted_entries == 0:
         raise HTTPException(status_code=404, detail="Gallery entries not found")
     kick_gallery_file_gc()
@@ -1895,8 +1964,18 @@ async def delete_gallery_batch(req: GalleryBatchRequest):
 
 @router.patch("/api/gallery/batch/favorite", response_model=GalleryBatchResponse)
 async def update_gallery_batch_favorite(req: GalleryBatchFavoriteRequest):
-    ids, entries, requested_count, missing_ids = await _resolve_gallery_batch_ids(req)
-    updated_entries = await asyncio.to_thread(storage.update_gallery_entries_favorite, ids, req.favorite)
+    if req.selection_token:
+        filters = await _gallery_filters_from_selection_token(req.selection_token)
+        updated_entries = await asyncio.to_thread(
+            storage.update_gallery_entries_favorite_by_filters,
+            filters,
+            req.favorite,
+        )
+        requested_count = updated_entries
+        missing_ids: list[str] = []
+    else:
+        ids, entries, requested_count, missing_ids = await _resolve_gallery_batch_ids(req)
+        updated_entries = await asyncio.to_thread(storage.update_gallery_entries_favorite, ids, req.favorite)
     if updated_entries == 0:
         raise HTTPException(status_code=404, detail="Gallery entries not found")
     return GalleryBatchResponse(
@@ -1911,6 +1990,20 @@ async def update_gallery_batch_favorite(req: GalleryBatchFavoriteRequest):
 
 @router.post("/api/gallery/batch/download")
 async def download_gallery_batch(req: GalleryBatchRequest):
+    if req.selection_token:
+        filters = await _gallery_filters_from_selection_token(req.selection_token)
+        requested_count = await asyncio.to_thread(storage.get_gallery_count, filters)
+        if requested_count <= 0:
+            raise HTTPException(status_code=404, detail="Gallery entries not found")
+        return await _gallery_zip_response(
+            storage.iter_gallery_export_rows(filters),
+            "gpt-images-selected",
+            extra_headers={"X-Gallery-Requested-Count": str(requested_count)},
+            reserve_export_slot=True,
+            requested_count=requested_count,
+            prepare_before_response=True,
+        )
+
     ids, entries, requested_count, missing_ids = await _resolve_gallery_batch_ids(req)
     if not entries:
         raise HTTPException(status_code=404, detail="Gallery entries not found")

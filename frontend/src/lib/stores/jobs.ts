@@ -62,7 +62,7 @@ function createJobsStore() {
     const failedOnly = options.failedOnly ?? state.historyFailedOnly;
     const append = Boolean(options.append) && state.historyFailedOnly === failedOnly;
     const filterChanged = state.historyFailedOnly !== failedOnly;
-    const offset = append ? state.historyJobs.length : 0;
+    const cursorJob = append ? state.historyJobs[state.historyJobs.length - 1] : null;
     const seq = ++historyRequestSeq;
     update((current) => ({
       ...current,
@@ -73,9 +73,14 @@ function createJobsStore() {
     try {
       const params = new URLSearchParams({
         include_finished: 'true',
-        limit: String(HISTORY_PAGE_SIZE),
-        offset: String(offset)
+        limit: String(HISTORY_PAGE_SIZE)
       });
+      if (append && cursorJob?.updated_at && cursorJob.job_id) {
+        params.set('before_updated_at', cursorJob.updated_at);
+        params.set('before_job_id', cursorJob.job_id);
+      } else if (append) {
+        params.set('offset', String(state.historyJobs.length));
+      }
       if (failedOnly) params.set('failed_only', 'true');
       const historyJobs = await apiFetch<GenerateJobStatus[]>(`/api/generate/jobs?${params.toString()}`, {}, 'loading job history');
       if (seq !== historyRequestSeq) return;

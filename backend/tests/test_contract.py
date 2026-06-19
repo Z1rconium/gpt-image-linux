@@ -3697,6 +3697,26 @@ def test_gallery_cursor_pagination_and_invalid_cursor(client):
     assert invalid.status_code == 400
 
 
+def test_gallery_page_overflow_clamps_before_fetching_rows(client):
+    for index in range(3):
+        _fake_gallery_entry(
+            f"overflow-{index}",
+            f"overflow {index}",
+            "1024x1024",
+            f"overflow-{index}.png",
+        )
+
+    resp = client.get("/api/gallery?page=999&page_size=2")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["page"] == 2
+    assert data["total_pages"] == 2
+    assert data["has_prev"] is True
+    assert data["has_next"] is False
+    assert [image["id"] for image in data["images"]] == ["overflow-0"]
+
+
 def test_gallery_filter_options_are_materialized_and_incremental(client):
     first = _fake_gallery_entry("filter-1", "filter one", "1024x1024", "filter-1.png")
     second = _fake_gallery_entry("filter-2", "filter two", "1536x1024", "filter-2.png")
@@ -4366,6 +4386,59 @@ def test_gallery_prompt_search_uses_fts_and_short_like_fallback(client):
     assert [image["id"] for image in short_fallback.json()["images"]] == ["fts-1"]
 
 
+def test_gallery_date_filters_are_normalized_to_utc(client, monkeypatch):
+    monkeypatch.setattr(storage, "utc_now", lambda: "2025-12-31T23:30:00+00:00")
+    storage.add_to_gallery_sync(
+        image_id="date-1",
+        prompt="date one",
+        size="1024x1024",
+        filename="date-1.png",
+        metadata={"model": "gpt-image-2"},
+    )
+    monkeypatch.setattr(storage, "utc_now", lambda: "2026-01-01T01:30:00+00:00")
+    storage.add_to_gallery_sync(
+        image_id="date-2",
+        prompt="date two",
+        size="1024x1024",
+        filename="date-2.png",
+        metadata={"model": "gpt-image-2"},
+    )
+
+    resp = client.get("/api/gallery", params={"date_from": "2026-01-01T02:00:00+02:00"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert [image["id"] for image in data["images"]] == ["date-2"]
+
+    tz_resp = client.get("/api/gallery", params={"date_to": "2026-01-01T03:00:00+02:00"})
+    assert tz_resp.status_code == 200
+    assert [image["id"] for image in tz_resp.json()["images"]] == ["date-1"]
+
+
+def test_gallery_batch_operations_chunk_sqlite_in_clauses(client, monkeypatch):
+    monkeypatch.setattr(storage, "SQLITE_IN_CLAUSE_CHUNK_SIZE", 2)
+    for index in range(5):
+        _fake_gallery_entry(f"chunk-{index}", f"chunk {index}", "1024x1024", f"chunk-{index}.png")
+
+    fetched = storage.get_gallery_entries_by_ids(["chunk-3", "chunk-1", "chunk-3", "chunk-4", "missing"])
+    assert [entry.id for entry in fetched] == ["chunk-3", "chunk-1", "chunk-4"]
+
+    favorite = client.patch(
+        "/api/gallery/batch/favorite",
+        json={"ids": [f"chunk-{index}" for index in range(5)], "favorite": True},
+    )
+    assert favorite.status_code == 200
+    assert favorite.json()["count"] == 5
+    assert all(storage.get_gallery_entry(f"chunk-{index}").favorite for index in range(5))
+
+    deleted = client.post(
+        "/api/gallery/batch/delete",
+        json={"ids": [f"chunk-{index}" for index in range(5)]},
+    )
+    assert deleted.status_code == 200
+    assert deleted.json()["count"] == 5
+    assert storage.get_gallery_count() == 0
+
+
 def test_gallery_batch_delete_only_selected_entries(client):
     _fake_gallery_entry("batch-delete-1", "one", "1024x1024", "batch-delete-1.png")
     _fake_gallery_entry("batch-delete-2", "two", "1024x1024", "batch-delete-2.png")
@@ -4539,6 +4612,54 @@ def test_gallery_batch_selection_token_delete_only_filtered_entries(client):
     assert storage.get_gallery_entry("token-delete-1") is None
     assert storage.get_gallery_entry("token-delete-2") is not None
     assert storage.get_gallery_entry("token-delete-3") is None
+
+
+def test_gallery_batch_selection_token_avoids_full_id_materialization(client, monkeypatch):
+    _fake_gallery_entry("token-stream-1", "stream token match one", "1024x1024", "token-stream-1.png")
+    _fake_gallery_entry("token-stream-2", "outside stream", "1024x1024", "token-stream-2.png")
+    _fake_gallery_entry("token-stream-3", "stream token match three", "1024x1024", "token-stream-3.png")
+
+    token_resp = client.post(
+        "/api/gallery/batch/selection-tokens",
+        json={"filters": {"prompt": "stream token"}},
+    )
+    assert token_resp.status_code == 201
+    token = token_resp.json()["selection_token"]
+
+    def fail_materialized_ids(*args, **kwargs):
+        raise AssertionError("selection-token batch path should not materialize all ids")
+
+    monkeypatch.setattr(storage, "get_gallery_ids", fail_materialized_ids)
+    monkeypatch.setattr(storage, "get_gallery_entries_by_ids", fail_materialized_ids)
+
+    favorite = client.patch(
+        "/api/gallery/batch/favorite",
+        json={"selection_token": token, "favorite": True},
+    )
+    assert favorite.status_code == 200
+    assert favorite.json()["requested_count"] == 2
+    assert favorite.json()["updated_count"] == 2
+    assert storage.get_gallery_entry("token-stream-1").favorite is True
+    assert storage.get_gallery_entry("token-stream-2").favorite is False
+    assert storage.get_gallery_entry("token-stream-3").favorite is True
+
+    archive = client.post("/api/gallery/batch/download", json={"selection_token": token})
+    assert archive.status_code == 200
+    assert archive.headers["x-gallery-requested-count"] == "2"
+    assert archive.headers["x-gallery-exported-count"] == "2"
+    assert archive.headers["x-gallery-missing-count"] == "0"
+    with zipfile.ZipFile(io.BytesIO(archive.content)) as zf:
+        assert "images/token-stream-1.png" in zf.namelist()
+        assert "images/token-stream-2.png" not in zf.namelist()
+        assert "images/token-stream-3.png" in zf.namelist()
+
+    deleted = client.post("/api/gallery/batch/delete", json={"selection_token": token})
+    assert deleted.status_code == 200
+    assert deleted.json()["requested_count"] == 2
+    assert deleted.json()["updated_count"] == 2
+    assert storage.get_gallery_entry("token-stream-1") is None
+    assert storage.get_gallery_entry("token-stream-2") is not None
+    assert storage.get_gallery_entry("token-stream-3") is None
 
 
 def test_gallery_batch_operations_report_partial_missing(client):
@@ -5631,6 +5752,41 @@ def test_generate_jobs_history_supports_offset_pagination(client):
 
     assert resp.status_code == 200
     assert [job["job_id"] for job in resp.json()] == ["history-2", "history-1"]
+
+
+def test_generate_jobs_history_supports_seek_pagination(client):
+    for index in range(4):
+        storage.upsert_generate_job(
+            {
+                "job_id": f"seek-history-{index}",
+                "status": "success",
+                "operation": "generation",
+                "prompt": f"seek history prompt {index}",
+                "size": "1024x1024",
+                "created_at": f"2026-01-01T00:01:0{index}+00:00",
+                "updated_at": f"2026-01-01T00:01:0{index}+00:00",
+                "completed_at": f"2026-01-01T00:01:0{index}+00:00",
+            }
+        )
+
+    first = client.get("/api/generate/jobs?include_finished=true&limit=2")
+    assert first.status_code == 200
+    first_jobs = first.json()
+    assert [job["job_id"] for job in first_jobs] == ["seek-history-3", "seek-history-2"]
+
+    cursor = first_jobs[-1]
+    second = client.get(
+        "/api/generate/jobs",
+        params={
+            "include_finished": "true",
+            "limit": "2",
+            "before_updated_at": cursor["updated_at"],
+            "before_job_id": cursor["job_id"],
+        },
+    )
+
+    assert second.status_code == 200
+    assert [job["job_id"] for job in second.json()] == ["seek-history-1", "seek-history-0"]
 
 
 def test_generate_jobs_history_failed_only_filters_error_statuses(client):
