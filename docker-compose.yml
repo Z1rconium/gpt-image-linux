@@ -7,6 +7,7 @@ services:
     volumes:
       - ./images:/app/images
       - ./data:/app/data
+      - ./data/logs:/app/data/logs
     environment:
       - DEFAULT_API_URL=${DEFAULT_API_URL:-}
       - DEFAULT_API_KEY=${DEFAULT_API_KEY:-}

@@ -109,6 +109,9 @@ THUMBNAIL_MAX_SIDE = max(1, int(os.getenv("THUMBNAIL_MAX_SIDE", "512")))
 THUMBNAIL_CPU_CONCURRENCY = max(1, int(os.getenv("THUMBNAIL_CPU_CONCURRENCY", "1")))
 DATA_DIR = os.getenv("DATA_DIR", "./data")
 DATABASE_FILE = os.getenv("DATABASE_FILE", os.path.join(DATA_DIR, "app.sqlite3"))
+LOG_DIR = os.getenv("LOG_DIR", os.path.join(DATA_DIR, "logs"))
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO"
+LOG_RETENTION_HOURS = max(1, int(os.getenv("LOG_RETENTION_HOURS", "24")))
 
 # ── SSE connection limits ────────────────────────────────────────
 MAX_SSE_SUBSCRIBERS_GLOBAL = max(1, int(os.getenv("MAX_SSE_SUBSCRIBERS_GLOBAL", "200")))

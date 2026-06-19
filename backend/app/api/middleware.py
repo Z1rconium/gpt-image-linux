@@ -275,6 +275,12 @@ def register_middleware(app):
     async def access_control_middleware(request: Request, call_next):
         host_allowed, host_detail = request_host_allowed(request)
         if not host_allowed:
+            logger.warning(
+                "Rejected request: host check failed path=%s client=%s detail=%s",
+                request.url.path,
+                auth.get_client_ip(request),
+                host_detail,
+            )
             return apply_security_headers(
                 JSONResponse(
                     status_code=400,
@@ -285,6 +291,11 @@ def register_middleware(app):
         if request.url.path != "/health":
             client_ip = auth.get_client_ip(request)
             if not auth.is_ip_allowed(client_ip):
+                logger.warning(
+                    "Rejected request: ip not allowed path=%s client=%s",
+                    request.url.path,
+                    client_ip,
+                )
                 return apply_security_headers(
                     JSONResponse(
                         status_code=403,
@@ -293,6 +304,11 @@ def register_middleware(app):
                 )
 
         if not csrf_origin_allowed(request):
+            logger.warning(
+                "Rejected request: csrf check failed path=%s client=%s",
+                request.url.path,
+                auth.get_client_ip(request),
+            )
             return apply_security_headers(
                 JSONResponse(
                     status_code=403,
@@ -307,6 +323,11 @@ def register_middleware(app):
         ):
             token = request.cookies.get(config.ACCESS_KEY_COOKIE_NAME)
             if not auth.verify_access_token(token):
+                logger.warning(
+                    "Rejected request: access key required path=%s client=%s",
+                    request.url.path,
+                    auth.get_client_ip(request),
+                )
                 return apply_security_headers(
                     JSONResponse(
                         status_code=401,
@@ -327,6 +348,11 @@ def register_middleware(app):
 def register_exception_handlers(app):
     @app.exception_handler(Exception)
     async def unhandled_exception_handler(request: Request, exc: Exception):
+        logger.exception(
+            "Unhandled request error path=%s client=%s",
+            request.url.path,
+            auth.get_client_ip(request),
+        )
         return JSONResponse(
             status_code=500,
             content={"status": "error", "detail": "Internal Server Error"},

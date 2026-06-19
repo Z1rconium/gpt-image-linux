@@ -152,6 +152,7 @@ Most runtime options live in `.env.example` and can also be managed through Web 
 | `R2_*` | Optional Cloudflare R2 gallery backup sync settings; custom endpoint hosts require `R2_ENDPOINT_HOST_ALLOWLIST`. |
 | `PUBLIC_ORIGIN` / `ALLOWED_HOSTS` | Reverse-proxy Host/CSRF hardening. |
 | `ENABLE_METRICS` | Enables JSON/Prometheus metrics endpoints. |
+| `LOG_DIR` / `LOG_LEVEL` / `LOG_RETENTION_HOURS` | Backend logs on stdout plus rotated files, retained for 24h by default. |
 
 Secret fields prefer `${ENV_VAR_NAME}` references. Literal secrets stored in SQLite require `ALLOW_PLAINTEXT_SECRETS=true`.
 
@@ -212,6 +213,7 @@ The public API surface is contract-tested; keep paths, methods, status codes, SS
 - Gallery ZIP import/export uses safety limits from `.env.example`.
 - R2 endpoints are HTTPS-only, SSRF-checked, and limited to `*.r2.cloudflarestorage.com` unless `R2_ENDPOINT_HOST_ALLOWLIST` names a custom host.
 - R2 sync is backup-only; the app never serves, overwrites, or deletes local gallery images from R2.
+- Backend logs go to stdout and `DATA_DIR/logs` by default, with hourly rotation and 24h retention.
 
 ## Testing
 
