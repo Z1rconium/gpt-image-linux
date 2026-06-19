@@ -6,6 +6,7 @@
     OverallConfigItem,
     OverallConfigResponse,
     OverallConfigUpdateRequest,
+    PromptOptimizerHealthResponse,
     PresetHealthResponse,
     PresetHealthStatus,
     PromptOptimizerSystemPromptResponse,
@@ -29,13 +30,18 @@
   export let healthChecking = false;
   export let r2Health: R2HealthResponse | null = null;
   export let r2HealthChecking = false;
+  export let promptOptimizerHealth: PromptOptimizerHealthResponse | null = null;
+  export let promptOptimizerHealthChecking = false;
   export let onClose: () => void = () => {};
   export let onSave: (body: SettingsInput) => Promise<void> | void = () => {};
   export let onCreate: () => Promise<void> | void = () => {};
   export let onActivate: (presetId: string) => Promise<void> | void = () => {};
   export let onDelete: (presetId: string) => Promise<void> | void = () => {};
   export let onHealthCheck: (presetId: string) => Promise<void> | void = () => {};
+  export let onClearPresetHealth: () => void = () => {};
   export let onR2HealthCheck: (body: R2BackupSettingsInput) => Promise<void> | void = () => {};
+  export let onPromptOptimizerHealthCheck: () => Promise<void> | void = () => {};
+  export let onClearPromptOptimizerHealth: () => void = () => {};
   export let onLoadPromptOptimizerSystemPrompt: () => Promise<PromptOptimizerSystemPromptResponse> = async () => ({
     system_prompt: '',
     default_system_prompt: '',
@@ -196,6 +202,26 @@
     };
   }
 
+  function healthPanelClass(status: PresetHealthStatus | 'ok' | 'warning' | 'error') {
+    if (status === 'ok') return 'border-emerald-500/40 bg-emerald-500/10 text-emerald-100';
+    if (status === 'warning') return 'border-amber-500/40 bg-amber-500/10 text-amber-100';
+    return 'border-red-500/40 bg-red-500/10 text-red-100';
+  }
+
+  function healthBadgeClass(status: PresetHealthStatus | 'ok' | 'warning' | 'error') {
+    if (status === 'ok') return 'border-emerald-500/40 text-emerald-300';
+    if (status === 'warning') return 'border-amber-500/40 text-amber-300';
+    return 'border-red-500/40 text-red-300';
+  }
+
+  function closePromptOptimizerHealth() {
+    onClearPromptOptimizerHealth();
+  }
+
+  function closePresetHealth() {
+    onClearPresetHealth();
+  }
+
   async function save() {
     const proxyValue = upstreamSocks5Proxy.trim();
     const currentProxyMask = settings?.upstream_socks5_proxy_masked || '';
@@ -248,6 +274,10 @@
     await onR2HealthCheck(r2BackupPayload());
   }
 
+  async function checkPromptOptimizerHealth() {
+    await onPromptOptimizerHealthCheck();
+  }
+
   function healthStatusLabel(status: PresetHealthStatus) {
     if (status === 'ok') return $t.settings.healthOk;
     if (status === 'warning') return $t.settings.healthWarning;
@@ -260,18 +290,6 @@
     if (blockingChecks.some((check) => check.status === 'error')) return 'error';
     if (blockingChecks.some((check) => check.status === 'warning')) return 'warning';
     return 'ok';
-  }
-
-  function healthPanelClass(status: PresetHealthStatus) {
-    if (status === 'ok') return 'border-emerald-500/40 bg-emerald-500/10 text-emerald-100';
-    if (status === 'warning') return 'border-amber-500/40 bg-amber-500/10 text-amber-100';
-    return 'border-red-500/40 bg-red-500/10 text-red-100';
-  }
-
-  function healthBadgeClass(status: PresetHealthStatus) {
-    if (status === 'ok') return 'border-emerald-500/40 text-emerald-300';
-    if (status === 'warning') return 'border-amber-500/40 text-amber-300';
-    return 'border-red-500/40 text-red-300';
   }
 
   async function openSystemPromptEditor() {
@@ -634,20 +652,70 @@
               >
                 {$t.settings.editSystemPrompt}
               </button>
+              <button
+                type="button"
+                disabled={promptOptimizerHealthChecking}
+                class="control-focus w-full rounded-lg border border-emerald-500/40 px-3 py-2.5 text-sm font-semibold text-emerald-200 transition-colors hover:bg-emerald-500/10 disabled:cursor-not-allowed disabled:opacity-50"
+                on:click={checkPromptOptimizerHealth}
+              >
+                {promptOptimizerHealthChecking ? $t.settings.promptOptimizerHealthChecking : $t.settings.promptOptimizerHealthCheck}
+              </button>
             </div>
           </section>
         </div>
       </div>
 
       <div class="space-y-3 border-t border-zinc-800 p-5">
+        {#if promptOptimizerHealth}
+          <div class={`rounded-lg border p-3 text-xs ${healthPanelClass(promptOptimizerHealth.status)}`} data-testid="prompt-optimizer-health-result">
+            <div class="flex items-center justify-between gap-3">
+              <div class="min-w-0">
+                <span class="font-semibold">{$t.settings.promptOptimizerHealth}</span>
+                <div class="mt-1 text-[11px] text-inherit/70">
+                  {promptOptimizerHealth.model}
+                  {#if promptOptimizerHealth.duration_ms}{' '}- {promptOptimizerHealth.duration_ms} ms{/if}
+                </div>
+              </div>
+              <div class="flex items-center gap-2">
+                <span class={`rounded-full border px-2 py-0.5 text-[11px] font-semibold ${healthBadgeClass(promptOptimizerHealth.status)}`}>
+                  {healthStatusLabel(promptOptimizerHealth.status)}
+                </span>
+                <button
+                  type="button"
+                  class="mobile-touch-target control-focus rounded-lg p-1.5 text-inherit/70 hover:bg-black/10 hover:text-inherit"
+                  aria-label={$t.common.close}
+                  on:click={closePromptOptimizerHealth}
+                >
+                  x
+                </button>
+              </div>
+            </div>
+            <div class="mt-2 rounded-md border border-zinc-800 bg-zinc-950/50 p-2 text-zinc-300">
+              {promptOptimizerHealth.message}
+            </div>
+          </div>
+        {/if}
         {#if health}
           {@const displayStatus = presetHealthDisplayStatus(health)}
-          <div class={`rounded-lg border p-3 text-xs ${healthPanelClass(displayStatus)}`}>
+          <div class={`rounded-lg border p-3 text-xs ${healthPanelClass(displayStatus)}`} data-testid="preset-health-result">
             <div class="flex items-center justify-between gap-3">
-              <span class="font-semibold">{$t.settings.healthStatus}</span>
-              <span class={`rounded-full border px-2 py-0.5 text-[11px] font-semibold ${healthBadgeClass(displayStatus)}`}>
-                {healthStatusLabel(displayStatus)}
-              </span>
+              <div class="min-w-0">
+                <span class="font-semibold">{$t.settings.healthStatus}</span>
+                <div class="mt-1 text-[11px] text-inherit/70">{$t.settings.healthTestResult}</div>
+              </div>
+              <div class="flex items-center gap-2">
+                <span class={`rounded-full border px-2 py-0.5 text-[11px] font-semibold ${healthBadgeClass(displayStatus)}`}>
+                  {healthStatusLabel(displayStatus)}
+                </span>
+                <button
+                  type="button"
+                  class="mobile-touch-target control-focus rounded-lg p-1.5 text-inherit/70 hover:bg-black/10 hover:text-inherit"
+                  aria-label={$t.common.close}
+                  on:click={closePresetHealth}
+                >
+                  x
+                </button>
+              </div>
             </div>
             <div class="mt-2 space-y-1.5">
               {#each health.checks as check}

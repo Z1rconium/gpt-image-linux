@@ -424,6 +424,18 @@
     void settingsStore.checkR2Health(body);
   }
 
+  function checkPromptOptimizerHealth() {
+    void settingsStore.checkPromptOptimizerHealth();
+  }
+
+  function clearPromptOptimizerHealth() {
+    settingsStore.clearPromptOptimizerHealth();
+  }
+
+  function clearPresetHealth() {
+    settingsStore.clearPresetHealth();
+  }
+
   function loadPromptOptimizerSystemPrompt() {
     return settingsStore.loadPromptOptimizerSystemPrompt();
   }
@@ -869,13 +881,18 @@
   healthChecking={$settingsStore.healthChecking}
   r2Health={$settingsStore.r2Health}
   r2HealthChecking={$settingsStore.r2HealthChecking}
+  promptOptimizerHealth={$settingsStore.promptOptimizerHealth}
+  promptOptimizerHealthChecking={$settingsStore.promptOptimizerHealthChecking}
   onClose={() => setUi('settingsOpen', false)}
   onSave={saveSettings}
   onCreate={createPreset}
   onActivate={activatePreset}
   onDelete={deletePreset}
   onHealthCheck={checkPresetHealth}
+  onClearPresetHealth={clearPresetHealth}
   onR2HealthCheck={checkR2Health}
+  onPromptOptimizerHealthCheck={checkPromptOptimizerHealth}
+  onClearPromptOptimizerHealth={clearPromptOptimizerHealth}
   onLoadPromptOptimizerSystemPrompt={loadPromptOptimizerSystemPrompt}
   onSavePromptOptimizerSystemPrompt={savePromptOptimizerSystemPrompt}
   onLoadOverallConfig={loadOverallConfig}

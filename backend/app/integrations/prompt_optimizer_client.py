@@ -6,12 +6,13 @@ import re
 import tempfile
 import time
 from pathlib import Path
+from typing import Any
 
 import aiohttp
 
 from ..core import settings as config
 from ..core import validators as ssrf
-from .upstream_client import UpstreamApiError, read_limited_text_response
+from .upstream_client import UpstreamApiError, classify_probe_status, read_limited_text_response
 from .session_pool import TIMEOUT_PROMPT_OPTIMIZER, get_pool
 
 logger = logging.getLogger(__name__)
@@ -136,6 +137,44 @@ def validate_optimizer_endpoint(api_url: str) -> str:
     return normalized_api_url
 
 
+def _build_prompt_optimizer_payload(
+    model: str,
+    prompt: str,
+    *,
+    system_prompt: str,
+    target_language: str = "en",
+    image_api_path: str | None = None,
+    image_model: str | None = None,
+    size: str | None = None,
+    quality: str | None = None,
+    temperature: float = 0.4,
+    max_tokens: int = 900,
+) -> dict:
+    return {
+        "model": model,
+        "messages": [
+            {
+                "role": "system",
+                "content": system_prompt,
+            },
+            {
+                "role": "user",
+                "content": _build_user_prompt(
+                    prompt,
+                    target_language=target_language,
+                    image_api_path=image_api_path,
+                    image_model=image_model,
+                    size=size,
+                    quality=quality,
+                ),
+            },
+        ],
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "stream": False,
+    }
+
+
 def _target_language_instruction(target_language: str | None) -> str:
     normalized = (target_language or "").strip()
     if normalized == "zh-CN":
@@ -178,6 +217,8 @@ async def optimize_prompt(
     system_prompt: str | None = None,
     timeout_seconds: float | None = None,
     max_output_chars: int | None = None,
+    temperature: float = 0.4,
+    max_tokens: int = 900,
 ) -> tuple[str, str, int]:
     if timeout_seconds is None:
         timeout_seconds = config.PROMPT_OPTIMIZER_TIMEOUT_SECONDS
@@ -190,33 +231,22 @@ async def optimize_prompt(
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
 
-    payload = {
-        "model": model,
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    _normalize_system_prompt(system_prompt)
-                    if system_prompt is not None
-                    else PROMPT_OPTIMIZER_SYSTEM_PROMPT
-                ),
-            },
-            {
-                "role": "user",
-                "content": _build_user_prompt(
-                    prompt,
-                    target_language=target_language,
-                    image_api_path=image_api_path,
-                    image_model=image_model,
-                    size=size,
-                    quality=quality,
-                ),
-            },
-        ],
-        "temperature": 0.4,
-        "max_tokens": 900,
-        "stream": False,
-    }
+    payload = _build_prompt_optimizer_payload(
+        model,
+        prompt,
+        system_prompt=(
+            _normalize_system_prompt(system_prompt)
+            if system_prompt is not None
+            else PROMPT_OPTIMIZER_SYSTEM_PROMPT
+        ),
+        target_language=target_language,
+        image_api_path=image_api_path,
+        image_model=image_model,
+        size=size,
+        quality=quality,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
 
     start = time.monotonic()
 
@@ -275,3 +305,51 @@ async def optimize_prompt(
     model_used = data.get("model", model)
     optimized = _clean_output(content, max_output_chars)
     return optimized, str(model_used), duration_ms
+
+
+async def probe_prompt_optimizer_endpoint(
+    api_url: str,
+    api_key: str,
+    model: str,
+    *,
+    timeout_seconds: float | None = None,
+) -> dict[str, Any]:
+    if timeout_seconds is None:
+        timeout_seconds = config.PROMPT_OPTIMIZER_TIMEOUT_SECONDS
+
+    start = time.monotonic()
+
+    try:
+        _optimized_prompt, model_used, duration_ms = await optimize_prompt(
+            api_url=api_url,
+            api_key=api_key,
+            model=model,
+            prompt="Connectivity test",
+            system_prompt=PROMPT_OPTIMIZER_SYSTEM_PROMPT,
+            timeout_seconds=timeout_seconds,
+            max_output_chars=1,
+            temperature=0.0,
+            max_tokens=1,
+        )
+        return {
+            "status": "ok",
+            "message": f"Prompt optimizer responded successfully with model {model_used}",
+            "model": model_used,
+            "duration_ms": duration_ms,
+            "status_code": 200,
+        }
+    except OptimizerTimeoutError:
+        raise
+    except UpstreamOptimizerError as e:
+        status, message = classify_probe_status("POST", getattr(e, "status", 502))
+        return {
+            "status": status,
+            "message": str(e) if status == "error" else message,
+            "model": model,
+            "duration_ms": int((time.monotonic() - start) * 1000),
+            "status_code": e.status,
+        }
+    except (aiohttp.ServerTimeoutError, TimeoutError, asyncio.TimeoutError) as e:
+        raise OptimizerTimeoutError("Prompt optimizer request timed out") from e
+    except aiohttp.ClientError as e:
+        raise UpstreamOptimizerError(f"Prompt optimizer connection error: {e}") from e

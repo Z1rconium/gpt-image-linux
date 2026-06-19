@@ -6,6 +6,7 @@ import type {
   OverallConfigResponse,
   OverallConfigUpdateRequest,
   PresetHealthResponse,
+  PromptOptimizerHealthResponse,
   PromptOptimizerSystemPromptResponse,
   R2BackupSettingsInput,
   R2HealthResponse,
@@ -23,6 +24,8 @@ type SettingsState = {
   health: PresetHealthResponse | null;
   r2HealthChecking: boolean;
   r2Health: R2HealthResponse | null;
+  promptOptimizerHealthChecking: boolean;
+  promptOptimizerHealth: PromptOptimizerHealthResponse | null;
 };
 
 const initialSettingsState: SettingsState = {
@@ -31,7 +34,9 @@ const initialSettingsState: SettingsState = {
   healthChecking: false,
   health: null,
   r2HealthChecking: false,
-  r2Health: null
+  r2Health: null,
+  promptOptimizerHealthChecking: false,
+  promptOptimizerHealth: null
 };
 
 function createSettingsStore() {
@@ -63,7 +68,7 @@ function createSettingsStore() {
         },
         'saving settings'
       );
-      update((state) => ({ ...state, settings, health: null, r2Health: null }));
+      update((state) => ({ ...state, settings, health: null, r2Health: null, promptOptimizerHealth: null }));
       showToast(get(t).messages.presetSaved);
     } finally {
       update((state) => ({ ...state, saving: false }));
@@ -81,7 +86,7 @@ function createSettingsStore() {
       },
       'creating preset'
     );
-    update((state) => ({ ...state, settings, health: null, r2Health: null }));
+    update((state) => ({ ...state, settings, health: null, r2Health: null, promptOptimizerHealth: null }));
     showToast(get(t).messages.presetCreated);
   }
 
@@ -93,7 +98,7 @@ function createSettingsStore() {
       { method: 'POST' },
       'switching preset'
     );
-    update((state) => ({ ...state, settings, health: null, r2Health: null }));
+    update((state) => ({ ...state, settings, health: null, r2Health: null, promptOptimizerHealth: null }));
     showToast(get(t).messages.presetSwitched);
   }
 
@@ -116,7 +121,7 @@ function createSettingsStore() {
       { method: 'DELETE' },
       'deleting preset'
     );
-    update((state) => ({ ...state, settings, health: null, r2Health: null }));
+    update((state) => ({ ...state, settings, health: null, r2Health: null, promptOptimizerHealth: null }));
     showToast(get(t).messages.presetDeleted);
   }
 
@@ -135,6 +140,10 @@ function createSettingsStore() {
     }
   }
 
+  function clearPresetHealth() {
+    update((state) => ({ ...state, health: null }));
+  }
+
   async function checkR2Health(body: R2BackupSettingsInput) {
     update((state) => ({ ...state, r2HealthChecking: true }));
     try {
@@ -151,6 +160,24 @@ function createSettingsStore() {
     } finally {
       update((state) => ({ ...state, r2HealthChecking: false }));
     }
+  }
+
+  async function checkPromptOptimizerHealth() {
+    update((state) => ({ ...state, promptOptimizerHealthChecking: true }));
+    try {
+      const promptOptimizerHealth = await apiFetch<PromptOptimizerHealthResponse>(
+        '/api/prompt/optimizer-health',
+        { method: 'POST' },
+        'checking prompt optimizer health'
+      );
+      update((state) => ({ ...state, promptOptimizerHealth }));
+    } finally {
+      update((state) => ({ ...state, promptOptimizerHealthChecking: false }));
+    }
+  }
+
+  function clearPromptOptimizerHealth() {
+    update((state) => ({ ...state, promptOptimizerHealth: null }));
   }
 
   async function loadPromptOptimizerSystemPrompt() {
@@ -209,7 +236,10 @@ function createSettingsStore() {
     activatePreset,
     deletePreset,
     checkPresetHealth,
+    clearPresetHealth,
     checkR2Health,
+    checkPromptOptimizerHealth,
+    clearPromptOptimizerHealth,
     loadPromptOptimizerSystemPrompt,
     savePromptOptimizerSystemPrompt,
     loadOverallConfig,

@@ -306,6 +306,14 @@ class PromptOptimizerSettingsResponse(BaseModel):
     api_key_env_var: Optional[str] = None
 
 
+class PromptOptimizerHealthResponse(BaseModel):
+    status: Literal["ok", "warning", "error"]
+    message: str
+    model: str = ""
+    duration_ms: int = 0
+    status_code: Optional[int] = None
+
+
 class PromptOptimizerSettingsRequest(StrictRequestModel):
     enabled: Optional[bool] = None
     api_url: Optional[str] = Field(default=None, max_length=2048)

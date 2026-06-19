@@ -52,6 +52,14 @@ export type PromptOptimizerSettings = {
   api_key_env_var?: string | null;
 };
 
+export type PromptOptimizerHealthResponse = {
+  status: 'ok' | 'warning' | 'error';
+  message: string;
+  model: string;
+  duration_ms: number;
+  status_code?: number | null;
+};
+
 export type PromptOptimizerSettingsInput = {
   enabled?: boolean | null;
   api_url?: string | null;

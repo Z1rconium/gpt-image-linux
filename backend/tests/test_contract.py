@@ -2008,6 +2008,60 @@ def test_prompt_optimize_upstream_error_and_timeout(client, monkeypatch):
     assert "optimizer timeout" in timeout.json()["detail"]
 
 
+def test_prompt_optimizer_health_reports_connectivity_and_errors(client, monkeypatch):
+    from backend.app.api.routers import prompt as prompt_router
+
+    settings = client.get("/api/settings").json()
+    configured = client.post(
+        "/api/settings",
+        json=_settings_payload(
+            settings,
+            prompt_optimizer={
+                "enabled": True,
+                "api_url": "https://example.com/v1/chat/completions",
+                "model": "prompt-model",
+                "api_key": "${TEST_PROMPT_OPTIMIZER_API_KEY}",
+            },
+        ),
+    )
+    assert configured.status_code == 200
+
+    async def fake_probe(**kwargs):
+        return {
+            "status": "ok",
+            "message": "Prompt optimizer responded successfully with model prompt-model",
+            "model": kwargs["model"],
+            "duration_ms": 12,
+            "status_code": 200,
+        }
+
+    monkeypatch.setattr(prompt_router, "probe_prompt_optimizer_endpoint", fake_probe)
+    healthy = client.post("/api/prompt/optimizer-health")
+    assert healthy.status_code == 200
+    assert healthy.json() == {
+        "status": "ok",
+        "message": "Prompt optimizer responded successfully with model prompt-model",
+        "model": "prompt-model",
+        "duration_ms": 12,
+        "status_code": 200,
+    }
+
+    async def fake_error(**_kwargs):
+        return {
+            "status": "error",
+            "message": "Optimizer upstream returned HTTP 500",
+            "model": "prompt-model",
+            "duration_ms": 8,
+            "status_code": 500,
+        }
+
+    monkeypatch.setattr(prompt_router, "probe_prompt_optimizer_endpoint", fake_error)
+    failed = client.post("/api/prompt/optimizer-health")
+    assert failed.status_code == 200
+    assert failed.json()["status"] == "error"
+    assert failed.json()["status_code"] == 500
+
+
 def test_prompt_snippets_crud_search_and_validation(client):
     empty = client.get("/api/prompt-snippets")
     assert empty.status_code == 200

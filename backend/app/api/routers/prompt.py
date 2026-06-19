@@ -10,6 +10,7 @@ from ..presets import (
 from ...integrations.prompt_optimizer_client import (
     OptimizerTimeoutError,
     PROMPT_OPTIMIZER_SYSTEM_PROMPT,
+    probe_prompt_optimizer_endpoint,
     UpstreamOptimizerError,
     has_custom_prompt_optimizer_system_prompt,
     load_prompt_optimizer_system_prompt,
@@ -20,6 +21,7 @@ from ...integrations.prompt_optimizer_client import (
 from ...schemas.models import (
     PromptOptimizeRequest,
     PromptOptimizeResponse,
+    PromptOptimizerHealthResponse,
     PromptOptimizerSystemPromptRequest,
     PromptOptimizerSystemPromptResponse,
 )
@@ -72,7 +74,10 @@ async def optimize_prompt_endpoint(req: PromptOptimizeRequest):
     api_url = str(settings.get("api_url", "")).strip()
     model = str(settings.get("model", "gpt-4o-mini")).strip() or "gpt-4o-mini"
     timeout_seconds = int(settings.get("timeout_seconds") or 60)
-    api_key = resolve_prompt_optimizer_api_key(settings)
+    try:
+        api_key = resolve_prompt_optimizer_api_key(settings)
+    except HTTPException as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail) from e
 
     if not api_url:
         raise HTTPException(status_code=400, detail="Prompt optimizer endpoint URL is not configured")
@@ -115,3 +120,90 @@ async def optimize_prompt_endpoint(req: PromptOptimizeRequest):
         model=model_used,
         duration_ms=duration_ms,
     )
+
+
+@router.post("/api/prompt/optimizer-health", response_model=PromptOptimizerHealthResponse)
+async def prompt_optimizer_health():
+    settings = get_prompt_optimizer_settings()
+    if not settings or not settings.get("enabled"):
+        return PromptOptimizerHealthResponse(
+            status="error",
+            message="Prompt optimizer is not enabled",
+            model="",
+            duration_ms=0,
+            status_code=400,
+        )
+
+    api_url = str(settings.get("api_url", "")).strip()
+    model = str(settings.get("model", "gpt-4o-mini")).strip() or "gpt-4o-mini"
+    timeout_seconds = int(settings.get("timeout_seconds") or 60)
+    try:
+        api_key = resolve_prompt_optimizer_api_key(settings)
+    except HTTPException as e:
+        return PromptOptimizerHealthResponse(
+            status="error",
+            message=str(e.detail),
+            model=model,
+            duration_ms=0,
+            status_code=e.status_code,
+        )
+
+    if not api_url:
+        return PromptOptimizerHealthResponse(
+            status="error",
+            message="Prompt optimizer endpoint URL is not configured",
+            model=model,
+            duration_ms=0,
+            status_code=400,
+        )
+    if not model:
+        return PromptOptimizerHealthResponse(
+            status="error",
+            message="Prompt optimizer model is not configured",
+            model="",
+            duration_ms=0,
+            status_code=400,
+        )
+    if not api_key:
+        return PromptOptimizerHealthResponse(
+            status="error",
+            message="Prompt optimizer API key is not configured",
+            model=model,
+            duration_ms=0,
+            status_code=400,
+        )
+
+    try:
+        result = await probe_prompt_optimizer_endpoint(
+            api_url=api_url,
+            api_key=api_key,
+            model=model,
+            timeout_seconds=timeout_seconds,
+        )
+    except ValueError as e:
+        return PromptOptimizerHealthResponse(
+            status="error",
+            message=str(e),
+            model=model,
+            duration_ms=0,
+            status_code=400,
+        )
+    except OptimizerTimeoutError as e:
+        return PromptOptimizerHealthResponse(
+            status="error",
+            message=str(e),
+            model=model,
+            duration_ms=timeout_seconds * 1000,
+            status_code=504,
+        )
+    except Exception as e:
+        logger.exception("Prompt optimizer health probe unexpected error")
+        return PromptOptimizerHealthResponse(
+            status="error",
+            message="Prompt optimizer health check failed",
+            model=model,
+            duration_ms=0,
+            status_code=502,
+        )
+
+    return PromptOptimizerHealthResponse(**result)

@@ -585,6 +585,18 @@ async function mockApi(page: Page, options: MockOptions = {}) {
       );
       return;
     }
+    if (url.pathname === '/api/prompt/optimizer-health' && request.method() === 'POST') {
+      await route.fulfill(
+        json({
+          status: 'ok',
+          message: 'Prompt optimizer responded successfully with model gpt-4o-mini',
+          model: 'gpt-4o-mini',
+          duration_ms: 13,
+          status_code: 200
+        })
+      );
+      return;
+    }
     if (url.pathname === '/api/prompt/optimizer-system-prompt' && request.method() === 'GET') {
       await route.fulfill(
         json({
@@ -858,6 +870,26 @@ test('settings drawer edits the prompt optimizer system prompt', async ({ page }
   expect(request.postDataJSON()).toEqual({ system_prompt: 'Custom optimizer system prompt' });
   await expect(page.getByRole('status')).toContainText('Prompt Optimizer system prompt saved');
   await expect(editor).toBeHidden();
+});
+
+test('settings drawer tests and closes health results', async ({ page }) => {
+  await loadApp(page);
+
+  await page.getByRole('button', { name: 'Settings' }).click();
+  const drawer = page.getByRole('dialog', { name: 'Settings' });
+
+  await drawer.getByRole('button', { name: 'Test Prompt Optimizer' }).click();
+  const optimizerHealth = page.getByTestId('prompt-optimizer-health-result');
+  await expect(optimizerHealth).toBeVisible();
+  await expect(optimizerHealth).toContainText('Prompt optimizer responded successfully with model gpt-4o-mini');
+  await optimizerHealth.getByRole('button', { name: 'Close' }).click();
+  await expect(optimizerHealth).toHaveCount(0);
+
+  await drawer.getByRole('button', { name: 'Health check' }).click();
+  const presetHealth = page.getByTestId('preset-health-result');
+  await expect(presetHealth).toBeVisible();
+  await presetHealth.getByRole('button', { name: 'Close' }).click();
+  await expect(presetHealth).toHaveCount(0);
 });
 
 test('settings drawer edits overall config overrides', async ({ page }) => {
