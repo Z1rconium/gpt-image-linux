@@ -47,6 +47,8 @@ const en = {
     jobs: 'Jobs',
     jobHistory: 'Job History',
     settingsShort: 'Set',
+    themeToggleToDark: 'Switch to dark mode',
+    themeToggleToLight: 'Switch to light mode',
     newVersion: 'New',
     versionTitle: (version: string) => `Current ${version}`,
     versionUpdateTitle: (version: string, latestVersion: string) => `Current ${version}. Latest v${latestVersion}.`
@@ -503,6 +505,8 @@ const zh: TranslationSchema<typeof en> = {
     jobs: '任务',
     jobHistory: '任务历史',
     settingsShort: '设置',
+    themeToggleToDark: '切换到夜间模式',
+    themeToggleToLight: '切换到白天模式',
     newVersion: '新版',
     versionTitle: (version) => `当前 ${version}`,
     versionUpdateTitle: (version, latestVersion) => `当前 ${version}，最新 v${latestVersion}。`

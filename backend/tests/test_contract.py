@@ -725,6 +725,26 @@ def test_access_cookie_and_status(tmp_path):
         assert version_after_unlock.status_code == 200
 
 
+def test_access_denied_paths_return_auth_status_codes(tmp_path):
+    _configure_runtime(tmp_path, access_key="secret", allow_unauthenticated=False)
+
+    with _test_client(raise_server_exceptions=False) as client:
+        responses = [
+            client.get("/api/settings"),
+            client.post("/api/access", json={"access_key": "wrong"}),
+            client.post(
+                "/api/settings/presets",
+                headers={"Origin": "https://evil.example"},
+                json={"name": "Blocked"},
+            ),
+        ]
+
+    assert [resp.status_code for resp in responses] == [401, 401, 403]
+    assert responses[0].json()["detail"] == "Access key required"
+    assert responses[1].json()["detail"] == "Invalid access key"
+    assert responses[2].json()["detail"] == "CSRF origin check failed"
+
+
 def test_access_token_signature_requires_configured_secret(monkeypatch):
     from backend.app.core import security as auth_security
 

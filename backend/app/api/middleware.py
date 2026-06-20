@@ -1,5 +1,6 @@
 from urllib.parse import urlsplit
 import re
+import logging
 
 from fastapi import Request, Response
 from fastapi.responses import JSONResponse
@@ -8,6 +9,8 @@ from .csp import CONTENT_SECURITY_POLICY
 from ..core import security as auth
 from ..core import settings as config
 
+
+logger = logging.getLogger(__name__)
 
 AUTH_EXEMPT_PATHS = {
     "/",

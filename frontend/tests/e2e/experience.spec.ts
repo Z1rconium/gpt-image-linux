@@ -435,6 +435,10 @@ async function mockApi(page: Page, options: MockOptions = {}) {
 
   await page.addInitScript(() => {
     localStorage.setItem('gpt-image-panel-language', 'en');
+    if (!sessionStorage.getItem('gpt-image-panel-theme-init')) {
+      localStorage.removeItem('gpt-image-panel-theme');
+      sessionStorage.setItem('gpt-image-panel-theme-init', '1');
+    }
   });
 
   await page.route('**/*', async (route) => {
@@ -793,6 +797,30 @@ test('access gate unlocks before loading the app', async ({ page }) => {
 
   await expect(page.getByRole('heading', { name: 'Prompt', exact: true })).toBeVisible();
   await expect(page.getByRole('textbox', { name: 'Prompt', exact: true })).toBeVisible();
+});
+
+test('theme follows system preference, toggles, and persists after reload', async ({ page }) => {
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await loadApp(page);
+
+  const root = page.locator('html');
+  const themeButton = page.getByRole('button', { name: 'Switch to light mode' });
+
+  await expect(root).toHaveAttribute('data-theme', 'dark');
+  await expect(root).toHaveClass(/dark/);
+  await expect(themeButton).toBeVisible();
+
+  await themeButton.click();
+  await expect(root).toHaveAttribute('data-theme', 'light');
+  await expect(root).not.toHaveClass(/dark/);
+  await expect(page.getByRole('button', { name: 'Switch to dark mode' })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => window.localStorage.getItem('gpt-image-panel-theme'))).toBe('light');
+
+  await page.reload();
+  await expect(page.getByRole('heading', { name: 'Prompt', exact: true })).toBeVisible();
+  await expect(root).toHaveAttribute('data-theme', 'light');
+  await expect(root).not.toHaveClass(/dark/);
+  await expect(page.getByRole('button', { name: 'Switch to dark mode' })).toBeVisible();
 });
 
 test('settings drawer traps focus and key form controls have accessible names', async ({ page }) => {

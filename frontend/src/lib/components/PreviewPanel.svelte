@@ -63,20 +63,20 @@
   });
 </script>
 
-<section class="rounded-2xl border border-zinc-800 bg-zinc-900/60 p-4 sm:p-5">
+<section class="rounded-2xl border border-stone-200 bg-white/80 p-4 shadow-sm shadow-stone-200/60 sm:p-5 dark:border-zinc-800 dark:bg-zinc-900/60 dark:shadow-none">
   <div class="mb-4 flex items-center justify-between gap-3">
     <div class="min-w-0">
-      <h2 class="text-sm font-semibold text-zinc-100">{$t.preview.title}</h2>
-      <p class="mt-1 truncate text-xs text-zinc-500">{prompt || $t.preview.subtitle}</p>
+      <h2 class="text-sm font-semibold text-stone-950 dark:text-zinc-100">{$t.preview.title}</h2>
+      <p class="mt-1 truncate text-xs text-stone-500 dark:text-zinc-500">{prompt || $t.preview.subtitle}</p>
     </div>
     <div class="flex shrink-0 items-center gap-2">
       {#if selectedFilename}
-        <a href={downloadUrl(selectedFilename)} class="control-focus rounded-lg border border-zinc-700 px-3 py-2 text-xs font-medium text-zinc-300 hover:bg-zinc-800">{$t.common.download}</a>
+        <a href={downloadUrl(selectedFilename)} class="control-focus rounded-lg border border-stone-300 px-3 py-2 text-xs font-medium text-stone-700 hover:bg-stone-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800">{$t.common.download}</a>
       {/if}
-      <button type="button" class="control-focus rounded-lg border border-zinc-700 px-3 py-2 text-xs font-medium text-zinc-300 hover:bg-zinc-800 disabled:opacity-40" disabled={!job && !imageUrl} on:click={onRegenerate}>
+      <button type="button" class="control-focus rounded-lg border border-stone-300 px-3 py-2 text-xs font-medium text-stone-700 hover:bg-stone-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" disabled={!job && !imageUrl} on:click={onRegenerate}>
         {$t.preview.regenerate}
       </button>
-      <button type="button" class="control-focus rounded-lg border border-zinc-700 px-3 py-2 text-xs font-medium text-zinc-300 hover:bg-zinc-800" on:click={onClear}>
+      <button type="button" class="control-focus rounded-lg border border-stone-300 px-3 py-2 text-xs font-medium text-stone-700 hover:bg-stone-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" on:click={onClear}>
         {$t.common.clear}
       </button>
     </div>
@@ -86,12 +86,12 @@
     <div class="rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">{error}</div>
   {/if}
 
-  <div class={`mt-4 flex min-h-[360px] items-center justify-center overflow-hidden rounded-xl border border-zinc-800 ${selectedImageUrl ? 'bg-zinc-950' : 'preview-empty'}`}>
+  <div class={`mt-4 flex min-h-[360px] items-center justify-center overflow-hidden rounded-xl border border-stone-200 dark:border-zinc-800 ${selectedImageUrl ? 'bg-stone-100 dark:bg-zinc-950' : 'preview-empty'}`}>
     {#if loading}
       <div class="flex max-w-sm flex-col items-center px-6 text-center">
         <span class="spinner"></span>
-        <p class="mt-4 text-sm font-semibold text-zinc-100">{stageLabel(job, $t.stages) || $t.preview.working}</p>
-        <p class="mt-2 text-xs text-zinc-400">{statusLabel(job?.status, $t.statuses) || $t.preview.queued}</p>
+        <p class="mt-4 text-sm font-semibold text-stone-900 dark:text-zinc-100">{stageLabel(job, $t.stages) || $t.preview.working}</p>
+        <p class="mt-2 text-xs text-stone-500 dark:text-zinc-400">{statusLabel(job?.status, $t.statuses) || $t.preview.queued}</p>
       </div>
     {:else if selectedImageUrl}
       <div class="flex h-full w-full flex-col">
@@ -108,8 +108,8 @@
           />
         </div>
         {#if resultImages.length > 1}
-          <div class="border-t border-zinc-800 p-3">
-            <div class="mb-2 flex items-center justify-between text-xs text-zinc-500">
+          <div class="border-t border-stone-200 p-3 dark:border-zinc-800">
+            <div class="mb-2 flex items-center justify-between text-xs text-stone-500 dark:text-zinc-500">
               <span>{$t.preview.resultCount(resultImages.length)}</span>
               <span>{selectedImageIndex + 1} / {resultImages.length}</span>
             </div>
@@ -118,11 +118,11 @@
                 <button
                   type="button"
                   aria-label={$t.preview.selectResult(index + 1)}
-                  class={`control-focus relative aspect-square overflow-hidden rounded-lg border ${result.image_id === selectedImage?.image_id ? 'border-emerald-400 ring-1 ring-emerald-400/40' : 'border-zinc-800 hover:border-zinc-600'}`}
+                  class={`control-focus relative aspect-square overflow-hidden rounded-lg border ${result.image_id === selectedImage?.image_id ? 'border-emerald-400 ring-1 ring-emerald-400/40' : 'border-stone-200 hover:border-stone-400 dark:border-zinc-800 dark:hover:border-zinc-600'}`}
                   on:click={() => (selectedImageId = result.image_id)}
                 >
                   <img src={result.image_url} alt={$t.preview.resultThumbAlt(index + 1)} class="h-full w-full object-cover" loading="lazy" decoding="async" />
-                  <span class="absolute left-1.5 top-1.5 rounded bg-zinc-950/80 px-1.5 py-0.5 text-[10px] font-semibold text-zinc-200">{index + 1}</span>
+                  <span class="absolute left-1.5 top-1.5 rounded bg-white/90 px-1.5 py-0.5 text-[10px] font-semibold text-stone-700 dark:bg-zinc-950/80 dark:text-zinc-200">{index + 1}</span>
                 </button>
               {/each}
             </div>
@@ -131,33 +131,33 @@
       </div>
     {:else}
       <div class="px-6 text-center">
-        <p class="text-sm font-medium text-zinc-300">{$t.preview.noPreview}</p>
-        <p class="mt-2 text-xs text-zinc-500">{$t.preview.noPreviewHint}</p>
+        <p class="text-sm font-medium text-stone-700 dark:text-zinc-300">{$t.preview.noPreview}</p>
+        <p class="mt-2 text-xs text-stone-500 dark:text-zinc-500">{$t.preview.noPreviewHint}</p>
       </div>
     {/if}
   </div>
 
   {#if job}
-    <div class="mt-4 grid grid-cols-2 gap-2 text-xs text-zinc-500 sm:grid-cols-5">
-      <div class="rounded-lg border border-zinc-800 bg-zinc-950/50 px-3 py-2">
-        <div class="text-zinc-600">{$t.common.status}</div>
-        <div class="mt-1 text-zinc-300">{statusLabel(job.status, $t.statuses)}</div>
+    <div class="mt-4 grid grid-cols-2 gap-2 text-xs text-stone-500 dark:text-zinc-500 sm:grid-cols-5">
+      <div class="rounded-lg border border-stone-200 bg-stone-50/80 px-3 py-2 dark:border-zinc-800 dark:bg-zinc-950/50">
+        <div class="text-stone-400 dark:text-zinc-600">{$t.common.status}</div>
+        <div class="mt-1 text-stone-700 dark:text-zinc-300">{statusLabel(job.status, $t.statuses)}</div>
       </div>
-      <div class="rounded-lg border border-zinc-800 bg-zinc-950/50 px-3 py-2">
-        <div class="text-zinc-600">{$t.common.completedAt}</div>
-        <div class="mt-1 whitespace-nowrap text-zinc-300">{formatBeijingTime(job.completed_at)}</div>
+      <div class="rounded-lg border border-stone-200 bg-stone-50/80 px-3 py-2 dark:border-zinc-800 dark:bg-zinc-950/50">
+        <div class="text-stone-400 dark:text-zinc-600">{$t.common.completedAt}</div>
+        <div class="mt-1 whitespace-nowrap text-stone-700 dark:text-zinc-300">{formatBeijingTime(job.completed_at)}</div>
       </div>
-      <div class="rounded-lg border border-zinc-800 bg-zinc-950/50 px-3 py-2">
-        <div class="text-zinc-600">{$t.common.size}</div>
-        <div class="mt-1 text-zinc-300">{previewSize}</div>
+      <div class="rounded-lg border border-stone-200 bg-stone-50/80 px-3 py-2 dark:border-zinc-800 dark:bg-zinc-950/50">
+        <div class="text-stone-400 dark:text-zinc-600">{$t.common.size}</div>
+        <div class="mt-1 text-stone-700 dark:text-zinc-300">{previewSize}</div>
       </div>
-      <div class="rounded-lg border border-zinc-800 bg-zinc-950/50 px-3 py-2">
-        <div class="text-zinc-600">{$t.common.model}</div>
-        <div class="mt-1 truncate text-zinc-300">{job.model || '-'}</div>
+      <div class="rounded-lg border border-stone-200 bg-stone-50/80 px-3 py-2 dark:border-zinc-800 dark:bg-zinc-950/50">
+        <div class="text-stone-400 dark:text-zinc-600">{$t.common.model}</div>
+        <div class="mt-1 truncate text-stone-700 dark:text-zinc-300">{job.model || '-'}</div>
       </div>
-      <div class="rounded-lg border border-zinc-800 bg-zinc-950/50 px-3 py-2">
-        <div class="text-zinc-600">{$t.common.duration}</div>
-        <div class="mt-1 text-zinc-300">{job.duration || '-'}</div>
+      <div class="rounded-lg border border-stone-200 bg-stone-50/80 px-3 py-2 dark:border-zinc-800 dark:bg-zinc-950/50">
+        <div class="text-stone-400 dark:text-zinc-600">{$t.common.duration}</div>
+        <div class="mt-1 text-stone-700 dark:text-zinc-300">{job.duration || '-'}</div>
       </div>
     </div>
   {/if}

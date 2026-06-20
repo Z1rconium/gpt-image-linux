@@ -93,7 +93,7 @@
   function statusClass(job: GenerateJobStatus) {
     if (job.status === 'success') return 'text-emerald-300';
     if (job.status === 'error' || job.status === 'upstream_error') return 'text-red-300';
-    if (job.status === 'cancelled') return 'text-zinc-400';
+    if (job.status === 'cancelled') return 'text-stone-500 dark:text-zinc-400';
     if (job.status === 'interrupted') return 'text-amber-300';
     if (job.status === 'running') return 'text-cyan-300';
     return 'text-amber-300';
@@ -154,36 +154,36 @@
   <div class="mobile-drawer-root fixed inset-0 z-50">
     <button class="drawer-backdrop absolute inset-0" type="button" tabindex="-1" aria-label={$t.jobs.closeLabel} on:click={onClose}></button>
     <aside
-      class="mobile-drawer-panel fade-in absolute right-0 top-0 flex h-full w-full max-w-lg flex-col border-l border-zinc-800 bg-zinc-900 shadow-2xl"
+      class="mobile-drawer-panel fade-in absolute right-0 top-0 flex h-full w-full max-w-lg flex-col border-l border-stone-200 bg-white shadow-2xl shadow-stone-300/50 dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-none"
       aria-labelledby="jobs-drawer-title"
       use:dialog={{ open, onClose }}
       use:swipeClose={{ enabled: open, onClose }}
     >
-      <div class="flex items-center justify-between border-b border-zinc-800 p-5">
+      <div class="flex items-center justify-between border-b border-stone-200 p-5 dark:border-zinc-800">
         <div class="min-w-0">
-          <h2 id="jobs-drawer-title" class="text-lg font-semibold text-zinc-100">{$t.jobs.title}</h2>
-          <p class="mt-1 text-xs text-zinc-500">{$t.jobs.subtitle}</p>
+          <h2 id="jobs-drawer-title" class="text-lg font-semibold text-stone-950 dark:text-zinc-100">{$t.jobs.title}</h2>
+          <p class="mt-1 text-xs text-stone-500 dark:text-zinc-500">{$t.jobs.subtitle}</p>
         </div>
-        <button type="button" class="mobile-touch-target control-focus rounded-lg p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100" aria-label={$t.jobs.closeLabel} on:click={onClose}>x</button>
+        <button type="button" class="mobile-touch-target control-focus rounded-lg p-1.5 text-stone-500 hover:bg-stone-100 hover:text-stone-950 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100" aria-label={$t.jobs.closeLabel} on:click={onClose}>x</button>
       </div>
 
-      <div class="flex flex-col gap-3 border-b border-zinc-800 p-5 sm:flex-row sm:items-center sm:justify-between">
-        <div class="grid grid-cols-2 rounded-lg border border-zinc-800 bg-zinc-950 p-1 text-xs font-medium">
-          <button type="button" class={`control-focus rounded-md px-3 py-1.5 ${internalActiveTab === 'running' ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-500 hover:text-zinc-200'}`} on:click={() => selectTab('running')}>
+      <div class="flex flex-col gap-3 border-b border-stone-200 p-5 sm:flex-row sm:items-center sm:justify-between dark:border-zinc-800">
+        <div class="grid grid-cols-2 rounded-lg border border-stone-200 bg-stone-100 p-1 text-xs font-medium dark:border-zinc-800 dark:bg-zinc-950">
+          <button type="button" class={`control-focus rounded-md px-3 py-1.5 ${internalActiveTab === 'running' ? 'bg-white text-stone-900 shadow-sm dark:bg-zinc-800 dark:text-zinc-100 dark:shadow-none' : 'text-stone-500 hover:text-stone-900 dark:text-zinc-500 dark:hover:text-zinc-200'}`} on:click={() => selectTab('running')}>
             {$t.jobs.runningTab}
           </button>
-          <button type="button" class={`control-focus rounded-md px-3 py-1.5 ${internalActiveTab === 'history' ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-500 hover:text-zinc-200'}`} on:click={() => selectTab('history')}>
+          <button type="button" class={`control-focus rounded-md px-3 py-1.5 ${internalActiveTab === 'history' ? 'bg-white text-stone-900 shadow-sm dark:bg-zinc-800 dark:text-zinc-100 dark:shadow-none' : 'text-stone-500 hover:text-stone-900 dark:text-zinc-500 dark:hover:text-zinc-200'}`} on:click={() => selectTab('history')}>
             {$t.jobs.historyTab}
           </button>
         </div>
         <div class="flex flex-wrap justify-end gap-3">
           {#if internalActiveTab === 'running'}
-            <button type="button" class="control-focus rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40" disabled={!jobs.length} on:click={onToggleAll}>
+            <button type="button" class="control-focus rounded-lg border border-stone-300 px-3 py-2 text-xs text-stone-700 hover:bg-stone-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" disabled={!jobs.length} on:click={onToggleAll}>
               {$t.jobs.selectAll}
             </button>
           {/if}
           {#if internalActiveTab === 'history'}
-            <label class={`control-focus flex items-center gap-2 rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-300 ${historyLoading ? 'cursor-not-allowed opacity-40' : 'cursor-pointer hover:bg-zinc-800'}`}>
+            <label class={`control-focus flex items-center gap-2 rounded-lg border border-stone-300 px-3 py-2 text-xs text-stone-700 dark:border-zinc-700 dark:text-zinc-300 ${historyLoading ? 'cursor-not-allowed opacity-40' : 'cursor-pointer hover:bg-stone-100 dark:hover:bg-zinc-800'}`}>
               <input
                 type="checkbox"
                 class="h-3.5 w-3.5 accent-red-500"
@@ -203,7 +203,7 @@
               {$t.jobs.clearHistory}
             </button>
           {/if}
-          <button type="button" class="control-focus rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40" disabled={internalActiveTab === 'history' && historyLoading} on:click={refreshCurrentTab}>
+          <button type="button" class="control-focus rounded-lg border border-stone-300 px-3 py-2 text-xs text-stone-700 hover:bg-stone-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" disabled={internalActiveTab === 'history' && historyLoading} on:click={refreshCurrentTab}>
             {$t.jobs.refresh}
           </button>
         </div>
@@ -211,47 +211,47 @@
 
       <div bind:this={historyScrollEl} class="mobile-drawer-scroll min-h-0 flex-1 overflow-y-auto p-5" on:scroll={handleHistoryScroll}>
         {#if internalActiveTab === 'running' && jobs.length === 0}
-          <div class="rounded-xl border border-dashed border-zinc-800 bg-zinc-950/35 px-4 py-10 text-center">
-            <p class="text-sm font-medium text-zinc-300">{$t.jobs.noRunning}</p>
-            <p class="mt-2 text-xs text-zinc-500">{$t.jobs.noRunningHint}</p>
+          <div class="rounded-xl border border-dashed border-stone-300 bg-stone-100/80 px-4 py-10 text-center dark:border-zinc-800 dark:bg-zinc-950/35">
+            <p class="text-sm font-medium text-stone-700 dark:text-zinc-300">{$t.jobs.noRunning}</p>
+            <p class="mt-2 text-xs text-stone-500 dark:text-zinc-500">{$t.jobs.noRunningHint}</p>
           </div>
         {:else if internalActiveTab === 'running'}
           <div class="space-y-3">
             {#each jobs as job (job.job_id)}
-              <div class="flex gap-3 rounded-xl border border-zinc-800 bg-zinc-950/45 p-4">
+              <div class="flex gap-3 rounded-xl border border-stone-200 bg-stone-50/80 p-4 dark:border-zinc-800 dark:bg-zinc-950/45">
                 <input type="checkbox" class="control-focus mt-1 accent-emerald-500" checked={selectedIds.has(job.job_id)} on:change={() => onToggle(job.job_id)} />
                 <div class="min-w-0 flex-1">
                   <div class="flex items-center justify-between gap-3">
-                    <span class="rounded-md border border-zinc-700 px-2 py-0.5 text-[11px] text-zinc-400">{operationLabel(job.operation, $t.operations)}</span>
+                    <span class="rounded-md border border-stone-300 px-2 py-0.5 text-[11px] text-stone-500 dark:border-zinc-700 dark:text-zinc-400">{operationLabel(job.operation, $t.operations)}</span>
                     <span class={`text-xs font-medium ${statusClass(job)}`}>{statusLabel(job.status, $t.statuses)}</span>
                   </div>
-                  <p class="mt-2 truncate text-sm text-zinc-200">{job.prompt || $t.common.untitledJob}</p>
-                  <p class="mt-1 truncate text-xs text-zinc-500">{stageLabel(job, $t.stages)}</p>
+                  <p class="mt-2 truncate text-sm text-stone-800 dark:text-zinc-200">{job.prompt || $t.common.untitledJob}</p>
+                  <p class="mt-1 truncate text-xs text-stone-500 dark:text-zinc-500">{stageLabel(job, $t.stages)}</p>
                 </div>
               </div>
             {/each}
           </div>
         {:else if historyLoading && historyJobs.length === 0}
-          <div class="rounded-xl border border-dashed border-zinc-800 bg-zinc-950/35 px-4 py-10 text-center">
-            <p class="text-sm font-medium text-zinc-300">{$t.jobs.historyLoading}</p>
+          <div class="rounded-xl border border-dashed border-stone-300 bg-stone-100/80 px-4 py-10 text-center dark:border-zinc-800 dark:bg-zinc-950/35">
+            <p class="text-sm font-medium text-stone-700 dark:text-zinc-300">{$t.jobs.historyLoading}</p>
           </div>
         {:else if historyJobs.length === 0}
-          <div class="rounded-xl border border-dashed border-zinc-800 bg-zinc-950/35 px-4 py-10 text-center">
-            <p class="text-sm font-medium text-zinc-300">{historyFailedOnly ? $t.jobs.noErrorHistory : $t.jobs.noHistory}</p>
-            <p class="mt-2 text-xs text-zinc-500">{historyFailedOnly ? $t.jobs.noErrorHistoryHint : $t.jobs.noHistoryHint}</p>
+          <div class="rounded-xl border border-dashed border-stone-300 bg-stone-100/80 px-4 py-10 text-center dark:border-zinc-800 dark:bg-zinc-950/35">
+            <p class="text-sm font-medium text-stone-700 dark:text-zinc-300">{historyFailedOnly ? $t.jobs.noErrorHistory : $t.jobs.noHistory}</p>
+            <p class="mt-2 text-xs text-stone-500 dark:text-zinc-500">{historyFailedOnly ? $t.jobs.noErrorHistoryHint : $t.jobs.noHistoryHint}</p>
           </div>
         {:else}
           <div class="space-y-3" aria-busy={historyLoading}>
             {#each historyJobs as job (job.job_id)}
               <div class="min-h-[175px]" use:lazyRender={job.job_id}>
                 {#if visibleJobIds.has(job.job_id)}
-                  <article class="deferred-list-item rounded-xl border border-zinc-800 bg-zinc-950/45 p-4">
+                  <article class="deferred-list-item rounded-xl border border-stone-200 bg-stone-50/80 p-4 dark:border-zinc-800 dark:bg-zinc-950/45">
                     <div class="flex items-center justify-between gap-3">
-                      <span class="rounded-md border border-zinc-700 px-2 py-0.5 text-[11px] text-zinc-400">{operationLabel(job.operation, $t.operations)}</span>
+                      <span class="rounded-md border border-stone-300 px-2 py-0.5 text-[11px] text-stone-500 dark:border-zinc-700 dark:text-zinc-400">{operationLabel(job.operation, $t.operations)}</span>
                       <span class={`text-xs font-medium ${statusClass(job)}`}>{statusLabel(job.status, $t.statuses)}</span>
                     </div>
-                    <p class="mt-2 line-clamp-2 text-sm text-zinc-200">{job.prompt || $t.common.untitledJob}</p>
-                    <p class="mt-1 truncate text-xs text-zinc-500">{historyStageLabel(job, $t.stages)}</p>
+                    <p class="mt-2 line-clamp-2 text-sm text-stone-800 dark:text-zinc-200">{job.prompt || $t.common.untitledJob}</p>
+                    <p class="mt-1 truncate text-xs text-stone-500 dark:text-zinc-500">{historyStageLabel(job, $t.stages)}</p>
                     {#if jobErrorMessage(job, $t.messages.jobFailed)}
                       <div
                         class:hidden={!isErrorExpanded(job.job_id)}

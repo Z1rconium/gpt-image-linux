@@ -107,7 +107,7 @@
             {#if canNavigatePrevious}
               <button
                 type="button"
-                class="mobile-touch-target control-focus inline-flex h-10 w-10 items-center justify-center rounded-lg border border-zinc-700 text-lg leading-none text-zinc-300 transition-colors hover:bg-zinc-800 hover:text-zinc-100 disabled:cursor-not-allowed disabled:opacity-40"
+                class="mobile-touch-target control-focus inline-flex h-10 w-10 items-center justify-center rounded-lg border border-stone-300 text-lg leading-none text-stone-700 transition-colors hover:bg-stone-100 hover:text-stone-950 disabled:cursor-not-allowed disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
                 aria-label={$t.lightbox.previousImage}
                 disabled={navigating}
                 on:click={onNavigatePrevious}
@@ -121,7 +121,7 @@
             {#if canNavigateNext}
               <button
                 type="button"
-                class="mobile-touch-target control-focus inline-flex h-10 w-10 items-center justify-center rounded-lg border border-zinc-700 text-lg leading-none text-zinc-300 transition-colors hover:bg-zinc-800 hover:text-zinc-100 disabled:cursor-not-allowed disabled:opacity-40"
+                class="mobile-touch-target control-focus inline-flex h-10 w-10 items-center justify-center rounded-lg border border-stone-300 text-lg leading-none text-stone-700 transition-colors hover:bg-stone-100 hover:text-stone-950 disabled:cursor-not-allowed disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
                 aria-label={$t.lightbox.nextImage}
                 disabled={navigating}
                 on:click={onNavigateNext}
@@ -135,49 +135,49 @@
         </div>
       </div>
       <aside class="lightbox-details flex min-h-0 flex-col">
-        <div class="flex items-start justify-between gap-3 border-b border-zinc-800 p-5">
+        <div class="flex items-start justify-between gap-3 border-b border-stone-200 p-5 dark:border-zinc-800">
           <div class="min-w-0">
-            <h2 id="lightbox-title" class="text-sm font-semibold text-zinc-100">{$t.lightbox.title}</h2>
-            <p class="mt-1 truncate text-xs text-zinc-500">{image.filename}</p>
+            <h2 id="lightbox-title" class="text-sm font-semibold text-stone-950 dark:text-zinc-100">{$t.lightbox.title}</h2>
+            <p class="mt-1 truncate text-xs text-stone-500 dark:text-zinc-500">{image.filename}</p>
           </div>
-          <button type="button" class="mobile-touch-target control-focus rounded-lg p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100" aria-label={$t.lightbox.closeLabel} on:click={onClose}>x</button>
+          <button type="button" class="mobile-touch-target control-focus rounded-lg p-1.5 text-stone-500 hover:bg-stone-100 hover:text-stone-950 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100" aria-label={$t.lightbox.closeLabel} on:click={onClose}>x</button>
         </div>
         <div class="min-h-0 flex-1 space-y-4 overflow-y-auto p-5">
           <div>
-            <div class="mb-1 text-xs font-medium text-zinc-500">{$t.common.prompt}</div>
-            <p class="whitespace-pre-wrap text-sm text-zinc-200">{image.prompt}</p>
+            <div class="mb-1 text-xs font-medium text-stone-500 dark:text-zinc-500">{$t.common.prompt}</div>
+            <p class="whitespace-pre-wrap text-sm text-stone-800 dark:text-zinc-200">{image.prompt}</p>
           </div>
           <div class="grid grid-cols-2 gap-2 text-xs">
-            <div class="rounded-lg border border-zinc-800 bg-zinc-950/50 px-3 py-2">
-              <div class="text-zinc-600">{$t.common.size}</div>
-              <div class="mt-1 text-zinc-300">{displayImageSize(image)}</div>
+            <div class="rounded-lg border border-stone-200 bg-stone-50/80 px-3 py-2 dark:border-zinc-800 dark:bg-zinc-950/50">
+              <div class="text-stone-400 dark:text-zinc-600">{$t.common.size}</div>
+              <div class="mt-1 text-stone-700 dark:text-zinc-300">{displayImageSize(image)}</div>
             </div>
-            <div class="rounded-lg border border-zinc-800 bg-zinc-950/50 px-3 py-2">
-              <div class="text-zinc-600">{$t.common.model}</div>
-              <div class="mt-1 truncate text-zinc-300">{image.model || '-'}</div>
+            <div class="rounded-lg border border-stone-200 bg-stone-50/80 px-3 py-2 dark:border-zinc-800 dark:bg-zinc-950/50">
+              <div class="text-stone-400 dark:text-zinc-600">{$t.common.model}</div>
+              <div class="mt-1 truncate text-stone-700 dark:text-zinc-300">{image.model || '-'}</div>
             </div>
-            <div class="rounded-lg border border-zinc-800 bg-zinc-950/50 px-3 py-2">
-              <div class="text-zinc-600">{$t.common.completedAt}</div>
-              <div class="mt-1 whitespace-nowrap text-zinc-300">{formatBeijingTime(image.completed_at)}</div>
+            <div class="rounded-lg border border-stone-200 bg-stone-50/80 px-3 py-2 dark:border-zinc-800 dark:bg-zinc-950/50">
+              <div class="text-stone-400 dark:text-zinc-600">{$t.common.completedAt}</div>
+              <div class="mt-1 whitespace-nowrap text-stone-700 dark:text-zinc-300">{formatBeijingTime(image.completed_at)}</div>
             </div>
-            <div class="rounded-lg border border-zinc-800 bg-zinc-950/50 px-3 py-2">
-              <div class="text-zinc-600">{$t.common.preset}</div>
-              <div class="mt-1 truncate text-zinc-300">{image.api_preset_name || '-'}</div>
+            <div class="rounded-lg border border-stone-200 bg-stone-50/80 px-3 py-2 dark:border-zinc-800 dark:bg-zinc-950/50">
+              <div class="text-stone-400 dark:text-zinc-600">{$t.common.preset}</div>
+              <div class="mt-1 truncate text-stone-700 dark:text-zinc-300">{image.api_preset_name || '-'}</div>
             </div>
-            <div class="rounded-lg border border-zinc-800 bg-zinc-950/50 px-3 py-2">
-              <div class="text-zinc-600">{$t.common.duration}</div>
-              <div class="mt-1 text-zinc-300">{image.duration || '-'}</div>
+            <div class="rounded-lg border border-stone-200 bg-stone-50/80 px-3 py-2 dark:border-zinc-800 dark:bg-zinc-950/50">
+              <div class="text-stone-400 dark:text-zinc-600">{$t.common.duration}</div>
+              <div class="mt-1 text-stone-700 dark:text-zinc-300">{image.duration || '-'}</div>
             </div>
           </div>
         </div>
-        <div class="lightbox-details-actions grid grid-cols-2 gap-2 border-t border-zinc-800 p-5">
-          <button type="button" class="control-focus rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800" on:click={() => onEdit(image)}>{$t.common.edit}</button>
-          <button type="button" class="control-focus rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800" on:click={() => onFavorite(image)}>{image.favorite ? $t.common.unfavorite : $t.common.favorite}</button>
-          <button type="button" class="control-focus rounded-lg border border-emerald-500/40 px-3 py-2 text-xs text-emerald-200 hover:bg-emerald-500/10" on:click={() => onUsePrompt(image)}>{$t.common.usePrompt}</button>
-          <button type="button" class="control-focus rounded-lg border border-emerald-500/40 px-3 py-2 text-xs text-emerald-200 hover:bg-emerald-500/10" on:click={() => onUseAll(image)}>{$t.common.useAllParams}</button>
-          <button type="button" class="control-focus rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800" on:click={() => onCopyPrompt(image)}>{$t.common.copyPrompt}</button>
-          <button type="button" class="control-focus rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800" on:click={() => onCopyUrl(image)}>{$t.common.copyUrl}</button>
-          <a href={downloadUrl(image.filename)} class="control-focus rounded-lg border border-zinc-700 px-3 py-2 text-center text-xs text-zinc-300 hover:bg-zinc-800">{$t.common.download}</a>
+        <div class="lightbox-details-actions grid grid-cols-2 gap-2 border-t border-stone-200 p-5 dark:border-zinc-800">
+          <button type="button" class="control-focus rounded-lg border border-stone-300 px-3 py-2 text-xs text-stone-700 hover:bg-stone-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" on:click={() => onEdit(image)}>{$t.common.edit}</button>
+          <button type="button" class="control-focus rounded-lg border border-stone-300 px-3 py-2 text-xs text-stone-700 hover:bg-stone-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" on:click={() => onFavorite(image)}>{image.favorite ? $t.common.unfavorite : $t.common.favorite}</button>
+          <button type="button" class="control-focus rounded-lg border border-emerald-500/40 px-3 py-2 text-xs text-emerald-700 hover:bg-emerald-500/10 dark:text-emerald-200" on:click={() => onUsePrompt(image)}>{$t.common.usePrompt}</button>
+          <button type="button" class="control-focus rounded-lg border border-emerald-500/40 px-3 py-2 text-xs text-emerald-700 hover:bg-emerald-500/10 dark:text-emerald-200" on:click={() => onUseAll(image)}>{$t.common.useAllParams}</button>
+          <button type="button" class="control-focus rounded-lg border border-stone-300 px-3 py-2 text-xs text-stone-700 hover:bg-stone-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" on:click={() => onCopyPrompt(image)}>{$t.common.copyPrompt}</button>
+          <button type="button" class="control-focus rounded-lg border border-stone-300 px-3 py-2 text-xs text-stone-700 hover:bg-stone-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" on:click={() => onCopyUrl(image)}>{$t.common.copyUrl}</button>
+          <a href={downloadUrl(image.filename)} class="control-focus rounded-lg border border-stone-300 px-3 py-2 text-center text-xs text-stone-700 hover:bg-stone-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800">{$t.common.download}</a>
           <button type="button" class="control-focus rounded-lg border border-red-500/40 px-3 py-2 text-xs text-red-300 hover:bg-red-500/10" on:click={() => onDelete(image)}>{$t.common.delete}</button>
         </div>
       </aside>

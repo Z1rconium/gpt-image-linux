@@ -148,34 +148,34 @@
   }
 </script>
 
-<section class="rounded-2xl border border-zinc-800 bg-zinc-900/60 p-4 sm:p-5">
+<section class="rounded-2xl border border-stone-200 bg-white/80 p-4 shadow-sm shadow-stone-200/60 sm:p-5 dark:border-zinc-800 dark:bg-zinc-900/60 dark:shadow-none">
   <div class="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
     <div>
-      <h2 class="text-sm font-semibold text-zinc-100">{$t.gallery.title}</h2>
-      <p class="mt-1 text-xs text-zinc-500">
+      <h2 class="text-sm font-semibold text-stone-950 dark:text-zinc-100">{$t.gallery.title}</h2>
+      <p class="mt-1 text-xs text-stone-500 dark:text-zinc-500">
         {gallery?.total ? $t.gallery.imageCount(gallery.total) : $t.gallery.noImages}
         {#if gallery?.total_bytes}
           <span class="ml-2">{formatBytes(gallery.total_bytes)}</span>
         {:else if gallery?.total}
-          <button type="button" class="control-focus ml-2 rounded text-xs font-medium text-zinc-400 hover:text-zinc-200" on:click={onLoadStats}>
+          <button type="button" class="control-focus ml-2 rounded text-xs font-medium text-stone-600 hover:text-stone-900 dark:text-zinc-400 dark:hover:text-zinc-200" on:click={onLoadStats}>
             {$t.gallery.showSize}
           </button>
         {/if}
       </p>
     </div>
     <div class="flex flex-wrap gap-2">
-      <button type="button" class="control-focus rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800" on:click={() => onSelectionMode(!selectionMode)}>
+      <button type="button" class="control-focus rounded-lg border border-stone-300 px-3 py-2 text-xs text-stone-700 hover:bg-stone-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" on:click={() => onSelectionMode(!selectionMode)}>
         {selectionMode ? $t.gallery.cancelSelection : $t.gallery.select}
       </button>
-      <button type="button" class="control-focus rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40" disabled={busy} on:click={() => importInput.click()}>
+      <button type="button" class="control-focus rounded-lg border border-stone-300 px-3 py-2 text-xs text-stone-700 hover:bg-stone-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" disabled={busy} on:click={() => importInput.click()}>
         {operationStatus?.kind === 'import' ? $t.gallery.importing : $t.gallery.import}
       </button>
-      <button type="button" class="control-focus rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40" disabled={busy} on:click={onExport}>
+      <button type="button" class="control-focus rounded-lg border border-stone-300 px-3 py-2 text-xs text-stone-700 hover:bg-stone-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" disabled={busy} on:click={onExport}>
         {operationStatus?.kind === 'export' ? $t.gallery.exporting : $t.gallery.exportZip}
       </button>
       <button
         type="button"
-        class="control-focus rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40"
+        class="control-focus rounded-lg border border-stone-300 px-3 py-2 text-xs text-stone-700 hover:bg-stone-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
         disabled={busy || !canSyncR2}
         title={canSyncR2 ? $t.gallery.syncR2 : $t.messages.r2BackupUnavailable}
         on:click={onSync}
@@ -197,22 +197,22 @@
       placeholder={$t.gallery.filterPrompt}
       autocomplete="off"
       aria-label={$t.gallery.filterPrompt}
-      class="control-focus min-w-[160px] flex-1 rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 focus:border-emerald-500"
+      class="control-focus min-w-[160px] flex-1 rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-sm text-stone-900 focus:border-emerald-500 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-100"
       on:input={handleSearchInput}
     />
-    <select value={filters.model} aria-label={$t.common.model} class="control-focus min-w-[140px] rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 focus:border-emerald-500" on:change={(event) => onFilter('model', event.currentTarget.value)}>
+    <select value={filters.model} aria-label={$t.common.model} class="control-focus min-w-[140px] rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-sm text-stone-900 focus:border-emerald-500 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-100" on:change={(event) => onFilter('model', event.currentTarget.value)}>
       <option value="">{$t.gallery.allModels}</option>
       {#each gallery?.filter_options.models || [] as model}
         <option value={model}>{model}</option>
       {/each}
     </select>
-    <select value={filters.preset} aria-label={$t.common.preset} class="control-focus min-w-[140px] rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 focus:border-emerald-500" on:change={(event) => onFilter('preset', event.currentTarget.value)}>
+    <select value={filters.preset} aria-label={$t.common.preset} class="control-focus min-w-[140px] rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-sm text-stone-900 focus:border-emerald-500 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-100" on:change={(event) => onFilter('preset', event.currentTarget.value)}>
       <option value="">{$t.gallery.allPresets}</option>
       {#each gallery?.filter_options.presets || [] as preset}
         <option value={preset}>{preset}</option>
       {/each}
     </select>
-    <select value={filters.size} aria-label={$t.common.size} class="control-focus min-w-[120px] rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 focus:border-emerald-500" on:change={(event) => onFilter('size', event.currentTarget.value)}>
+    <select value={filters.size} aria-label={$t.common.size} class="control-focus min-w-[120px] rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-sm text-stone-900 focus:border-emerald-500 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-100" on:change={(event) => onFilter('size', event.currentTarget.value)}>
       <option value="">{$t.gallery.allSizes}</option>
       {#each gallery?.filter_options.sizes || [] as size}
         <option value={size}>{size}</option>
@@ -223,7 +223,7 @@
       value={filters.dateFrom}
       aria-label={$t.gallery.dateFrom}
       placeholder={$t.gallery.dateFrom}
-      class="control-focus w-[135px] rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-2 text-sm text-zinc-100 focus:border-emerald-500"
+      class="control-focus w-[135px] rounded-lg border border-stone-200 bg-stone-50 px-2 py-2 text-sm text-stone-900 focus:border-emerald-500 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-100"
       on:change={(event) => onFilter('dateFrom', event.currentTarget.value)}
     />
     <input
@@ -231,29 +231,29 @@
       value={filters.dateTo}
       aria-label={$t.gallery.dateTo}
       placeholder={$t.gallery.dateTo}
-      class="control-focus w-[135px] rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-2 text-sm text-zinc-100 focus:border-emerald-500"
+      class="control-focus w-[135px] rounded-lg border border-stone-200 bg-stone-50 px-2 py-2 text-sm text-stone-900 focus:border-emerald-500 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-100"
       on:change={(event) => onFilter('dateTo', event.currentTarget.value)}
     />
-    <label class="flex items-center gap-2 rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-300">
+    <label class="flex items-center gap-2 rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-sm text-stone-700 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-300">
       <input type="checkbox" class="control-focus accent-emerald-500" checked={filters.favorite} on:change={(event) => onFilter('favorite', event.currentTarget.checked)} />
       {$t.gallery.favorites}
     </label>
   </div>
 
   {#if hasFilters}
-    <button type="button" class="control-focus mb-4 rounded text-xs font-medium text-emerald-300 hover:text-emerald-200" on:click={onResetFilters}>{$t.gallery.resetFilters}</button>
+    <button type="button" class="control-focus mb-4 rounded text-xs font-medium text-emerald-700 hover:text-emerald-800 dark:text-emerald-300 dark:hover:text-emerald-200" on:click={onResetFilters}>{$t.gallery.resetFilters}</button>
   {/if}
 
   {#if selectionMode}
     <div class="mb-4 flex flex-col gap-3 rounded-xl border border-emerald-500/30 bg-emerald-500/5 p-3 sm:flex-row sm:items-center sm:justify-between">
-      <div class="text-xs font-medium text-emerald-200">{selectionSummary}</div>
+      <div class="text-xs font-medium text-emerald-800 dark:text-emerald-200">{selectionSummary}</div>
       <div class="flex flex-wrap gap-2">
-        <button type="button" class="control-focus rounded-lg border border-zinc-700 px-2.5 py-2 text-xs text-zinc-300 hover:bg-zinc-800" on:click={onSelectPage}>{$t.gallery.selectAllPage}</button>
-        <button type="button" class="control-focus rounded-lg border border-zinc-700 px-2.5 py-2 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40" disabled={!gallery?.total || busy} on:click={onSelectFiltered}>{$t.gallery.selectFiltered}</button>
-        <button type="button" class="control-focus rounded-lg border border-zinc-700 px-2.5 py-2 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40" disabled={!hasSelection} on:click={onClearSelection}>{$t.gallery.clearSelection}</button>
-        <button type="button" class="control-focus rounded-lg border border-zinc-700 px-2.5 py-2 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40" disabled={!hasSelection || busy} on:click={onBatchDownload}>{operationStatus?.kind === 'download' ? $t.gallery.downloading : $t.gallery.downloadSelected}</button>
-        <button type="button" class="control-focus rounded-lg border border-zinc-700 px-2.5 py-2 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40" disabled={!hasSelection || busy} on:click={() => onBatchFavorite(true)}>{$t.gallery.favoriteSelected}</button>
-        <button type="button" class="control-focus rounded-lg border border-zinc-700 px-2.5 py-2 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40" disabled={!hasSelection || busy} on:click={() => onBatchFavorite(false)}>{$t.gallery.unfavoriteSelected}</button>
+        <button type="button" class="control-focus rounded-lg border border-stone-300 px-2.5 py-2 text-xs text-stone-700 hover:bg-stone-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" on:click={onSelectPage}>{$t.gallery.selectAllPage}</button>
+        <button type="button" class="control-focus rounded-lg border border-stone-300 px-2.5 py-2 text-xs text-stone-700 hover:bg-stone-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" disabled={!gallery?.total || busy} on:click={onSelectFiltered}>{$t.gallery.selectFiltered}</button>
+        <button type="button" class="control-focus rounded-lg border border-stone-300 px-2.5 py-2 text-xs text-stone-700 hover:bg-stone-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" disabled={!hasSelection} on:click={onClearSelection}>{$t.gallery.clearSelection}</button>
+        <button type="button" class="control-focus rounded-lg border border-stone-300 px-2.5 py-2 text-xs text-stone-700 hover:bg-stone-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" disabled={!hasSelection || busy} on:click={onBatchDownload}>{operationStatus?.kind === 'download' ? $t.gallery.downloading : $t.gallery.downloadSelected}</button>
+        <button type="button" class="control-focus rounded-lg border border-stone-300 px-2.5 py-2 text-xs text-stone-700 hover:bg-stone-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" disabled={!hasSelection || busy} on:click={() => onBatchFavorite(true)}>{$t.gallery.favoriteSelected}</button>
+        <button type="button" class="control-focus rounded-lg border border-stone-300 px-2.5 py-2 text-xs text-stone-700 hover:bg-stone-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" disabled={!hasSelection || busy} on:click={() => onBatchFavorite(false)}>{$t.gallery.unfavoriteSelected}</button>
         <button type="button" class="control-focus rounded-lg border border-red-500/40 px-2.5 py-2 text-xs text-red-300 hover:bg-red-500/10 disabled:opacity-40" disabled={!hasSelection || busy} on:click={onBatchDelete}>{$t.gallery.deleteSelected}</button>
       </div>
     </div>
@@ -281,29 +281,29 @@
   {#if initialLoading}
     <div class="grid gap-4 sm:grid-cols-2 md:gap-5 lg:grid-cols-3 lg:gap-4" aria-label={$t.gallery.loading}>
       {#each skeletonCards as _}
-        <div class="overflow-hidden rounded-xl border border-zinc-800 bg-zinc-950/45">
-          <div class="aspect-square animate-pulse bg-zinc-800/60"></div>
+        <div class="overflow-hidden rounded-xl border border-stone-200 bg-stone-100/90 dark:border-zinc-800 dark:bg-zinc-950/45">
+          <div class="aspect-square animate-pulse bg-stone-200/80 dark:bg-zinc-800/60"></div>
           <div class="space-y-3 p-3">
-            <div class="h-4 w-5/6 animate-pulse rounded bg-zinc-800/70"></div>
-            <div class="h-3 w-1/2 animate-pulse rounded bg-zinc-800/60"></div>
+            <div class="h-4 w-5/6 animate-pulse rounded bg-stone-200 dark:bg-zinc-800/70"></div>
+            <div class="h-3 w-1/2 animate-pulse rounded bg-stone-200 dark:bg-zinc-800/60"></div>
             <div class="flex gap-2">
-              <div class="h-7 w-14 animate-pulse rounded bg-zinc-800/60"></div>
-              <div class="h-7 w-16 animate-pulse rounded bg-zinc-800/60"></div>
+              <div class="h-7 w-14 animate-pulse rounded bg-stone-200 dark:bg-zinc-800/60"></div>
+              <div class="h-7 w-16 animate-pulse rounded bg-stone-200 dark:bg-zinc-800/60"></div>
             </div>
           </div>
         </div>
       {/each}
     </div>
   {:else if images.length === 0}
-    <div class="rounded-xl border border-dashed border-zinc-800 bg-zinc-950/35 px-4 py-10 text-center">
-      <p class="text-sm font-medium text-zinc-300">{hasFilters ? $t.gallery.noMatch : $t.gallery.empty}</p>
-      <p class="mt-2 text-xs text-zinc-500">{hasFilters ? $t.gallery.noMatchHint : $t.gallery.emptyHint}</p>
+    <div class="rounded-xl border border-dashed border-stone-300 bg-stone-100/80 px-4 py-10 text-center dark:border-zinc-800 dark:bg-zinc-950/35">
+      <p class="text-sm font-medium text-stone-700 dark:text-zinc-300">{hasFilters ? $t.gallery.noMatch : $t.gallery.empty}</p>
+      <p class="mt-2 text-xs text-stone-500 dark:text-zinc-500">{hasFilters ? $t.gallery.noMatchHint : $t.gallery.emptyHint}</p>
     </div>
   {:else}
     <div class="relative" aria-busy={loading}>
       {#if loading}
-        <div class="pointer-events-none absolute inset-0 z-10 rounded-xl bg-zinc-950/20 backdrop-blur-[1px]">
-          <div class="absolute right-3 top-3 rounded-lg border border-zinc-700 bg-zinc-950/90 px-3 py-2 text-xs text-zinc-300 shadow-lg">
+        <div class="pointer-events-none absolute inset-0 z-10 rounded-xl bg-white/30 backdrop-blur-[1px] dark:bg-zinc-950/20">
+          <div class="absolute right-3 top-3 rounded-lg border border-stone-300 bg-white/90 px-3 py-2 text-xs text-stone-700 shadow-lg dark:border-zinc-700 dark:bg-zinc-950/90 dark:text-zinc-300">
             {$t.gallery.loading}
           </div>
         </div>
@@ -311,10 +311,10 @@
 
       <div class={`grid gap-4 sm:grid-cols-2 md:gap-5 lg:grid-cols-3 lg:gap-4 ${loading ? 'opacity-70' : ''}`}>
         {#each images as image, index (image.id)}
-          <article class={`gallery-card overflow-hidden rounded-xl border ${isImageSelected(image) ? 'border-emerald-400 bg-emerald-500/10' : 'border-zinc-800 bg-zinc-950/45'}`}>
-            <button type="button" class="control-focus relative block aspect-square w-full bg-zinc-950" aria-label={image.prompt} on:click={() => handleImageClick(image)}>
+          <article class={`gallery-card overflow-hidden rounded-xl border ${isImageSelected(image) ? 'border-emerald-400 bg-emerald-500/10' : 'border-stone-200 bg-white/85 dark:border-zinc-800 dark:bg-zinc-950/45'}`}>
+            <button type="button" class="control-focus relative block aspect-square w-full bg-stone-100 dark:bg-zinc-950" aria-label={image.prompt} on:click={() => handleImageClick(image)}>
               {#if selectionMode}
-                <span class="absolute left-2 top-2 z-10 rounded-md bg-zinc-950/80 px-2 py-1 text-xs font-medium text-zinc-100">
+                <span class="absolute left-2 top-2 z-10 rounded-md bg-white/90 px-2 py-1 text-xs font-medium text-stone-800 dark:bg-zinc-950/80 dark:text-zinc-100">
                   {isImageSelected(image) ? '✓' : ''}
                 </span>
               {/if}
@@ -341,13 +341,13 @@
             </button>
             <div class="space-y-2 p-2.5">
               <div class="min-w-0">
-                <p class="line-clamp-2 text-xs leading-5 text-zinc-200">{image.prompt}</p>
-                <p class="mt-1 truncate text-[11px] leading-4 text-zinc-500">{displayImageSize(image)} / {image.model || '-'}</p>
+                <p class="line-clamp-2 text-xs leading-5 text-stone-800 dark:text-zinc-200">{image.prompt}</p>
+                <p class="mt-1 truncate text-[11px] leading-4 text-stone-500 dark:text-zinc-500">{displayImageSize(image)} / {image.model || '-'}</p>
               </div>
               <div class="grid grid-cols-6 gap-1">
                 <button
                   type="button"
-                  class="gallery-icon-action control-focus border-emerald-500/40 text-emerald-200 hover:bg-emerald-500/10"
+                  class="gallery-icon-action control-focus border-emerald-500/40 text-emerald-700 hover:bg-emerald-500/10 dark:text-emerald-200"
                   aria-label={$t.common.usePrompt}
                   title={$t.common.usePrompt}
                   on:click={(event) => handleGalleryAction(event, () => onUsePrompt(image))}
@@ -356,7 +356,7 @@
                 </button>
                 <button
                   type="button"
-                  class="gallery-icon-action control-focus border-emerald-500/40 text-emerald-200 hover:bg-emerald-500/10"
+                  class="gallery-icon-action control-focus border-emerald-500/40 text-emerald-700 hover:bg-emerald-500/10 dark:text-emerald-200"
                   aria-label={$t.common.useAllParams}
                   title={$t.common.useAllParams}
                   on:click={(event) => handleGalleryAction(event, () => onUseAll(image))}
@@ -365,7 +365,7 @@
                 </button>
                 <button
                   type="button"
-                  class="gallery-icon-action control-focus border-zinc-700 text-zinc-300 hover:bg-zinc-800"
+                  class="gallery-icon-action control-focus border-stone-300 text-stone-700 hover:bg-stone-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
                   aria-label={$t.common.edit}
                   title={$t.common.edit}
                   on:click={(event) => handleGalleryAction(event, () => onEdit(image))}
@@ -374,7 +374,7 @@
                 </button>
                 <button
                   type="button"
-                  class="gallery-icon-action control-focus border-zinc-700 text-zinc-300 hover:bg-zinc-800"
+                  class="gallery-icon-action control-focus border-stone-300 text-stone-700 hover:bg-stone-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
                   aria-label={image.favorite ? $t.common.unfavorite : $t.common.favorite}
                   title={image.favorite ? $t.common.unfavorite : $t.common.favorite}
                   on:click={(event) => handleGalleryAction(event, () => onFavorite(image))}
@@ -383,7 +383,7 @@
                 </button>
                 <a
                   href={`/api/download/${encodeURIComponent(image.filename)}`}
-                  class="gallery-icon-action control-focus border-zinc-700 text-zinc-300 hover:bg-zinc-800"
+                  class="gallery-icon-action control-focus border-stone-300 text-stone-700 hover:bg-stone-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
                   aria-label={$t.common.download}
                   title={$t.common.download}
                   on:click|stopPropagation
@@ -407,10 +407,10 @@
     </div>
 
     <div class="mt-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-      <button type="button" disabled={loading || !gallery?.has_prev} class="control-focus rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40" on:click={() => onPage(clampPage(currentPage - 1), 'prev')}>
+      <button type="button" disabled={loading || !gallery?.has_prev} class="control-focus rounded-lg border border-stone-300 px-3 py-2 text-xs text-stone-700 hover:bg-stone-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" on:click={() => onPage(clampPage(currentPage - 1), 'prev')}>
         {$t.gallery.previous}
       </button>
-      <label class="flex items-center justify-center gap-2 text-xs text-zinc-500">
+      <label class="flex items-center justify-center gap-2 text-xs text-stone-500 dark:text-zinc-500">
         <span>{$t.gallery.pageInputPrefix}</span>
         <input
           type="number"
@@ -421,13 +421,13 @@
           disabled={loading}
           aria-label={$t.gallery.jumpPageLabel}
           title={$t.gallery.jumpPageHint(totalPages)}
-          class="control-focus h-9 w-16 rounded-lg border border-zinc-800 bg-zinc-950 px-2 text-center text-sm text-zinc-100 focus:border-emerald-500 disabled:opacity-50"
+          class="control-focus h-9 w-16 rounded-lg border border-stone-200 bg-stone-50 px-2 text-center text-sm text-stone-900 focus:border-emerald-500 disabled:opacity-50 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-100"
           on:input={(event) => (pageInput = event.currentTarget.value)}
           on:keydown={handlePageInputKeydown}
         />
         <span>{$t.gallery.pageInputSuffix(totalPages)}</span>
       </label>
-      <button type="button" disabled={loading || !gallery?.has_next} class="control-focus rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40" on:click={() => onPage(clampPage(currentPage + 1), 'next')}>
+      <button type="button" disabled={loading || !gallery?.has_next} class="control-focus rounded-lg border border-stone-300 px-3 py-2 text-xs text-stone-700 hover:bg-stone-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" on:click={() => onPage(clampPage(currentPage + 1), 'next')}>
         {$t.gallery.next}
       </button>
     </div>
