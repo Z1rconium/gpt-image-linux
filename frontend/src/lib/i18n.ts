@@ -9,6 +9,7 @@ const en = {
   common: {
     active: 'Active',
     apply: 'Apply',
+    accept: 'Accept',
     clear: 'Clear',
     close: 'Close',
     completedAt: 'Completed',
@@ -24,6 +25,7 @@ const en = {
     noKey: 'No key',
     preset: 'Preset',
     prompt: 'Prompt',
+    reject: 'Reject',
     settings: 'Settings',
     size: 'Size',
     status: 'Status',
@@ -187,6 +189,24 @@ const en = {
     generate: 'Generate',
     editSourcePreview: 'Edit Source Preview',
     closeEditPreview: 'Close edit image preview'
+  },
+  promptOptimizerAssistant: {
+    title: 'Prompt Optimizer',
+    open: 'Prompt assistant',
+    closeLabel: 'Close prompt optimizer',
+    intentLabel: 'Modification intent',
+    intentPlaceholder: 'e.g. make it dusk, add wet asphalt reflections, and keep the subject centered',
+    intentHint: 'Describe the change in plain language.',
+    intentRequired: 'Describe what should change.',
+    currentPromptLabel: 'Current prompt',
+    emptyPrompt: 'The current prompt is empty.',
+    optimizing: 'Optimizing current prompt...',
+    optimize: 'Optimize',
+    reviewTitle: 'Review result',
+    originalPrompt: 'Original prompt',
+    optimizedPrompt: 'Optimized prompt',
+    accept: 'Accept',
+    reject: 'Reject'
   },
   promptHelper: {
     title: 'Prompt Helper',
@@ -467,6 +487,7 @@ const zh: TranslationSchema<typeof en> = {
   common: {
     active: '启用中',
     apply: '应用',
+    accept: '接受',
     clear: '清空',
     close: '关闭',
     completedAt: '生成时间',
@@ -482,6 +503,7 @@ const zh: TranslationSchema<typeof en> = {
     noKey: '无密钥',
     preset: '预设',
     prompt: '提示词',
+    reject: '拒绝',
     settings: '设置',
     size: '尺寸',
     status: '状态',
@@ -645,6 +667,24 @@ const zh: TranslationSchema<typeof en> = {
     generate: '生成',
     editSourcePreview: '编辑源预览',
     closeEditPreview: '关闭编辑图片预览'
+  },
+  promptOptimizerAssistant: {
+    title: '提示词优化器',
+    open: '提示词助手',
+    closeLabel: '关闭提示词优化器',
+    intentLabel: '修改意图',
+    intentPlaceholder: '例如：改成黄昏、增加湿润路面的反光，并保持主体居中',
+    intentHint: '用自然语言描述你想改什么。',
+    intentRequired: '请描述需要修改的内容。',
+    currentPromptLabel: '当前提示词',
+    emptyPrompt: '当前提示词为空。',
+    optimizing: '正在优化当前提示词...',
+    optimize: '开始优化',
+    reviewTitle: '查看结果',
+    originalPrompt: '原始提示词',
+    optimizedPrompt: '优化后提示词',
+    accept: '接受',
+    reject: '拒绝'
   },
   promptHelper: {
     title: '提示词助手',

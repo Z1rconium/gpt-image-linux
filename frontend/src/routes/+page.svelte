@@ -10,6 +10,7 @@
   import Lightbox from '$lib/components/Lightbox.svelte';
   import PreviewPanel from '$lib/components/PreviewPanel.svelte';
   import PromptForm from '$lib/components/PromptForm.svelte';
+  import PromptOptimizerAssistant from '$lib/components/PromptOptimizerAssistant.svelte';
   import PromptSnippetsDrawer from '$lib/components/PromptSnippetsDrawer.svelte';
   import SettingsDrawer from '$lib/components/SettingsDrawer.svelte';
   import SizeDialog from '$lib/components/SizeDialog.svelte';
@@ -91,6 +92,15 @@
       optimizerSettings.model.trim() &&
       optimizerSettings.has_api_key
   );
+  $: optimizerAssistantEnabled =
+    optimizerAvailable &&
+    !$uiStore.settingsOpen &&
+    !$uiStore.promptSnippetsOpen &&
+    !$uiStore.jobsOpen &&
+    !$uiStore.editPreviewOpen &&
+    !$uiStore.sizeDialogOpen &&
+    !$confirmStore.request &&
+    !Boolean($lightboxStore.image);
   $: r2BackupSettings = $settingsStore.settings?.r2_backup || null;
   $: r2BackupAvailable = Boolean(
     r2BackupSettings?.enabled &&
@@ -600,6 +610,11 @@
     }
   }
 
+  function applyOptimizedPrompt(prompt: string) {
+    form = { ...form, prompt };
+    showToast($t.messages.promptOptimized);
+  }
+
   function regenerate() {
     previewStore.regenerate(
       (next) => (form = { ...next, model: next.model.trim() || lastActivePresetDefaultModel || initialPromptFormState.model }),
@@ -851,6 +866,7 @@
       galleryStore.cleanup();
       previewStore.cleanup();
       uiStore.cleanup();
+      optimizingPrompt = false;
     };
   });
 </script>
@@ -938,7 +954,7 @@
   onRetryJob={retryJob}
 />
 
-<main class="mx-auto max-w-5xl space-y-6 px-4 py-6 sm:px-6">
+<main class="mx-auto max-w-5xl space-y-6 px-4 py-6 pb-28 sm:px-6 sm:pb-32">
   <ToastHost toast={$uiStore.toast} />
 
   <PromptForm
@@ -976,6 +992,16 @@
       onClear={clearEditSource}
     />
   </PromptForm>
+
+  <PromptOptimizerAssistant
+    enabled={optimizerAssistantEnabled}
+    currentPrompt={form.prompt}
+    apiPath={form.apiPath}
+    model={form.model}
+    size={form.size}
+    quality={form.quality}
+    onApplyPrompt={applyOptimizedPrompt}
+  />
 
   <PreviewPanel
     loading={$previewStore.loading}

@@ -1105,6 +1105,113 @@ test('prompt helper tags append once and optimizer replaces prompt with undo', a
   await expect(prompt).toHaveValue('small cabin, high detail');
 });
 
+test('floating prompt optimizer stays hidden when unavailable', async ({ page }) => {
+  await loadApp(page, {
+    settings: {
+      ...settingsResponse,
+      prompt_optimizer: {
+        ...settingsResponse.prompt_optimizer,
+        enabled: false
+      }
+    }
+  });
+
+  await expect(page.getByTestId('prompt-optimizer-assistant-trigger')).toHaveCount(0);
+});
+
+test('floating prompt optimizer compares, rejects, cleans up, and accepts without covering the editor', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await loadApp(page);
+
+  const prompt = page.getByRole('textbox', { name: 'Prompt', exact: true });
+  await prompt.fill('sunlit alley with a bicycle');
+
+  const trigger = page.getByTestId('prompt-optimizer-assistant-trigger');
+  await expect(trigger).toBeVisible();
+
+  const triggerBox = await trigger.boundingBox();
+  const promptBox = await prompt.boundingBox();
+  expect(triggerBox).not.toBeNull();
+  expect(promptBox).not.toBeNull();
+  expect((promptBox?.y || 0) + (promptBox?.height || 0)).toBeLessThan(triggerBox?.y || Number.POSITIVE_INFINITY);
+
+  await trigger.click();
+  const dialog = page.getByRole('dialog', { name: 'Prompt Optimizer' });
+  await expect(dialog).toBeVisible();
+
+  const intentInput = dialog.getByLabel('Modification intent');
+  await expect(intentInput).toHaveValue('');
+  await intentInput.fill('make it rainy at dusk');
+
+  const optimizeRequest = page.waitForRequest((request) => new URL(request.url()).pathname === '/api/prompt/optimize');
+  await dialog.getByRole('button', { name: 'Optimize', exact: true }).click();
+  const request = await optimizeRequest;
+  const body = request.postDataJSON();
+  expect(body.prompt).toContain('Original prompt:');
+  expect(body.prompt).toContain('Modification intent:');
+  expect(body.prompt).toContain('sunlit alley with a bicycle');
+  expect(body.prompt).toContain('make it rainy at dusk');
+
+  await expect(page.getByTestId('prompt-optimizer-original')).toContainText('sunlit alley with a bicycle');
+  await expect(page.getByTestId('prompt-optimizer-optimized')).toContainText('Optimized ');
+
+  await dialog.getByRole('button', { name: 'Reject' }).click();
+  await expect(dialog).toBeHidden();
+  await expect(prompt).toHaveValue('sunlit alley with a bicycle');
+
+  await trigger.click();
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByLabel('Modification intent')).toHaveValue('');
+
+  await dialog.getByLabel('Modification intent').fill('make it rainy at dusk');
+  const acceptRequest = page.waitForRequest((request) => new URL(request.url()).pathname === '/api/prompt/optimize');
+  await dialog.getByRole('button', { name: 'Optimize', exact: true }).click();
+  await acceptRequest;
+  await dialog.getByRole('button', { name: 'Accept' }).click();
+
+  await expect(prompt).toHaveValue(/Optimized Original prompt:/);
+});
+
+test('floating prompt optimizer opens on click and can be long-press dragged', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await loadApp(page);
+
+  const trigger = page.getByTestId('prompt-optimizer-assistant-trigger');
+  await expect(trigger).toBeVisible();
+
+  const initialBox = await trigger.boundingBox();
+  expect(initialBox).not.toBeNull();
+
+  await trigger.click();
+  await expect(page.getByRole('dialog', { name: 'Prompt Optimizer' })).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('dialog', { name: 'Prompt Optimizer' })).toBeHidden();
+
+  const startX = Math.round((initialBox?.x || 0) + (initialBox?.width || 0) / 2);
+  const startY = Math.round((initialBox?.y || 0) + (initialBox?.height || 0) / 2);
+  await page.mouse.move(startX, startY);
+  await page.mouse.down();
+  await page.waitForTimeout(320);
+  await page.mouse.move(startX - 130, startY - 110, { steps: 8 });
+  await page.mouse.up();
+
+  const movedBox = await trigger.boundingBox();
+  expect(movedBox).not.toBeNull();
+  expect(movedBox?.x || 0).toBeLessThan((initialBox?.x || 0) - 40);
+  expect(movedBox?.y || 0).toBeLessThan((initialBox?.y || 0) - 40);
+
+  await page.reload();
+  await expect(page.getByRole('heading', { name: 'Prompt', exact: true })).toBeVisible();
+
+  const reloadedBox = await trigger.boundingBox();
+  expect(reloadedBox).not.toBeNull();
+  expect(reloadedBox?.x || 0).toBeLessThan((initialBox?.x || 0) - 40);
+  expect(reloadedBox?.y || 0).toBeLessThan((initialBox?.y || 0) - 40);
+
+  await trigger.click();
+  await expect(page.getByRole('dialog', { name: 'Prompt Optimizer' })).toBeVisible();
+});
+
 test('prompt snippets drawer saves, searches, edits, copies, deletes, and uses templates', async ({ page }) => {
   await loadApp(page);
 
@@ -1132,6 +1239,7 @@ test('prompt snippets drawer saves, searches, edits, copies, deletes, and uses t
   await drawer.getByRole('button', { name: 'Copy' }).click();
   await expect(prompt).toHaveValue('fresh current prompt\nsecond line');
   await expect(page.getByRole('status')).toContainText('Prompt copied');
+  await expect(page.getByRole('status')).toHaveCount(0);
 
   await drawer.getByRole('button', { name: 'Edit' }).click();
   await drawer.getByLabel('Title').fill('Product hero updated');
