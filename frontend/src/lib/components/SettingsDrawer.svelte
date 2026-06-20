@@ -495,7 +495,7 @@
           </label>
           <label class="block">
             <span class="mb-1.5 block text-xs font-medium text-zinc-400">{$t.settings.apiPath}</span>
-            <select bind:value={apiPath} class="control-focus w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2.5 text-sm text-zinc-100 focus:border-emerald-500">
+            <select bind:value={apiPath} class="control-focus form-select border-zinc-700 bg-zinc-950 text-zinc-100 focus:border-emerald-500">
               <option value="/v1/images/generations">/v1/images/generations</option>
               <option value="/v1/responses">/v1/responses</option>
               <option value="/v1/chat/completions">/v1/chat/completions</option>
@@ -507,7 +507,7 @@
           </label>
           <label class="block">
             <span class="mb-1.5 block text-xs font-medium text-zinc-400">{$t.settings.defaultResponseFormat}</span>
-            <select bind:value={defaultResponseFormat} class="control-focus w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2.5 text-sm text-zinc-100 focus:border-emerald-500">
+            <select bind:value={defaultResponseFormat} class="control-focus form-select border-zinc-700 bg-zinc-950 text-zinc-100 focus:border-emerald-500">
               {#each RESPONSE_FORMAT_OPTIONS as responseFormat}
                 <option value={responseFormat}>{responseFormat || $t.promptForm.defaultResponseFormat}</option>
               {/each}

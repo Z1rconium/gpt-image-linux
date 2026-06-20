@@ -200,19 +200,19 @@
       class="control-focus min-w-[160px] flex-1 rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-sm text-stone-900 focus:border-emerald-500 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-100"
       on:input={handleSearchInput}
     />
-    <select value={filters.model} aria-label={$t.common.model} class="control-focus min-w-[140px] rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-sm text-stone-900 focus:border-emerald-500 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-100" on:change={(event) => onFilter('model', event.currentTarget.value)}>
+    <select value={filters.model} aria-label={$t.common.model} class="control-focus form-select min-w-[140px] border-stone-200 bg-stone-50 focus:border-emerald-500 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-100" on:change={(event) => onFilter('model', event.currentTarget.value)}>
       <option value="">{$t.gallery.allModels}</option>
       {#each gallery?.filter_options.models || [] as model}
         <option value={model}>{model}</option>
       {/each}
     </select>
-    <select value={filters.preset} aria-label={$t.common.preset} class="control-focus min-w-[140px] rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-sm text-stone-900 focus:border-emerald-500 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-100" on:change={(event) => onFilter('preset', event.currentTarget.value)}>
+    <select value={filters.preset} aria-label={$t.common.preset} class="control-focus form-select min-w-[140px] border-stone-200 bg-stone-50 focus:border-emerald-500 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-100" on:change={(event) => onFilter('preset', event.currentTarget.value)}>
       <option value="">{$t.gallery.allPresets}</option>
       {#each gallery?.filter_options.presets || [] as preset}
         <option value={preset}>{preset}</option>
       {/each}
     </select>
-    <select value={filters.size} aria-label={$t.common.size} class="control-focus min-w-[120px] rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-sm text-stone-900 focus:border-emerald-500 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-100" on:change={(event) => onFilter('size', event.currentTarget.value)}>
+    <select value={filters.size} aria-label={$t.common.size} class="control-focus form-select min-w-[120px] border-stone-200 bg-stone-50 focus:border-emerald-500 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-100" on:change={(event) => onFilter('size', event.currentTarget.value)}>
       <option value="">{$t.gallery.allSizes}</option>
       {#each gallery?.filter_options.sizes || [] as size}
         <option value={size}>{size}</option>

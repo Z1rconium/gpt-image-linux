@@ -88,7 +88,7 @@
   <div class="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
     <label class="block">
       <span class="mb-1.5 block text-xs font-medium text-stone-600 dark:text-zinc-400">{$t.promptForm.apiPath}</span>
-      <select bind:value={form.apiPath} disabled={loading} class="control-focus w-full rounded-lg border border-stone-200 bg-stone-50 px-3 py-2.5 font-mono text-sm text-stone-900 focus:border-emerald-500 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-100">
+      <select bind:value={form.apiPath} disabled={loading} class="control-focus form-select font-mono focus:border-emerald-500">
         <option value="/v1/images/generations">/v1/images/generations</option>
         <option value="/v1/responses">/v1/responses</option>
         <option value="/v1/chat/completions">/v1/chat/completions</option>
@@ -114,7 +114,7 @@
 
     <label class="block">
       <span class="mb-1.5 block text-xs font-medium text-stone-600 dark:text-zinc-400">{$t.promptForm.quality}</span>
-      <select bind:value={form.quality} disabled={promptOnlyMode || loading} class="control-focus w-full rounded-lg border border-stone-200 bg-stone-50 px-3 py-2.5 text-sm text-stone-900 focus:border-emerald-500 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-100">
+      <select bind:value={form.quality} disabled={promptOnlyMode || loading} class="control-focus form-select focus:border-emerald-500">
         <option value="auto">auto</option>
         <option value="low">low</option>
         <option value="medium">medium</option>
@@ -137,7 +137,7 @@
 
     <label class="block">
       <span class="mb-1.5 block text-xs font-medium text-stone-600 dark:text-zinc-400">{$t.promptForm.format}</span>
-      <select bind:value={form.outputFormat} disabled={promptOnlyMode || loading} class="control-focus w-full rounded-lg border border-stone-200 bg-stone-50 px-3 py-2.5 text-sm text-stone-900 focus:border-emerald-500 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-100">
+      <select bind:value={form.outputFormat} disabled={promptOnlyMode || loading} class="control-focus form-select focus:border-emerald-500">
         <option value="png">png</option>
         <option value="jpeg">jpeg</option>
         <option value="webp">webp</option>
@@ -151,7 +151,7 @@
 
     <label class="block">
       <span class="mb-1.5 block text-xs font-medium text-stone-600 dark:text-zinc-400">{$t.promptForm.responseFormat}</span>
-      <select bind:value={form.responseFormat} disabled={promptOnlyMode || loading} class="control-focus w-full rounded-lg border border-stone-200 bg-stone-50 px-3 py-2.5 text-sm text-stone-900 focus:border-emerald-500 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-100">
+      <select bind:value={form.responseFormat} disabled={promptOnlyMode || loading} class="control-focus form-select focus:border-emerald-500">
         {#each RESPONSE_FORMAT_OPTIONS as responseFormat}
           <option value={responseFormat}>{responseFormat || $t.promptForm.defaultResponseFormat}</option>
         {/each}

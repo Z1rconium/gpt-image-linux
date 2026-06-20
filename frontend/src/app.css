@@ -6,6 +6,29 @@
   .control-focus {
     @apply focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/60 focus-visible:ring-offset-2 focus-visible:ring-offset-stone-100 dark:focus-visible:ring-offset-zinc-950;
   }
+
+  .form-select {
+    @apply w-full rounded-lg border border-stone-200 bg-stone-50 text-stone-900 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-100;
+    appearance: none;
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    height: 40px;
+    padding: 0 2.75rem 0 0.75rem;
+    font-size: 0.875rem;
+    line-height: 40px;
+    background-image:
+      linear-gradient(45deg, transparent 50%, currentColor 50%),
+      linear-gradient(135deg, currentColor 50%, transparent 50%);
+    background-position:
+      calc(100% - 16px) 50%,
+      calc(100% - 10px) 50%;
+    background-size: 5px 5px, 5px 5px;
+    background-repeat: no-repeat;
+  }
+
+  .form-select::-ms-expand {
+    display: none;
+  }
 }
 
 :root {
