@@ -1199,6 +1199,24 @@ test('floating prompt optimizer opens on click and can be long-press dragged', a
   expect(movedBox).not.toBeNull();
   expect(movedBox?.x || 0).toBeLessThan((initialBox?.x || 0) - 40);
   expect(movedBox?.y || 0).toBeLessThan((initialBox?.y || 0) - 40);
+  expect(Math.abs(Math.round((movedBox?.x || 0) + (movedBox?.width || 0) / 2) - (startX - 130))).toBeLessThanOrEqual(3);
+  expect(Math.abs(Math.round((movedBox?.y || 0) + (movedBox?.height || 0) / 2) - (startY - 110))).toBeLessThanOrEqual(24);
+
+  await page.mouse.move(startX - 8, startY - 8);
+  const settledBox = await trigger.boundingBox();
+  expect(settledBox).not.toBeNull();
+  expect(
+    Math.abs(
+      Math.round((settledBox?.x || 0) + (settledBox?.width || 0) / 2) -
+        Math.round((movedBox?.x || 0) + (movedBox?.width || 0) / 2)
+    )
+  ).toBeLessThanOrEqual(1);
+  expect(
+    Math.abs(
+      Math.round((settledBox?.y || 0) + (settledBox?.height || 0) / 2) -
+        Math.round((movedBox?.y || 0) + (movedBox?.height || 0) / 2)
+    )
+  ).toBeLessThanOrEqual(1);
 
   await page.reload();
   await expect(page.getByRole('heading', { name: 'Prompt', exact: true })).toBeVisible();

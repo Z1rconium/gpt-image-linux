@@ -42,7 +42,7 @@
   let pressTimer: ReturnType<typeof setTimeout> | null = null;
   let activePointerId: number | null = null;
   let pointerDownAt: FloatingPosition | null = null;
-  let dragOffset: FloatingPosition | null = null;
+  let dragCenterOffset: FloatingPosition | null = null;
   let dragPending = false;
   let dragging = false;
   let suppressClick = false;
@@ -102,7 +102,7 @@
     clearPressTimer();
     activePointerId = null;
     pointerDownAt = null;
-    dragOffset = null;
+    dragCenterOffset = null;
     dragPending = false;
     dragging = false;
     lastPointerPosition = null;
@@ -213,15 +213,20 @@
 
     const rect = triggerButton.getBoundingClientRect();
     const anchor = lastPointerPosition || pointerDownAt;
-    const nextPosition = clampPosition({ x: rect.left, y: rect.top });
-    dragOffset = {
-      x: anchor.x - rect.left,
-      y: anchor.y - rect.top
+    dragCenterOffset = {
+      x: rect.width / 2,
+      y: rect.height / 2
     };
     dragging = true;
     dragPending = false;
     suppressClick = true;
-    setFloatingPosition(nextPosition);
+    setFloatingPosition(
+      {
+        x: anchor.x - dragCenterOffset.x,
+        y: anchor.y - dragCenterOffset.y
+      },
+      true
+    );
   }
 
   function handlePointerDown(event: PointerEvent) {
@@ -264,11 +269,11 @@
       return;
     }
 
-    if (!dragOffset) return;
+    if (!dragCenterOffset) return;
     setFloatingPosition(
       {
-        x: event.clientX - dragOffset.x,
-        y: event.clientY - dragOffset.y
+        x: event.clientX - dragCenterOffset.x,
+        y: event.clientY - dragCenterOffset.y
       },
       true
     );
@@ -288,9 +293,10 @@
     clearPressTimer();
     activePointerId = null;
     pointerDownAt = null;
-    dragOffset = null;
+    dragCenterOffset = null;
     dragPending = false;
     dragging = false;
+    lastPointerPosition = null;
   }
 
   function handlePointerCancel(event: PointerEvent) {
