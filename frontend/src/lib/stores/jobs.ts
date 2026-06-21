@@ -12,6 +12,7 @@ export type JobsState = {
   historyJobs: GenerateJobStatus[];
   historyLoading: boolean;
   historyLoaded: boolean;
+  historyNeedsRefresh: boolean;
   historyHasMore: boolean;
   historyFailedOnly: boolean;
   selectedIds: Set<string>;
@@ -22,18 +23,89 @@ const initialJobsState: JobsState = {
   historyJobs: [],
   historyLoading: false,
   historyLoaded: false,
+  historyNeedsRefresh: false,
   historyHasMore: false,
   historyFailedOnly: false,
   selectedIds: new Set()
 };
 
 const HISTORY_PAGE_SIZE = 50;
+const HISTORY_CACHE_LIMIT = 500;
+
+function jobImageSignature(image: NonNullable<GenerateJobStatus['images']>[number]) {
+  return [
+    image.image_id,
+    image.image_url || '',
+    image.filename || '',
+    image.image_width ?? '',
+    image.image_height ?? ''
+  ].join('|');
+}
+
+function jobSignature(job: GenerateJobStatus) {
+  const imageSignature = job.images?.map((image) => jobImageSignature(image)).join(',') || '';
+  const stageSignature = job.stage_timings
+    ? Object.entries(job.stage_timings)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, value]) => `${key}:${value}`)
+        .join(',')
+    : '';
+  return [
+    job.job_id,
+    job.status,
+    job.stage || '',
+    job.message || '',
+    job.operation || '',
+    job.updated_at || '',
+    job.completed_at || '',
+    job.image_id || '',
+    job.image_url || '',
+    job.prompt || '',
+    job.size || '',
+    job.model || '',
+    job.duration || '',
+    job.error || '',
+    imageSignature,
+    stageSignature
+  ].join('::');
+}
+
+function sameJobList(left: GenerateJobStatus[], right: GenerateJobStatus[]) {
+  if (left.length !== right.length) return false;
+  for (let index = 0; index < left.length; index += 1) {
+    const current = left[index];
+    const next = right[index];
+    if (!next || current.job_id !== next.job_id || jobSignature(current) !== jobSignature(next)) return false;
+  }
+  return true;
+}
+
+function sameStringSet(left: Set<string>, right: Set<string>) {
+  if (left.size !== right.size) return false;
+  for (const value of left) {
+    if (!right.has(value)) return false;
+  }
+  return true;
+}
+
+function mergeHistoryJobs(currentJobs: GenerateJobStatus[], nextJobs: GenerateJobStatus[]) {
+  const merged: GenerateJobStatus[] = [];
+  const seen = new Set<string>();
+  for (const job of [...currentJobs, ...nextJobs]) {
+    if (seen.has(job.job_id)) continue;
+    seen.add(job.job_id);
+    merged.push(job);
+    if (merged.length >= HISTORY_CACHE_LIMIT) break;
+  }
+  return merged;
+}
 
 function createJobsStore() {
   const { subscribe, update } = writable<JobsState>(initialJobsState);
   let state = initialJobsState;
   let jobsSource: EventSource | null = null;
   let jobsPollingTimer: ReturnType<typeof setInterval> | null = null;
+  let jobsFeedHealthy = false;
   let activeJobSource: EventSource | null = null;
   let activeJobPollingTimer: ReturnType<typeof setTimeout> | null = null;
   let trackedJobId: string | null = null;
@@ -44,8 +116,12 @@ function createJobsStore() {
   });
 
   function applyActiveJobs(jobs: GenerateJobStatus[]) {
-    const selectedIds = new Set([...state.selectedIds].filter((id) => jobs.some((job) => job.job_id === id)));
-    update((current) => ({ ...current, jobs, selectedIds }));
+    const activeIds = new Set(jobs.map((job) => job.job_id));
+    const selectedIds = new Set([...state.selectedIds].filter((id) => activeIds.has(id)));
+    update((current) => {
+      if (sameJobList(current.jobs, jobs) && sameStringSet(current.selectedIds, selectedIds)) return current;
+      return { ...current, jobs, selectedIds };
+    });
   }
 
   async function loadJobs() {
@@ -53,7 +129,7 @@ function createJobsStore() {
       const jobs = await apiFetch<GenerateJobStatus[]>('/api/generate/jobs', {}, 'loading jobs');
       applyActiveJobs(jobs);
     } catch {
-      update((current) => ({ ...current, jobs: [] }));
+      // Keep the last successful snapshot on transient failures.
     }
   }
 
@@ -85,15 +161,23 @@ function createJobsStore() {
       const historyJobs = await apiFetch<GenerateJobStatus[]>(`/api/generate/jobs?${params.toString()}`, {}, 'loading job history');
       if (seq !== historyRequestSeq) return;
       update((current) => {
-        const mergedJobs = append
-          ? [...current.historyJobs, ...historyJobs.filter((job) => !current.historyJobs.some((existing) => existing.job_id === job.job_id))]
-          : historyJobs;
+        const mergedJobs = append ? mergeHistoryJobs(current.historyJobs, historyJobs) : historyJobs;
+        if (
+          sameJobList(current.historyJobs, mergedJobs) &&
+          current.historyLoaded &&
+          current.historyFailedOnly === failedOnly &&
+          current.historyHasMore === (historyJobs.length === HISTORY_PAGE_SIZE) &&
+          !filterChanged
+        ) {
+          return { ...current, historyLoading: false, historyNeedsRefresh: false };
+        }
         return {
           ...current,
           historyJobs: mergedJobs,
           historyLoaded: true,
           historyFailedOnly: failedOnly,
-          historyHasMore: historyJobs.length === HISTORY_PAGE_SIZE
+          historyHasMore: historyJobs.length === HISTORY_PAGE_SIZE,
+          historyNeedsRefresh: append ? current.historyNeedsRefresh : false
         };
       });
     } catch {
@@ -116,20 +200,33 @@ function createJobsStore() {
   }
 
   async function refreshHistoryIfLoaded() {
-    if (!state.historyLoaded) return;
+    if (!state.historyLoaded || !state.historyNeedsRefresh) return;
     await loadJobHistory({ failedOnly: state.historyFailedOnly });
   }
 
   async function setHistoryFailedOnly(failedOnly: boolean) {
-    if (state.historyFailedOnly === failedOnly && state.historyLoaded) return;
+    if (state.historyFailedOnly === failedOnly && state.historyLoaded) {
+      if (state.historyNeedsRefresh) await refreshHistoryIfLoaded();
+      return;
+    }
     await loadJobHistory({ failedOnly });
+  }
+
+  function markHistoryStale() {
+    if (state.historyNeedsRefresh) return;
+    update((current) => ({ ...current, historyNeedsRefresh: true }));
+  }
+
+  function shouldRefreshJobsAfterSubmit() {
+    return !jobsFeedHealthy;
   }
 
   async function clearJobHistory() {
     const seq = ++historyRequestSeq;
     update((current) => ({
       ...current,
-      historyLoading: true
+      historyLoading: true,
+      historyNeedsRefresh: false
     }));
     try {
       await apiFetch('/api/generate/jobs/history', { method: 'DELETE' }, 'clearing job history');
@@ -139,7 +236,8 @@ function createJobsStore() {
         historyJobs: [],
         historyLoaded: true,
         historyHasMore: false,
-        historyLoading: false
+        historyLoading: false,
+        historyNeedsRefresh: false
       }));
     } catch (error) {
       if (seq === historyRequestSeq) update((current) => ({ ...current, historyLoading: false }));
@@ -165,15 +263,19 @@ function createJobsStore() {
     jobsSource = openJsonEventSource<GenerateJobStatus[]>('/api/generate/jobs/events', {
       onEvent: ({ data }) => {
         stopJobsPolling();
+        jobsFeedHealthy = true;
         if (Array.isArray(data)) applyActiveJobs(data);
       },
       onNetworkError: () => {
+        jobsFeedHealthy = false;
         startJobsPolling();
       },
       onError: () => {
+        jobsFeedHealthy = false;
         startJobsPolling();
       }
     });
+    jobsFeedHealthy = true;
   }
 
   function toggleSelection(jobId: string) {
@@ -307,6 +409,7 @@ function createJobsStore() {
     jobsSource?.close();
     jobsSource = null;
     stopJobsPolling();
+    jobsFeedHealthy = false;
     historyRequestSeq += 1;
   }
 
@@ -317,6 +420,8 @@ function createJobsStore() {
     loadMoreJobHistory,
     refreshHistoryIfLoaded,
     setHistoryFailedOnly,
+    markHistoryStale,
+    shouldRefreshJobsAfterSubmit,
     clearJobHistory,
     startJobsEvents,
     toggleSelection,

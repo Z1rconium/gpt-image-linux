@@ -19,6 +19,9 @@ type ShowToast = (message: string, variant?: ToastVariant) => void;
 
 type SettingsState = {
   settings: SettingsResponse | null;
+};
+
+export type SettingsActivityState = {
   saving: boolean;
   healthChecking: boolean;
   health: PresetHealthResponse | null;
@@ -30,6 +33,9 @@ type SettingsState = {
 
 const initialSettingsState: SettingsState = {
   settings: null,
+};
+
+const initialSettingsActivityState: SettingsActivityState = {
   saving: false,
   healthChecking: false,
   health: null,
@@ -38,6 +44,66 @@ const initialSettingsState: SettingsState = {
   promptOptimizerHealthChecking: false,
   promptOptimizerHealth: null
 };
+
+function createSettingsActivityStore() {
+  const { subscribe, update } = writable<SettingsActivityState>(initialSettingsActivityState);
+
+  function setSaving(saving: boolean) {
+    update((state) => ({ ...state, saving }));
+  }
+
+  function setHealthChecking(healthChecking: boolean) {
+    update((state) => ({ ...state, healthChecking }));
+  }
+
+  function setHealth(health: PresetHealthResponse | null) {
+    update((state) => ({ ...state, health }));
+  }
+
+  function setR2HealthChecking(r2HealthChecking: boolean) {
+    update((state) => ({ ...state, r2HealthChecking }));
+  }
+
+  function setR2Health(r2Health: R2HealthResponse | null) {
+    update((state) => ({ ...state, r2Health }));
+  }
+
+  function setPromptOptimizerHealthChecking(promptOptimizerHealthChecking: boolean) {
+    update((state) => ({ ...state, promptOptimizerHealthChecking }));
+  }
+
+  function setPromptOptimizerHealth(promptOptimizerHealth: PromptOptimizerHealthResponse | null) {
+    update((state) => ({ ...state, promptOptimizerHealth }));
+  }
+
+  function clearHealth() {
+    update((state) => ({ ...state, health: null }));
+  }
+
+  function clearPromptOptimizerHealth() {
+    update((state) => ({ ...state, promptOptimizerHealth: null }));
+  }
+
+  function reset() {
+    update(() => ({ ...initialSettingsActivityState }));
+  }
+
+  return {
+    subscribe,
+    setSaving,
+    setHealthChecking,
+    setHealth,
+    setR2HealthChecking,
+    setR2Health,
+    setPromptOptimizerHealthChecking,
+    setPromptOptimizerHealth,
+    clearHealth,
+    clearPromptOptimizerHealth,
+    reset
+  };
+}
+
+export const settingsActivityStore = createSettingsActivityStore();
 
 function createSettingsStore() {
   const { subscribe, update } = writable<SettingsState>(initialSettingsState);
@@ -57,7 +123,7 @@ function createSettingsStore() {
       return;
     }
 
-    update((state) => ({ ...state, saving: true }));
+    settingsActivityStore.setSaving(true);
     try {
       const settings = await apiFetch<SettingsResponse>(
         '/api/settings',
@@ -68,10 +134,13 @@ function createSettingsStore() {
         },
         'saving settings'
       );
-      update((state) => ({ ...state, settings, health: null, r2Health: null, promptOptimizerHealth: null }));
+      update((state) => ({ ...state, settings }));
+      settingsActivityStore.clearHealth();
+      settingsActivityStore.setR2Health(null);
+      settingsActivityStore.clearPromptOptimizerHealth();
       showToast(get(t).messages.presetSaved);
     } finally {
-      update((state) => ({ ...state, saving: false }));
+      settingsActivityStore.setSaving(false);
     }
   }
 
@@ -82,11 +151,14 @@ function createSettingsStore() {
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ source_preset_id: activePresetId })
+      body: JSON.stringify({ source_preset_id: activePresetId })
       },
       'creating preset'
     );
-    update((state) => ({ ...state, settings, health: null, r2Health: null, promptOptimizerHealth: null }));
+    update((state) => ({ ...state, settings }));
+    settingsActivityStore.clearHealth();
+    settingsActivityStore.setR2Health(null);
+    settingsActivityStore.clearPromptOptimizerHealth();
     showToast(get(t).messages.presetCreated);
   }
 
@@ -98,7 +170,10 @@ function createSettingsStore() {
       { method: 'POST' },
       'switching preset'
     );
-    update((state) => ({ ...state, settings, health: null, r2Health: null, promptOptimizerHealth: null }));
+    update((state) => ({ ...state, settings }));
+    settingsActivityStore.clearHealth();
+    settingsActivityStore.setR2Health(null);
+    settingsActivityStore.clearPromptOptimizerHealth();
     showToast(get(t).messages.presetSwitched);
   }
 
@@ -121,31 +196,34 @@ function createSettingsStore() {
       { method: 'DELETE' },
       'deleting preset'
     );
-    update((state) => ({ ...state, settings, health: null, r2Health: null, promptOptimizerHealth: null }));
+    update((state) => ({ ...state, settings }));
+    settingsActivityStore.clearHealth();
+    settingsActivityStore.setR2Health(null);
+    settingsActivityStore.clearPromptOptimizerHealth();
     showToast(get(t).messages.presetDeleted);
   }
 
   async function checkPresetHealth(presetId: string) {
     if (!presetId) return;
-    update((state) => ({ ...state, healthChecking: true }));
+    settingsActivityStore.setHealthChecking(true);
     try {
       const health = await apiFetch<PresetHealthResponse>(
         `/api/settings/presets/${encodeURIComponent(presetId)}/health`,
         { method: 'POST' },
         'checking preset health'
       );
-      update((state) => ({ ...state, health }));
+      settingsActivityStore.setHealth(health);
     } finally {
-      update((state) => ({ ...state, healthChecking: false }));
+      settingsActivityStore.setHealthChecking(false);
     }
   }
 
   function clearPresetHealth() {
-    update((state) => ({ ...state, health: null }));
+    settingsActivityStore.clearHealth();
   }
 
   async function checkR2Health(body: R2BackupSettingsInput) {
-    update((state) => ({ ...state, r2HealthChecking: true }));
+    settingsActivityStore.setR2HealthChecking(true);
     try {
       const r2Health = await apiFetch<R2HealthResponse>(
         '/api/settings/r2/health',
@@ -156,28 +234,28 @@ function createSettingsStore() {
         },
         'checking R2 health'
       );
-      update((state) => ({ ...state, r2Health }));
+      settingsActivityStore.setR2Health(r2Health);
     } finally {
-      update((state) => ({ ...state, r2HealthChecking: false }));
+      settingsActivityStore.setR2HealthChecking(false);
     }
   }
 
   async function checkPromptOptimizerHealth() {
-    update((state) => ({ ...state, promptOptimizerHealthChecking: true }));
+    settingsActivityStore.setPromptOptimizerHealthChecking(true);
     try {
       const promptOptimizerHealth = await apiFetch<PromptOptimizerHealthResponse>(
         '/api/prompt/optimizer-health',
         { method: 'POST' },
         'checking prompt optimizer health'
       );
-      update((state) => ({ ...state, promptOptimizerHealth }));
+      settingsActivityStore.setPromptOptimizerHealth(promptOptimizerHealth);
     } finally {
-      update((state) => ({ ...state, promptOptimizerHealthChecking: false }));
+      settingsActivityStore.setPromptOptimizerHealthChecking(false);
     }
   }
 
   function clearPromptOptimizerHealth() {
-    update((state) => ({ ...state, promptOptimizerHealth: null }));
+    settingsActivityStore.clearPromptOptimizerHealth();
   }
 
   async function loadPromptOptimizerSystemPrompt() {

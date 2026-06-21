@@ -148,8 +148,9 @@ html.dark input::placeholder {
 }
 
 .drawer-backdrop {
-  background: rgba(0, 0, 0, 0.6);
-  backdrop-filter: blur(4px);
+  background: rgba(0, 0, 0, 0.58);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
 }
 
 .gallery-card {
@@ -299,8 +300,14 @@ html.dark .gallery-icon-action {
     height: 100dvh;
   }
 
+  .mobile-drawer-root {
+    overflow: hidden;
+  }
+
   .mobile-drawer-panel {
     max-width: none;
+    max-height: 100%;
+    overflow: hidden;
     padding-top: env(safe-area-inset-top);
     padding-right: env(safe-area-inset-right);
     padding-bottom: env(safe-area-inset-bottom);
@@ -309,10 +316,16 @@ html.dark .gallery-icon-action {
   }
 
   .mobile-drawer-scroll {
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
     padding-bottom: max(1.25rem, calc(1.25rem + env(safe-area-inset-bottom)));
   }
 
   .mobile-dialog-root {
+    align-items: flex-start;
+    justify-content: center;
+    overflow-y: auto;
+    overscroll-behavior: contain;
     padding: max(12px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right)) max(
         12px,
         env(safe-area-inset-bottom)
@@ -321,6 +334,8 @@ html.dark .gallery-icon-action {
 
   .mobile-dvh-dialog {
     max-height: 100%;
+    overflow-y: auto;
+    overscroll-behavior: contain;
   }
 
   .mobile-dvh-image {
@@ -339,6 +354,12 @@ html.dark .gallery-icon-action {
     justify-content: center;
     min-height: 44px;
     text-align: center;
+  }
+
+  .drawer-backdrop {
+    background: rgba(0, 0, 0, 0.5);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
   }
 }
 

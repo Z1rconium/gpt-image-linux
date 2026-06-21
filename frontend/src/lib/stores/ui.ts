@@ -21,7 +21,6 @@ export type UiState = {
   promptSnippetsOpen: boolean;
   sizeDialogOpen: boolean;
   editPreviewOpen: boolean;
-  toast: ToastMessage | null;
 };
 
 const initialUiState: UiState = {
@@ -29,20 +28,15 @@ const initialUiState: UiState = {
   jobsOpen: false,
   promptSnippetsOpen: false,
   sizeDialogOpen: false,
-  editPreviewOpen: false,
-  toast: null
+  editPreviewOpen: false
 };
 
-function createUiStore() {
-  const { subscribe, update } = writable<UiState>(initialUiState);
+function createToastStore() {
+  const { subscribe, set } = writable<ToastMessage | null>(null);
   let toastTimer: ReturnType<typeof setTimeout> | null = null;
 
-  function setKey<K extends keyof UiState>(key: K, value: UiState[K]) {
-    update((state) => ({ ...state, [key]: value }));
-  }
-
   function showToast(message: string, variant: ToastVariant = 'status', options: ToastOptions = {}) {
-    setKey('toast', {
+    set({
       message,
       variant,
       actionLabel: options.actionLabel,
@@ -50,13 +44,38 @@ function createUiStore() {
     });
     if (toastTimer) clearTimeout(toastTimer);
     toastTimer = setTimeout(() => {
-      setKey('toast', null);
+      set(null);
     }, options.durationMs ?? 2500);
   }
 
   function cleanup() {
     if (toastTimer) clearTimeout(toastTimer);
     toastTimer = null;
+    set(null);
+  }
+
+  return {
+    subscribe,
+    showToast,
+    cleanup
+  };
+}
+
+export const toastStore = createToastStore();
+
+function createUiStore() {
+  const { subscribe, update } = writable<UiState>(initialUiState);
+
+  function setKey<K extends keyof UiState>(key: K, value: UiState[K]) {
+    update((state) => ({ ...state, [key]: value }));
+  }
+
+  function showToast(message: string, variant: ToastVariant = 'status', options: ToastOptions = {}) {
+    toastStore.showToast(message, variant, options);
+  }
+
+  function cleanup() {
+    toastStore.cleanup();
   }
 
   return {

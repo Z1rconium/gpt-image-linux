@@ -18,9 +18,9 @@
   $: themeToggleTitle = $themeStore === 'dark' ? $t.header.themeToggleToLight : $t.header.themeToggleToDark;
 </script>
 
-<header class="app-header sticky top-0 z-40 border-b border-stone-200/80 bg-stone-50/88 backdrop-blur-md dark:border-zinc-800 dark:bg-zinc-950/80">
-  <div class="mx-auto flex max-w-5xl items-center justify-between px-4 py-4 sm:px-6">
-    <div class="flex items-center gap-3">
+<header class="app-header sticky top-0 z-40 border-b border-stone-200/80 bg-stone-50/88 backdrop-blur-sm dark:border-zinc-800 dark:bg-zinc-950/80">
+  <div class="mx-auto flex max-w-5xl flex-wrap items-center gap-3 px-4 py-3 sm:flex-nowrap sm:px-6 sm:py-4">
+    <div class="flex min-w-0 flex-1 items-start gap-3">
       <button
         type="button"
         class="mobile-touch-target control-focus h-8 min-w-12 rounded-lg border border-stone-300 px-2 text-xs font-semibold text-stone-600 transition-colors hover:border-emerald-500/60 hover:bg-stone-100 hover:text-stone-950 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
@@ -34,9 +34,9 @@
       <div class="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-emerald-400 to-cyan-500">
         <span class="text-sm font-black text-zinc-950">I</span>
       </div>
-      <div>
+      <div class="min-w-0">
         <div class="flex flex-wrap items-center gap-2">
-          <h1 class="text-base font-semibold text-stone-950 dark:text-zinc-100">GPT Image Panel</h1>
+          <h1 class="min-w-0 text-base font-semibold text-stone-950 dark:text-zinc-100">GPT Image Panel</h1>
           {#if version}
             <a
               href={safeReleaseUrl || undefined}
@@ -44,8 +44,8 @@
               rel="noreferrer"
               title={versionTitle}
               class={hasVersionUpdate
-                ? 'control-focus inline-flex items-center rounded-md border border-amber-400/40 bg-amber-400/10 px-2 py-0.5 text-[11px] font-semibold leading-5 text-amber-200 transition-colors hover:border-amber-300/70 hover:bg-amber-400/15'
-                : 'control-focus rounded-md border border-stone-300 px-2 py-0.5 text-[11px] font-semibold leading-5 text-stone-500 transition-colors hover:text-stone-900 dark:border-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-100'}
+                ? 'control-focus inline-flex items-center whitespace-nowrap rounded-md border border-amber-400/40 bg-amber-400/10 px-2 py-0.5 text-[11px] font-semibold leading-5 text-amber-200 transition-colors hover:border-amber-300/70 hover:bg-amber-400/15'
+                : 'control-focus inline-flex items-center whitespace-nowrap rounded-md border border-stone-300 px-2 py-0.5 text-[11px] font-semibold leading-5 text-stone-500 transition-colors hover:text-stone-900 dark:border-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-100'}
             >
               {version}
               {#if hasVersionUpdate}
@@ -58,7 +58,7 @@
       </div>
     </div>
 
-    <div class="flex items-center gap-2">
+    <div class="flex w-full flex-wrap items-center justify-end gap-2 sm:w-auto sm:flex-none">
       <button
         type="button"
         class="mobile-touch-target control-focus inline-flex h-10 min-w-10 items-center justify-center rounded-lg border border-stone-300 px-2 text-stone-500 transition-colors hover:bg-stone-100 hover:text-stone-950 dark:border-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"

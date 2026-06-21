@@ -21,7 +21,7 @@
 </script>
 
 {#if visible}
-  <div class="fixed inset-0 z-[100] flex items-center justify-center bg-stone-100 px-4 dark:bg-zinc-950">
+  <div class="mobile-dialog-root fixed inset-0 z-[100] flex items-center justify-center bg-stone-100 px-4 dark:bg-zinc-950">
     <button
       type="button"
       class="control-focus absolute left-4 top-4 h-8 min-w-12 rounded-lg border border-stone-300 px-2 text-xs font-semibold text-stone-600 transition-colors hover:border-emerald-500/60 hover:bg-stone-200 hover:text-stone-950 sm:left-6 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
@@ -32,7 +32,7 @@
     >
       {$t.language.button}
     </button>
-    <div class="fade-in w-full max-w-sm rounded-2xl border border-stone-200 bg-white/90 p-6 shadow-2xl shadow-stone-300/50 dark:border-zinc-800 dark:bg-zinc-900/80 dark:shadow-none">
+    <div class="mobile-dvh-dialog fade-in w-full max-w-sm overflow-y-auto rounded-2xl border border-stone-200 bg-white/90 p-5 shadow-2xl shadow-stone-300/50 dark:border-zinc-800 dark:bg-zinc-900/80 dark:shadow-none sm:p-6">
       <div class="mb-5 flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-500/10">
         <span class="text-lg text-emerald-400">#</span>
       </div>

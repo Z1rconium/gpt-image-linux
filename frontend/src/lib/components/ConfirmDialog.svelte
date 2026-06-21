@@ -20,16 +20,16 @@
 </script>
 
 {#if request}
-  <div class="fixed inset-0 z-[95] flex items-center justify-center bg-black/70 p-4">
+  <div class="mobile-dialog-root fixed inset-0 z-[95] flex items-center justify-center bg-black/60 p-4">
     <button class="absolute inset-0" type="button" tabindex="-1" aria-label={request.closeLabel} on:click={() => confirmStore.cancel()}></button>
     <div
-      class="fade-in relative w-full max-w-md rounded-2xl border border-stone-200 bg-white shadow-2xl shadow-stone-300/50 dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-none"
+      class="mobile-dvh-dialog fade-in relative flex w-full max-w-md flex-col overflow-hidden rounded-2xl border border-stone-200 bg-white shadow-2xl shadow-stone-300/50 dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-none"
       role="dialog"
       aria-modal="true"
       aria-labelledby="confirm-dialog-title"
       use:dialog={{ open: Boolean(request), onClose: () => confirmStore.cancel() }}
     >
-      <div class="border-b border-stone-200 p-5 dark:border-zinc-800">
+      <div class="shrink-0 border-b border-stone-200 p-5 dark:border-zinc-800">
         <div class="flex items-start justify-between gap-3">
           <div class="min-w-0">
             <h2 id="confirm-dialog-title" class="text-base font-semibold text-stone-950 dark:text-zinc-100">{request.title}</h2>
@@ -42,7 +42,7 @@
       </div>
 
       {#if request.details?.length || requiredText}
-        <div class="space-y-4 p-5">
+        <div class="min-h-0 flex-1 space-y-4 overflow-y-auto p-5">
           {#if request.details?.length}
             <ul class="space-y-2 text-sm text-stone-700 dark:text-zinc-300">
               {#each request.details as detail}
@@ -66,11 +66,11 @@
         </div>
       {/if}
 
-      <div class="flex justify-end gap-3 border-t border-stone-200 p-5 dark:border-zinc-800">
-        <button type="button" class="control-focus rounded-lg border border-stone-300 px-4 py-2 text-sm text-stone-700 hover:bg-stone-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" on:click={() => confirmStore.cancel()}>
+      <div class="shrink-0 flex flex-col gap-3 border-t border-stone-200 p-5 dark:border-zinc-800 sm:flex-row sm:justify-end">
+        <button type="button" class="control-focus w-full rounded-lg border border-stone-300 px-4 py-2 text-sm text-stone-700 hover:bg-stone-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800 sm:w-auto" on:click={() => confirmStore.cancel()}>
           {request.cancelLabel}
         </button>
-        <button type="button" disabled={!canConfirm} class={`control-focus rounded-lg px-4 py-2 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-60 ${confirmClass}`} on:click={() => confirmStore.accept()}>
+        <button type="button" disabled={!canConfirm} class={`control-focus w-full rounded-lg px-4 py-2 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-60 sm:w-auto ${confirmClass}`} on:click={() => confirmStore.accept()}>
           {request.confirmLabel}
         </button>
       </div>

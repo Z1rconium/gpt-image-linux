@@ -33,14 +33,14 @@
   import { accessStore } from '$lib/stores/access';
   import { confirmStore } from '$lib/stores/confirm';
   import { editSourceStore, MAX_EDIT_SOURCE_IMAGES } from '$lib/stores/editSource';
-  import { galleryStore } from '$lib/stores/gallery';
+  import { galleryActivityStore, galleryStore } from '$lib/stores/gallery';
   import { readGalleryUrlState, writeGalleryUrlState } from '$lib/stores/galleryUrlState';
   import { jobsStore } from '$lib/stores/jobs';
   import { lightboxStore } from '$lib/stores/lightbox';
   import { DEFAULT_PROMPT_MODEL, initialPromptFormState, previewStore, type PromptFormState } from '$lib/stores/preview';
   import { promptSnippetsStore } from '$lib/stores/promptSnippets';
-  import { settingsStore } from '$lib/stores/settings';
-  import { uiStore, type ToastOptions } from '$lib/stores/ui';
+  import { settingsActivityStore, settingsStore } from '$lib/stores/settings';
+  import { toastStore, uiStore, type ToastOptions } from '$lib/stores/ui';
   import { versionStore } from '$lib/stores/version';
   import { copyText, displayImageSize, imageUrl } from '$lib/utils/format';
   import {
@@ -67,7 +67,7 @@
   let urlSyncQueued = false;
   let queuedUrlSyncMode: 'replace' | 'push' = 'replace';
   let urlSyncTimer: ReturnType<typeof setTimeout> | null = null;
-  let lastUrlSyncPrompt = '';
+  let requestedUrlSyncMode: 'replace' | 'push' | null = null;
   let lightboxLookupSeq = 0;
   let lightboxNavigating = false;
   let lastActivePresetApiPath: ApiPath = initialPromptFormState.apiPath;
@@ -135,6 +135,11 @@
     showToast(errorMessage(error, fallback), 'error');
   }
 
+  function syncAfterGalleryMutation(mode: 'replace' | 'push' = 'replace', debounceMs = 0) {
+    requestUrlSync(mode);
+    queueUrlSync(mode, debounceMs);
+  }
+
   function syncUrlState(mode: 'replace' | 'push' = 'replace') {
     if (!urlSyncReady || applyingUrlState || typeof window === 'undefined') return;
 
@@ -153,6 +158,11 @@
     window.history[mode === 'push' ? 'pushState' : 'replaceState']({}, '', nextUrl);
   }
 
+  function requestUrlSync(mode: 'replace' | 'push' = 'replace') {
+    if (mode === 'push') requestedUrlSyncMode = 'push';
+    else if (!requestedUrlSyncMode) requestedUrlSyncMode = 'replace';
+  }
+
   function queueUrlSync(mode: 'replace' | 'push' = 'replace', debounceMs = 0) {
     if (urlSyncTimer) {
       clearTimeout(urlSyncTimer);
@@ -166,12 +176,14 @@
       return;
     }
     if (mode === 'push') queuedUrlSyncMode = 'push';
+    if (requestedUrlSyncMode === 'push') queuedUrlSyncMode = 'push';
     if (urlSyncQueued) return;
     urlSyncQueued = true;
     queueMicrotask(() => {
       urlSyncQueued = false;
       const nextMode = queuedUrlSyncMode;
       queuedUrlSyncMode = 'replace';
+      requestedUrlSyncMode = null;
       syncUrlState(nextMode);
     });
   }
@@ -216,6 +228,7 @@
   }
 
   const prefetchedImageUrls = new Set<string>();
+  let pendingLightboxPrefetch: ReturnType<typeof setTimeout> | number | null = null;
 
   function prefetchImage(image: GalleryEntry | null | undefined) {
     if (!image || typeof window === 'undefined') return;
@@ -231,6 +244,17 @@
     img.src = url;
   }
 
+  function clearLightboxPrefetch() {
+    if (pendingLightboxPrefetch !== null) {
+      if (typeof pendingLightboxPrefetch === 'number' && 'cancelIdleCallback' in window) {
+        window.cancelIdleCallback(pendingLightboxPrefetch);
+      } else {
+        window.clearTimeout(pendingLightboxPrefetch as ReturnType<typeof setTimeout>);
+      }
+      pendingLightboxPrefetch = null;
+    }
+  }
+
   function prefetchLightboxNeighbors() {
     if (!$lightboxStore.image || !$galleryStore.gallery) return;
 
@@ -239,19 +263,20 @@
     const currentIndex = images.findIndex((image) => image.id === $lightboxStore.image?.id);
     if (currentIndex < 0) return;
 
-    prefetchImage(images[currentIndex - 1]);
     prefetchImage(images[currentIndex + 1]);
 
     if (currentIndex >= images.length - 2 && gallery.has_next) {
-      void galleryStore.prefetchGalleryPage(gallery.page + 1, 'next').then((nextGallery) => {
-        prefetchImage(nextGallery?.images[0]);
-      });
-    }
-
-    if (currentIndex <= 1 && gallery.has_prev) {
-      void galleryStore.prefetchGalleryPage(Math.max(1, gallery.page - 1), 'prev').then((prevGallery) => {
-        prefetchImage(prevGallery?.images.at(-1));
-      });
+      clearLightboxPrefetch();
+      const runPrefetch = () => {
+        pendingLightboxPrefetch = null;
+        void galleryStore.prefetchGalleryPage(gallery.page + 1, 'next').then((nextGallery) => {
+          prefetchImage(nextGallery?.images[0]);
+        });
+      };
+      pendingLightboxPrefetch =
+        typeof window.requestIdleCallback === 'function'
+          ? window.requestIdleCallback(runPrefetch, { timeout: 1500 })
+          : window.setTimeout(runPrefetch, 250);
     }
   }
 
@@ -303,12 +328,18 @@
   function openJobsDrawer(tab: JobsTab = jobsTab) {
     jobsTab = tab;
     setUi('jobsOpen', true);
-    if (tab === 'history' && !$jobsStore.historyLoaded && !$jobsStore.historyLoading) void jobsStore.loadJobHistory();
+    if (tab === 'history' && !$jobsStore.historyLoaded && !$jobsStore.historyLoading) {
+      void jobsStore.loadJobHistory();
+    } else if (tab === 'history' && $jobsStore.historyNeedsRefresh && !$jobsStore.historyLoading) {
+      void jobsStore.refreshHistoryIfLoaded();
+    }
+    requestUrlSync();
     queueUrlSync();
   }
 
   function closeJobsDrawer() {
     setUi('jobsOpen', false);
+    requestUrlSync();
     queueUrlSync();
   }
 
@@ -323,7 +354,12 @@
 
   function setJobsTab(tab: JobsTab) {
     jobsTab = tab;
-    if (tab === 'history' && !$jobsStore.historyLoaded && !$jobsStore.historyLoading) void jobsStore.loadJobHistory();
+    if (tab === 'history' && !$jobsStore.historyLoaded && !$jobsStore.historyLoading) {
+      void jobsStore.loadJobHistory();
+    } else if (tab === 'history' && $jobsStore.historyNeedsRefresh && !$jobsStore.historyLoading) {
+      void jobsStore.refreshHistoryIfLoaded();
+    }
+    requestUrlSync();
     queueUrlSync();
   }
 
@@ -349,7 +385,8 @@
     } finally {
       applyingUrlState = false;
     }
-    syncUrlState();
+    requestUrlSync();
+    queueUrlSync();
   }
 
   function setUi<K extends keyof typeof $uiStore>(key: K, value: (typeof $uiStore)[K]) {
@@ -465,8 +502,8 @@
   function updatePreviewFromJob(job: GenerateJobStatus) {
     previewStore.setPreview(jobsStore.previewFromJob(job, $previewStore));
     if (job.status !== 'queued' && job.status !== 'running') {
-      void jobsStore.loadJobs();
-      void jobsStore.refreshHistoryIfLoaded();
+      if (jobsStore.shouldRefreshJobsAfterSubmit()) void jobsStore.loadJobs();
+      jobsStore.markHistoryStale();
       if (job.status === 'success') void galleryStore.loadGallery(1);
     }
   }
@@ -484,12 +521,42 @@
 
   function generateImage() {
     normalizeFormQuantityForSubmit();
-    void previewStore.generateImage(form, jobsStore.makeQueuedPreview, trackJob, jobsStore.loadJobs);
+    void previewStore.generateImage(
+      form,
+      jobsStore.makeQueuedPreview,
+      trackJob,
+      jobsStore.shouldRefreshJobsAfterSubmit() ? jobsStore.loadJobs : undefined
+    );
   }
 
   function editImage() {
     normalizeFormQuantityForSubmit();
-    void previewStore.editImage(form, $editSourceStore, jobsStore.makeQueuedPreview, trackJob, jobsStore.loadJobs);
+    void previewStore.editImage(
+      form,
+      $editSourceStore,
+      jobsStore.makeQueuedPreview,
+      trackJob,
+      jobsStore.shouldRefreshJobsAfterSubmit() ? jobsStore.loadJobs : undefined
+    );
+  }
+
+  function setGalleryFilter(key: Parameters<typeof galleryStore.updateFilter>[0], value: Parameters<typeof galleryStore.updateFilter>[1]) {
+    galleryStore.updateFilter(key, value);
+    syncAfterGalleryMutation('replace', key === 'prompt' ? 300 : 0);
+  }
+
+  function resetGalleryFilters() {
+    galleryStore.resetFilters();
+    syncAfterGalleryMutation();
+  }
+
+  function loadGalleryPage(page: number, direction?: 'next' | 'prev' | 'jump') {
+    void galleryStore.loadGallery(page, false, direction);
+    syncAfterGalleryMutation();
+  }
+
+  function loadGalleryStats() {
+    void galleryStore.loadGallery($galleryStore.page, true);
   }
 
   function promptContainsTag(prompt: string, value: string) {
@@ -809,17 +876,6 @@
     generateImage();
   }
 
-  $: if (urlSyncReady) {
-    $galleryStore.page;
-    $galleryStore.filters;
-    $uiStore.jobsOpen;
-    jobsTab;
-    $lightboxStore.image?.id;
-    const promptChanged = $galleryStore.filters.prompt !== lastUrlSyncPrompt;
-    lastUrlSyncPrompt = $galleryStore.filters.prompt;
-    queueUrlSync('replace', promptChanged ? 300 : 0);
-  }
-
   $: if ($lightboxStore.image && $galleryStore.gallery) {
     $lightboxStore.image.id;
     $galleryStore.gallery.page;
@@ -892,13 +948,13 @@
 <SettingsDrawer
   open={$uiStore.settingsOpen}
   settings={$settingsStore.settings}
-  saving={$settingsStore.saving}
-  health={$settingsStore.health}
-  healthChecking={$settingsStore.healthChecking}
-  r2Health={$settingsStore.r2Health}
-  r2HealthChecking={$settingsStore.r2HealthChecking}
-  promptOptimizerHealth={$settingsStore.promptOptimizerHealth}
-  promptOptimizerHealthChecking={$settingsStore.promptOptimizerHealthChecking}
+  saving={$settingsActivityStore.saving}
+  health={$settingsActivityStore.health}
+  healthChecking={$settingsActivityStore.healthChecking}
+  r2Health={$settingsActivityStore.r2Health}
+  r2HealthChecking={$settingsActivityStore.r2HealthChecking}
+  promptOptimizerHealth={$settingsActivityStore.promptOptimizerHealth}
+  promptOptimizerHealthChecking={$settingsActivityStore.promptOptimizerHealthChecking}
   onClose={() => setUi('settingsOpen', false)}
   onSave={saveSettings}
   onCreate={createPreset}
@@ -955,7 +1011,7 @@
 />
 
 <main class="mx-auto max-w-5xl space-y-6 px-4 py-6 pb-28 sm:px-6 sm:pb-32">
-  <ToastHost toast={$uiStore.toast} />
+  <ToastHost toast={$toastStore} />
 
   <PromptForm
     bind:form
@@ -1018,12 +1074,12 @@
     gallery={$galleryStore.gallery}
     filters={$galleryStore.filters}
     loading={$galleryStore.loading}
-    operationStatus={$galleryStore.operationStatus}
+    operationStatus={$galleryActivityStore.operationStatus}
     canSyncR2={r2BackupAvailable}
-    onFilter={galleryStore.updateFilter}
-    onResetFilters={galleryStore.resetFilters}
-    onPage={galleryStore.loadGallery}
-    onLoadStats={() => galleryStore.loadGallery($galleryStore.page, true)}
+    onFilter={setGalleryFilter}
+    onResetFilters={resetGalleryFilters}
+    onPage={loadGalleryPage}
+    onLoadStats={loadGalleryStats}
     onFavorite={toggleFavorite}
     onDelete={deleteImage}
     onDeleteAll={deleteAllImages}

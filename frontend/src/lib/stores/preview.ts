@@ -98,7 +98,7 @@ function createPreviewStore() {
     form: PromptFormState,
     makeQueuedPreview: (prompt: string, operation: NonNullable<GenerateJobResponse['operation']>) => PreviewState,
     trackJob: (jobId: string) => void,
-    loadJobs: () => Promise<void>
+    loadJobs?: () => Promise<void>
   ) {
     const body = buildRequestBody(form);
     if (!body.prompt) {
@@ -120,7 +120,7 @@ function createPreviewStore() {
         'starting image generation'
       );
       trackJob(job.job_id);
-      await loadJobs();
+      if (loadJobs) await loadJobs();
     } catch (error) {
       setSubmissionError(error);
     }
@@ -131,7 +131,7 @@ function createPreviewStore() {
     editSource: EditSourceState,
     makeQueuedPreview: (prompt: string, operation: NonNullable<GenerateJobResponse['operation']>) => PreviewState,
     trackJob: (jobId: string) => void,
-    loadJobs: () => Promise<void>
+    loadJobs?: () => Promise<void>
   ) {
     const sourceCount = editSourceCount(editSource);
     if (sourceCount === 0) {
@@ -179,7 +179,7 @@ function createPreviewStore() {
         'starting image edit'
       );
       trackJob(job.job_id);
-      await loadJobs();
+      if (loadJobs) await loadJobs();
     } catch (error) {
       setSubmissionError(error);
     }

@@ -60,7 +60,6 @@
 
   function toggleHistoryFailedOnly(event: Event) {
     const failedOnly = (event.currentTarget as HTMLInputElement).checked;
-    visibleJobIds = new Set<string>();
     expandedErrorIds = new Set<string>();
     void onHistoryFailedOnlyChange(failedOnly);
   }
@@ -73,11 +72,6 @@
     } finally {
       historyLoadMoreRequest = false;
     }
-  }
-
-  function handleHistoryScroll(event: Event) {
-    const element = event.currentTarget as HTMLDivElement;
-    if (element.scrollHeight - element.scrollTop - element.clientHeight <= 160) void requestMoreHistory();
   }
 
   async function fillHistoryViewportIfNeeded() {
@@ -124,22 +118,19 @@
     expandedErrorIds = nextIds;
   }
 
-  let visibleJobIds = new Set<string>();
+  function observeHistorySentinel(node: HTMLElement) {
+    const root = node.closest('.mobile-drawer-scroll');
+    if (!(root instanceof HTMLElement)) {
+      return {
+        destroy() {}
+      };
+    }
 
-  $: if (!open) {
-    visibleJobIds = new Set<string>();
-  }
-
-  function lazyRender(node: HTMLElement, jobId: string) {
     const observer = new IntersectionObserver(
       (entries) => {
-        if (entries[0].isIntersecting) {
-          visibleJobIds.add(jobId);
-          visibleJobIds = visibleJobIds;
-          observer.disconnect();
-        }
+        if (entries[0]?.isIntersecting) void requestMoreHistory();
       },
-      { rootMargin: '300px' }
+      { root, rootMargin: '160px 0px' }
     );
     observer.observe(node);
     return {
@@ -209,7 +200,7 @@
         </div>
       </div>
 
-      <div bind:this={historyScrollEl} class="mobile-drawer-scroll min-h-0 flex-1 overflow-y-auto p-5" on:scroll={handleHistoryScroll}>
+      <div bind:this={historyScrollEl} class="mobile-drawer-scroll min-h-0 flex-1 overflow-y-auto p-5">
         {#if internalActiveTab === 'running' && jobs.length === 0}
           <div class="rounded-xl border border-dashed border-stone-300 bg-stone-100/80 px-4 py-10 text-center dark:border-zinc-800 dark:bg-zinc-950/35">
             <p class="text-sm font-medium text-stone-700 dark:text-zinc-300">{$t.jobs.noRunning}</p>
@@ -243,69 +234,66 @@
         {:else}
           <div class="space-y-3" aria-busy={historyLoading}>
             {#each historyJobs as job (job.job_id)}
-              <div class="min-h-[175px]" use:lazyRender={job.job_id}>
-                {#if visibleJobIds.has(job.job_id)}
-                  <article class="deferred-list-item rounded-xl border border-stone-200 bg-stone-50/80 p-4 dark:border-zinc-800 dark:bg-zinc-950/45">
-                    <div class="flex items-center justify-between gap-3">
-                      <span class="rounded-md border border-stone-300 px-2 py-0.5 text-[11px] text-stone-500 dark:border-zinc-700 dark:text-zinc-400">{operationLabel(job.operation, $t.operations)}</span>
-                      <span class={`text-xs font-medium ${statusClass(job)}`}>{statusLabel(job.status, $t.statuses)}</span>
-                    </div>
-                    <p class="mt-2 line-clamp-2 text-sm text-stone-800 dark:text-zinc-200">{job.prompt || $t.common.untitledJob}</p>
-                    <p class="mt-1 truncate text-xs text-stone-500 dark:text-zinc-500">{historyStageLabel(job, $t.stages)}</p>
-                    {#if jobErrorMessage(job, $t.messages.jobFailed)}
-                      <div
-                        class:hidden={!isErrorExpanded(job.job_id)}
-                        class="mt-2 rounded-lg border border-red-500/25 bg-red-950/30 px-3 py-2 text-xs leading-relaxed text-red-300"
-                        aria-hidden={!isErrorExpanded(job.job_id)}
-                      >
-                        {jobErrorMessage(job, $t.messages.jobFailed)}
-                      </div>
-                    {/if}
-                    <div class="mt-3 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-zinc-500">
-                      {#if jobMeta(job)}
-                        <span>{jobMeta(job)}</span>
-                      {/if}
-                      <span>{formatBeijingTime(job.completed_at || job.updated_at || job.created_at)}</span>
-                      {#if job.duration}
-                        <span>{$t.common.duration}: {job.duration}</span>
-                      {/if}
-                    </div>
-                    {#if jobErrorMessage(job, $t.messages.jobFailed)}
-                      <div class="mt-3">
-                        <button
-                          type="button"
-                          class="control-focus rounded-lg border border-red-500/35 px-3 py-2 text-xs font-medium text-red-200 hover:bg-red-500/10"
-                          aria-expanded={isErrorExpanded(job.job_id)}
-                          on:click={() => toggleError(job.job_id)}
-                        >
-                          {isErrorExpanded(job.job_id) ? $t.jobs.hideError : $t.jobs.showError}
-                        </button>
-                      </div>
-                    {/if}
-                    <div class="mt-4 flex flex-wrap justify-end gap-2">
-                      <button type="button" class="control-focus rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800" on:click={() => onUseJob(job)}>
-                        {$t.jobs.useAsPrompt}
-                      </button>
-                      <button
-                        type="button"
-                        class="control-focus rounded-lg border border-emerald-500/40 px-3 py-2 text-xs font-medium text-emerald-200 hover:bg-emerald-500/10 disabled:cursor-not-allowed disabled:opacity-40"
-                        disabled={isActiveJob(job)}
-                        title={isActiveJob(job) ? $t.jobs.retryUnavailable : $t.jobs.retry}
-                        on:click={() => onRetryJob(job)}
-                      >
-                        {$t.jobs.retry}
-                      </button>
-                    </div>
-                  </article>
-                {:else}
-                  <div class="h-[175px] rounded-xl border border-zinc-800/40 bg-zinc-950/20"></div>
+              <article class="deferred-list-item rounded-xl border border-stone-200 bg-stone-50/80 p-4 dark:border-zinc-800 dark:bg-zinc-950/45">
+                <div class="flex items-center justify-between gap-3">
+                  <span class="rounded-md border border-stone-300 px-2 py-0.5 text-[11px] text-stone-500 dark:border-zinc-700 dark:text-zinc-400">{operationLabel(job.operation, $t.operations)}</span>
+                  <span class={`text-xs font-medium ${statusClass(job)}`}>{statusLabel(job.status, $t.statuses)}</span>
+                </div>
+                <p class="mt-2 line-clamp-2 text-sm text-stone-800 dark:text-zinc-200">{job.prompt || $t.common.untitledJob}</p>
+                <p class="mt-1 truncate text-xs text-stone-500 dark:text-zinc-500">{historyStageLabel(job, $t.stages)}</p>
+                {#if jobErrorMessage(job, $t.messages.jobFailed)}
+                  <div
+                    class:hidden={!isErrorExpanded(job.job_id)}
+                    class="mt-2 rounded-lg border border-red-500/25 bg-red-950/30 px-3 py-2 text-xs leading-relaxed text-red-300"
+                    aria-hidden={!isErrorExpanded(job.job_id)}
+                  >
+                    {jobErrorMessage(job, $t.messages.jobFailed)}
+                  </div>
                 {/if}
-              </div>
+                <div class="mt-3 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-zinc-500">
+                  {#if jobMeta(job)}
+                    <span>{jobMeta(job)}</span>
+                  {/if}
+                  <span>{formatBeijingTime(job.completed_at || job.updated_at || job.created_at)}</span>
+                  {#if job.duration}
+                    <span>{$t.common.duration}: {job.duration}</span>
+                  {/if}
+                </div>
+                {#if jobErrorMessage(job, $t.messages.jobFailed)}
+                  <div class="mt-3">
+                    <button
+                      type="button"
+                      class="control-focus rounded-lg border border-red-500/35 px-3 py-2 text-xs font-medium text-red-200 hover:bg-red-500/10"
+                      aria-expanded={isErrorExpanded(job.job_id)}
+                      on:click={() => toggleError(job.job_id)}
+                    >
+                      {isErrorExpanded(job.job_id) ? $t.jobs.hideError : $t.jobs.showError}
+                    </button>
+                  </div>
+                {/if}
+                <div class="mt-4 flex flex-wrap justify-end gap-2">
+                  <button type="button" class="control-focus rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800" on:click={() => onUseJob(job)}>
+                    {$t.jobs.useAsPrompt}
+                  </button>
+                  <button
+                    type="button"
+                    class="control-focus rounded-lg border border-emerald-500/40 px-3 py-2 text-xs font-medium text-emerald-200 hover:bg-emerald-500/10 disabled:cursor-not-allowed disabled:opacity-40"
+                    disabled={isActiveJob(job)}
+                    title={isActiveJob(job) ? $t.jobs.retryUnavailable : $t.jobs.retry}
+                    on:click={() => onRetryJob(job)}
+                  >
+                    {$t.jobs.retry}
+                  </button>
+                </div>
+              </article>
             {/each}
             {#if historyLoading}
               <div class="rounded-xl border border-zinc-800 bg-zinc-950/35 px-4 py-4 text-center text-xs text-zinc-400">
                 {$t.jobs.historyLoading}
               </div>
+            {/if}
+            {#if historyJobs.length && historyHasMore}
+              <div class="h-8" aria-hidden="true" use:observeHistorySentinel></div>
             {/if}
           </div>
         {/if}

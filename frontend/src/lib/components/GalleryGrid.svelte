@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onDestroy } from 'svelte';
   import type { GalleryEntry, GalleryResponse } from '$lib/api/types';
   import { t } from '$lib/i18n';
   import type { GalleryFilters, GalleryOperationStatus } from '$lib/stores/gallery';
@@ -36,11 +37,24 @@
   export let onBatchDownload: () => void = () => {};
 
   const skeletonCards = Array.from({ length: 6 });
+  const EAGER_THUMB_COUNT = 3;
+  const THUMBNAIL_RETRY_DELAYS_MS = [1200, 2400, 4800, 9600, 16000];
+  const THUMBNAIL_PLACEHOLDER_SRC =
+    'data:image/svg+xml;charset=UTF-8,' +
+    encodeURIComponent(
+      `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-hidden="true">
+        <rect width="64" height="64" fill="#e7e5e4"/>
+        <path d="M0 0h64v64H0z" fill="none" stroke="#d6d3d1"/>
+        <path d="M10 42l11-12 9 9 13-15 11 18" fill="none" stroke="#a8a29e" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+        <circle cx="22" cy="22" r="5" fill="#c7c3be"/>
+      </svg>`
+    );
 
   let importInput: HTMLInputElement;
   let pageInput = '1';
-
-  const EAGER_THUMB_COUNT = 6;
+  let failedThumbnailIds = new Set<string>();
+  const thumbnailRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const thumbnailRetryCounts = new Map<string, number>();
 
   $: images = gallery?.images || [];
   $: currentPage = gallery?.page || 1;
@@ -116,36 +130,80 @@
   }
 
   function galleryImageSrc(image: GalleryEntry) {
-    return thumbnailReady(image) ? thumbnailUrl(image.filename, image.thumbnail_url) : imageUrl(image.filename, image.image_url);
-  }
-
-  function thumbnailSrcset(image: GalleryEntry) {
-    const fullWidth = image.image_width && image.image_width > 512 ? image.image_width : 1024;
-    return `${thumbnailUrl(image.filename, image.thumbnail_url)} 512w, ${imageUrl(image.filename, image.image_url)} ${fullWidth}w`;
+    if (!thumbnailReady(image)) {
+      return image.thumbnail_status === 'queued'
+        ? imageUrl(image.filename, image.image_url)
+        : THUMBNAIL_PLACEHOLDER_SRC;
+    }
+    if (failedThumbnailIds.has(image.id)) {
+      return THUMBNAIL_PLACEHOLDER_SRC;
+    }
+    const retryAttempt = thumbnailRetryCounts.get(image.id) || 0;
+    return retryAttempt > 0 ? thumbnailRequestUrl(image, retryAttempt) : thumbnailUrl(image.filename, image.thumbnail_url);
   }
 
   function thumbnailReady(image: GalleryEntry) {
     return !image.thumbnail_status || image.thumbnail_status === 'ready';
   }
 
+  function thumbnailRequestUrl(image: GalleryEntry, attempt: number) {
+    const base = thumbnailUrl(image.filename, image.thumbnail_url);
+    if (!attempt) return base;
+    try {
+      const url = new URL(base, window.location.origin);
+      url.searchParams.set('retry', String(attempt));
+      return url.origin === window.location.origin ? `${url.pathname}${url.search}${url.hash}` : url.toString();
+    } catch {
+      return base;
+    }
+  }
+
+  function clearThumbnailRetry(imageId: string) {
+    const timer = thumbnailRetryTimers.get(imageId);
+    if (timer) clearTimeout(timer);
+    thumbnailRetryTimers.delete(imageId);
+    thumbnailRetryCounts.delete(imageId);
+    failedThumbnailIds = new Set([...failedThumbnailIds].filter((id) => id !== imageId));
+  }
+
+  function scheduleThumbnailRetry(image: GalleryEntry) {
+    const attempt = thumbnailRetryCounts.get(image.id) || 0;
+    if (attempt >= THUMBNAIL_RETRY_DELAYS_MS.length) return;
+    if (thumbnailRetryTimers.has(image.id)) return;
+
+    failedThumbnailIds = new Set(failedThumbnailIds).add(image.id);
+    const delay = THUMBNAIL_RETRY_DELAYS_MS[attempt];
+    const timer = setTimeout(() => {
+      thumbnailRetryTimers.delete(image.id);
+      failedThumbnailIds = new Set([...failedThumbnailIds].filter((id) => id !== image.id));
+      thumbnailRetryCounts.set(image.id, attempt + 1);
+    }, delay);
+    thumbnailRetryTimers.set(image.id, timer);
+  }
+
+  function handleThumbnailLoad(image: GalleryEntry) {
+    if (!thumbnailReady(image)) return;
+    clearThumbnailRetry(image.id);
+  }
+
   function handleThumbnailError(event: Event, image: GalleryEntry) {
-    const img = event.currentTarget as HTMLImageElement;
-    const fallback = imageUrl(image.filename, image.image_url);
-    const absoluteFallback = new URL(fallback, window.location.origin).href;
-    if (img.dataset.fallbackSrc === fallback || img.getAttribute('src') === fallback || img.src === absoluteFallback) {
-      img.removeAttribute('srcset');
-      img.removeAttribute('src');
-      img.classList.add('opacity-0');
+    if (!thumbnailReady(image)) {
+      failedThumbnailIds = new Set(failedThumbnailIds).add(image.id);
       return;
     }
-    img.dataset.fallbackSrc = fallback;
-    img.srcset = '';
-    img.src = fallback;
+    scheduleThumbnailRetry(image);
   }
 
   function isImageSelected(image: GalleryEntry) {
     return selectedAllFiltered || selectedIds.has(image.id);
   }
+
+  onDestroy(() => {
+    thumbnailRetryTimers.forEach((timer) => clearTimeout(timer));
+    thumbnailRetryTimers.clear();
+    thumbnailRetryCounts.clear();
+    failedThumbnailIds = new Set();
+  });
 </script>
 
 <section class="rounded-2xl border border-stone-200 bg-white/80 p-4 shadow-sm shadow-stone-200/60 sm:p-5 dark:border-zinc-800 dark:bg-zinc-900/60 dark:shadow-none">
@@ -319,13 +377,6 @@
                 </span>
               {/if}
               <picture class="block h-full w-full">
-                {#if thumbnailReady(image)}
-                  <source
-                    media="(max-width: 1023px)"
-                    srcset={thumbnailSrcset(image)}
-                    sizes="(max-width: 639px) calc(100vw - 32px), calc((100vw - 64px) / 2)"
-                  />
-                {/if}
                 <img
                   src={galleryImageSrc(image)}
                   alt={image.prompt}
@@ -335,6 +386,7 @@
                   decoding="async"
                   width={image.image_width || undefined}
                   height={image.image_height || undefined}
+                  on:load={() => handleThumbnailLoad(image)}
                   on:error={(event) => handleThumbnailError(event, image)}
                 />
               </picture>
