@@ -6,7 +6,7 @@ WORKDIR /frontend
 COPY frontend/package*.json ./
 RUN npm ci
 COPY frontend/ ./
-RUN npm run build
+RUN npx svelte-kit sync && npm run build
 
 FROM ${PYTHON_BASE_IMAGE} AS python-builder
 WORKDIR /app
