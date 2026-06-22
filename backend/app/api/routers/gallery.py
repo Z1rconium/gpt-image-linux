@@ -79,6 +79,8 @@ THUMBNAIL_DISPATCH_INTERVAL_SECONDS = 1.0
 THUMBNAIL_DISPATCH_MAX_IDLE_BACKOFF_SECONDS = 5.0
 GALLERY_FILE_GC_INTERVAL_SECONDS = 300
 BACKGROUND_TASK_LEASE_SECONDS = 120
+BACKGROUND_TASK_ERROR_BACKOFF_INITIAL_SECONDS = 5.0
+BACKGROUND_TASK_ERROR_BACKOFF_MAX_SECONDS = 60.0
 GALLERY_PROGRESS_MIN_INTERVAL_SECONDS = 0.5
 GALLERY_PROGRESS_MIN_ITEMS = 50
 DIRECT_EXPORT_SLOT_LEASE_SECONDS = 6 * 3600
@@ -848,6 +850,12 @@ def _direct_export_slot_expires_at() -> str:
 
 def _background_task_lease_expires_at() -> str:
     return (datetime.now(timezone.utc) + timedelta(seconds=BACKGROUND_TASK_LEASE_SECONDS)).isoformat()
+
+
+def _next_background_task_error_backoff(current: float) -> float:
+    if current <= 0:
+        return BACKGROUND_TASK_ERROR_BACKOFF_INITIAL_SECONDS
+    return min(current * 2, BACKGROUND_TASK_ERROR_BACKOFF_MAX_SECONDS)
 
 
 async def _sleep_while_renewing_background_lease(
@@ -1663,6 +1671,7 @@ async def _run_scheduled_gallery_r2_sync_once() -> dict[str, object]:
 
 async def run_gallery_r2_scheduled_sync(worker_id: str) -> None:
     lease_name = "gallery_r2_scheduled_sync"
+    error_backoff_seconds = 0.0
     while True:
         try:
             acquired = await asyncio.to_thread(
@@ -1672,6 +1681,7 @@ async def run_gallery_r2_scheduled_sync(worker_id: str) -> None:
                 lease_expires_at=_background_task_lease_expires_at(),
             )
             if not acquired:
+                error_backoff_seconds = 0.0
                 await asyncio.sleep(SCHEDULED_R2_SYNC_DISABLED_POLL_SECONDS)
                 continue
             delay_seconds = await _scheduled_gallery_r2_sync_delay_seconds()
@@ -1682,6 +1692,7 @@ async def run_gallery_r2_scheduled_sync(worker_id: str) -> None:
                     delay_seconds=delay_seconds,
                 )
                 if not still_leader:
+                    error_backoff_seconds = 0.0
                     continue
                 await _run_scheduled_gallery_r2_sync_once()
             finally:
@@ -1690,10 +1701,17 @@ async def run_gallery_r2_scheduled_sync(worker_id: str) -> None:
                     name=lease_name,
                     owner=worker_id,
                 )
+            error_backoff_seconds = 0.0
         except asyncio.CancelledError:
             raise
         except Exception:
-            logger.warning("Scheduled R2 gallery sync failed before job creation", exc_info=True)
+            error_backoff_seconds = _next_background_task_error_backoff(error_backoff_seconds)
+            logger.warning(
+                "Scheduled R2 gallery sync failed before job creation; retrying in %.1f seconds",
+                error_backoff_seconds,
+                exc_info=True,
+            )
+            await asyncio.sleep(error_backoff_seconds)
 
 
 async def run_gallery_file_gc(
@@ -1736,6 +1754,7 @@ async def run_gallery_file_gc(
 async def gc_gallery_export_jobs(worker_id: str) -> None:
     """Periodically clean up completed export/sync jobs and orphan ZIP files."""
     lease_name = "gallery_export_gc"
+    error_backoff_seconds = 0.0
     while True:
         try:
             acquired = await asyncio.to_thread(
@@ -1745,6 +1764,7 @@ async def gc_gallery_export_jobs(worker_id: str) -> None:
                 lease_expires_at=_background_task_lease_expires_at(),
             )
             if not acquired:
+                error_backoff_seconds = 0.0
                 await asyncio.sleep(EXPORT_JOB_GC_INTERVAL_SECONDS)
                 continue
             try:
@@ -1754,6 +1774,7 @@ async def gc_gallery_export_jobs(worker_id: str) -> None:
                     delay_seconds=EXPORT_JOB_GC_INTERVAL_SECONDS,
                 )
                 if not still_leader:
+                    error_backoff_seconds = 0.0
                     continue
                 stale_exports = await asyncio.to_thread(
                     storage.cleanup_stale_gallery_jobs,
@@ -1817,10 +1838,17 @@ async def gc_gallery_export_jobs(worker_id: str) -> None:
                     name=lease_name,
                     owner=worker_id,
                 )
+            error_backoff_seconds = 0.0
         except asyncio.CancelledError:
             raise
         except Exception:
-            logger.warning("Gallery export GC error", exc_info=True)
+            error_backoff_seconds = _next_background_task_error_backoff(error_backoff_seconds)
+            logger.warning(
+                "Gallery export GC error; retrying in %.1f seconds",
+                error_backoff_seconds,
+                exc_info=True,
+            )
+            await asyncio.sleep(error_backoff_seconds)
 
 
 @router.get("/api/gallery", response_model=GalleryResponse)

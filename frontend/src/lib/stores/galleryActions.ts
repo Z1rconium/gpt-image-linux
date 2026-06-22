@@ -9,6 +9,7 @@ import type { GalleryBatchResponse, GalleryExportJobStatus, GalleryImportJobStat
 import type { GalleryNavigation, GalleryOperationStatus, GalleryState } from '$lib/stores/gallery';
 
 const STREAMING_ZIP_DOWNLOAD_BYTES_THRESHOLD = 64 * 1024 * 1024;
+const GALLERY_JOB_EVENT_NETWORK_TIMEOUT_MS = 30_000;
 
 type GalleryActionDeps = {
   getState: () => GalleryState;
@@ -16,6 +17,13 @@ type GalleryActionDeps = {
   clearSelection: () => void;
   setOperationStatus: (operationStatus: GalleryOperationStatus | null) => void;
   clearPendingSingleDeletes: () => void;
+  registerAbortController: (controller: AbortController) => () => void;
+};
+
+type GalleryWaitOptions = {
+  eventsUrl: string;
+  eventNames: string[];
+  signal?: AbortSignal;
 };
 
 function downloadBlob(blob: Blob, filename: string) {
@@ -146,104 +154,137 @@ function batchRequestBody(state: GalleryState) {
   return { ids: [...state.selectedIds] };
 }
 
+function abortError() {
+  return new DOMException('Gallery operation cancelled', 'AbortError');
+}
+
+function isAbortError(error: unknown) {
+  return error instanceof Error && error.name === 'AbortError';
+}
+
+function networkTimeoutError() {
+  return new Error(get(t).messages.requestFailed);
+}
+
+function waitForGalleryJob<T extends { status: string; error?: string | null; message?: string | null }>(
+  options: GalleryWaitOptions,
+  onJob: (job: T) => void
+): Promise<T> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let source: EventSource | null = null;
+    let networkTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const clearNetworkTimer = () => {
+      if (networkTimer) clearTimeout(networkTimer);
+      networkTimer = null;
+    };
+
+    const settle = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearNetworkTimer();
+      source?.close();
+      options.signal?.removeEventListener('abort', handleAbort);
+      callback();
+    };
+
+    const handleAbort = () => {
+      settle(() => reject(abortError()));
+    };
+
+    if (options.signal?.aborted) {
+      reject(abortError());
+      return;
+    }
+
+    options.signal?.addEventListener('abort', handleAbort, { once: true });
+    source = openJsonEventSource<T>(
+      options.eventsUrl,
+      {
+        onEvent: ({ data }) => {
+          clearNetworkTimer();
+          onJob(data);
+          if (data.status === 'success') {
+            settle(() => resolve(data));
+          } else if (data.status === 'error') {
+            settle(() => reject(new Error(data.error || data.message || get(t).messages.requestFailed)));
+          }
+        },
+        onNetworkError: () => {
+          if (settled || networkTimer) return;
+          networkTimer = setTimeout(() => {
+            settle(() => reject(networkTimeoutError()));
+          }, GALLERY_JOB_EVENT_NETWORK_TIMEOUT_MS);
+        },
+        onError: (error) => {
+          settle(() => reject(error instanceof Error ? error : new Error(get(t).messages.requestFailed)));
+        }
+      },
+      options.eventNames
+    );
+    source.onopen = () => {
+      clearNetworkTimer();
+    };
+  });
+}
+
 function waitForGalleryExportJob(
   jobId: string,
   onJob: (job: GalleryExportJobStatus) => void,
-  eventsUrl = `/api/gallery/export-jobs/${encodeURIComponent(jobId)}/events`
+  options: { eventsUrl?: string; signal?: AbortSignal } = {}
 ): Promise<GalleryExportJobStatus> {
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    let source: EventSource | null = null;
-    source = openJsonEventSource<GalleryExportJobStatus>(
-      eventsUrl,
-      {
-        onEvent: ({ data }) => {
-          onJob(data);
-          if (data.status === 'success') {
-            settled = true;
-            source?.close();
-            resolve(data);
-          } else if (data.status === 'error') {
-            settled = true;
-            source?.close();
-            reject(new Error(data.error || data.message || get(t).messages.requestFailed));
-          }
-        },
-        onError: (error) => {
-          if (settled) return;
-          settled = true;
-          source?.close();
-          reject(error instanceof Error ? error : new Error(get(t).messages.requestFailed));
-        }
-      },
-      ['export']
-    );
-  });
+  return waitForGalleryJob<GalleryExportJobStatus>(
+    {
+      eventsUrl: options.eventsUrl || `/api/gallery/export-jobs/${encodeURIComponent(jobId)}/events`,
+      eventNames: ['export'],
+      signal: options.signal
+    },
+    onJob
+  );
 }
 
-function waitForGallerySyncJob(jobId: string, onJob: (job: GallerySyncJobStatus) => void): Promise<GallerySyncJobStatus> {
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    let source: EventSource | null = null;
-    source = openJsonEventSource<GallerySyncJobStatus>(
-      `/api/gallery/sync-jobs/${encodeURIComponent(jobId)}/events`,
-      {
-        onEvent: ({ data }) => {
-          onJob(data);
-          if (data.status === 'success') {
-            settled = true;
-            source?.close();
-            resolve(data);
-          } else if (data.status === 'error') {
-            settled = true;
-            source?.close();
-            reject(new Error(data.error || data.message || get(t).messages.requestFailed));
-          }
-        },
-        onError: (error) => {
-          if (settled) return;
-          settled = true;
-          source?.close();
-          reject(error instanceof Error ? error : new Error(get(t).messages.requestFailed));
-        }
-      },
-      ['sync']
-    );
-  });
+function waitForGallerySyncJob(
+  jobId: string,
+  onJob: (job: GallerySyncJobStatus) => void,
+  options: { signal?: AbortSignal } = {}
+): Promise<GallerySyncJobStatus> {
+  return waitForGalleryJob<GallerySyncJobStatus>(
+    {
+      eventsUrl: `/api/gallery/sync-jobs/${encodeURIComponent(jobId)}/events`,
+      eventNames: ['sync'],
+      signal: options.signal
+    },
+    onJob
+  );
 }
 
-function waitForGalleryImportJob(jobId: string, onJob: (job: GalleryImportJobStatus) => void): Promise<GalleryImportJobStatus> {
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    let source: EventSource | null = null;
-    source = openJsonEventSource<GalleryImportJobStatus>(
-      `/api/gallery/import-jobs/${encodeURIComponent(jobId)}/events`,
-      {
-        onEvent: ({ data }) => {
-          onJob(data);
-          if (data.status === 'success') {
-            settled = true;
-            source?.close();
-            resolve(data);
-          } else if (data.status === 'error') {
-            settled = true;
-            source?.close();
-            reject(new Error(data.error || data.message || get(t).messages.requestFailed));
-          }
-        },
-        onError: (error) => {
-          if (settled) return;
-          settled = true;
-          source?.close();
-          reject(error instanceof Error ? error : new Error(get(t).messages.requestFailed));
-        }
-      },
-      ['import']
-    );
-  });
+function waitForGalleryImportJob(
+  jobId: string,
+  onJob: (job: GalleryImportJobStatus) => void,
+  options: { signal?: AbortSignal } = {}
+): Promise<GalleryImportJobStatus> {
+  return waitForGalleryJob<GalleryImportJobStatus>(
+    {
+      eventsUrl: `/api/gallery/import-jobs/${encodeURIComponent(jobId)}/events`,
+      eventNames: ['import'],
+      signal: options.signal
+    },
+    onJob
+  );
 }
 
 export function createGalleryActions(deps: GalleryActionDeps) {
+  async function waitWithAbort<T>(wait: (signal: AbortSignal) => Promise<T>): Promise<T> {
+    const controller = new AbortController();
+    const unregister = deps.registerAbortController(controller);
+    try {
+      return await wait(controller.signal);
+    } finally {
+      unregister();
+    }
+  }
+
   async function downloadResponseBlob(
     response: Response,
     kind: GalleryOperationStatus['kind'],
@@ -424,14 +465,20 @@ export function createGalleryActions(deps: GalleryActionDeps) {
         },
         'preparing selected image download'
       );
-      const readyJob = await waitForGalleryExportJob(job.job_id, (nextJob) => {
-        deps.setOperationStatus({
-          kind: 'download',
-          label,
-          detail: exportJobDetail(nextJob),
-          progress: operationProgress(nextJob.progress, 0, 50)
-        });
-      });
+      const readyJob = await waitWithAbort((signal) =>
+        waitForGalleryExportJob(
+          job.job_id,
+          (nextJob) => {
+            deps.setOperationStatus({
+              kind: 'download',
+              label,
+              detail: exportJobDetail(nextJob),
+              progress: operationProgress(nextJob.progress, 0, 50)
+            });
+          },
+          { signal }
+        )
+      );
       deps.setOperationStatus({
         kind: 'download',
         label,
@@ -467,6 +514,9 @@ export function createGalleryActions(deps: GalleryActionDeps) {
       const exportedCount = readyJob.exported_count || parseHeaderInt(response.headers, 'X-Gallery-Exported-Count') || requestedCount;
       const missingCount = readyJob.missing_count || parseHeaderInt(response.headers, 'X-Gallery-Missing-Count');
       showToast?.(get(t).messages.selectedImagesDownloaded(exportedCount, missingCount));
+    } catch (error) {
+      if (isAbortError(error)) return;
+      throw error;
     } finally {
       deps.setOperationStatus(null);
     }
@@ -488,22 +538,30 @@ export function createGalleryActions(deps: GalleryActionDeps) {
         detail: exportJobDetail(job),
         progress: operationProgress(job.progress, 0, 100)
       });
-      const readyJobPromise = waitForGalleryExportJob(
-        job.job_id,
-        (nextJob) => {
-          deps.setOperationStatus({
-            kind: 'export',
-            label,
-            detail: exportJobDetail(nextJob),
-            progress: operationProgress(nextJob.progress, 0, 100)
-          });
-        },
-        `/api/gallery/direct-export-jobs/${encodeURIComponent(job.job_id)}/events`
+      const readyJobPromise = waitWithAbort((signal) =>
+        waitForGalleryExportJob(
+          job.job_id,
+          (nextJob) => {
+            deps.setOperationStatus({
+              kind: 'export',
+              label,
+              detail: exportJobDetail(nextJob),
+              progress: operationProgress(nextJob.progress, 0, 100)
+            });
+          },
+          {
+            eventsUrl: `/api/gallery/direct-export-jobs/${encodeURIComponent(job.job_id)}/events`,
+            signal
+          }
+        )
       );
       const downloadUrl = job.download_url || `/api/download-all?export_job_id=${encodeURIComponent(job.job_id)}`;
       startNativeDownload(downloadUrl, job.filename || 'gpt-images.zip');
       await readyJobPromise;
       showToast?.(get(t).messages.exportReady);
+    } catch (error) {
+      if (isAbortError(error)) return;
+      throw error;
     } finally {
       deps.setOperationStatus(null);
     }
@@ -527,14 +585,20 @@ export function createGalleryActions(deps: GalleryActionDeps) {
         },
         'preflighting R2 gallery sync'
       );
-      const dryRunFinished = await waitForGallerySyncJob(dryRunJob.job_id, (nextJob) => {
-        deps.setOperationStatus({
-          kind: 'sync',
-          label,
-          detail: syncJobDetail(nextJob),
-          progress: nextJob.progress
-        });
-      });
+      const dryRunFinished = await waitWithAbort((signal) =>
+        waitForGallerySyncJob(
+          dryRunJob.job_id,
+          (nextJob) => {
+            deps.setOperationStatus({
+              kind: 'sync',
+              label,
+              detail: syncJobDetail(nextJob),
+              progress: nextJob.progress
+            });
+          },
+          { signal }
+        )
+      );
       deps.setOperationStatus({
         kind: 'sync',
         label,
@@ -553,15 +617,24 @@ export function createGalleryActions(deps: GalleryActionDeps) {
       }
 
       const job = await apiFetch<GallerySyncJobStatus>('/api/gallery/sync-jobs', { method: 'POST' }, 'starting R2 gallery sync');
-      const finished = await waitForGallerySyncJob(job.job_id, (nextJob) => {
-        deps.setOperationStatus({
-          kind: 'sync',
-          label,
-          detail: syncJobDetail(nextJob),
-          progress: nextJob.progress
-        });
-      });
+      const finished = await waitWithAbort((signal) =>
+        waitForGallerySyncJob(
+          job.job_id,
+          (nextJob) => {
+            deps.setOperationStatus({
+              kind: 'sync',
+              label,
+              detail: syncJobDetail(nextJob),
+              progress: nextJob.progress
+            });
+          },
+          { signal }
+        )
+      );
       showToast?.(get(t).messages.r2SyncComplete(finished.uploaded_count, finished.skipped_existing_count, finished.missing_local_count));
+    } catch (error) {
+      if (isAbortError(error)) return;
+      throw error;
     } finally {
       deps.setOperationStatus(null);
     }
@@ -614,14 +687,20 @@ export function createGalleryActions(deps: GalleryActionDeps) {
         },
         'importing archive'
       );
-      const finished = await waitForGalleryImportJob(job.job_id, (nextJob) => {
-        deps.setOperationStatus({
-          kind: 'import',
-          label: get(t).gallery.importingArchive,
-          detail: importJobDetail(nextJob),
-          progress: nextJob.progress
-        });
-      });
+      const finished = await waitWithAbort((signal) =>
+        waitForGalleryImportJob(
+          job.job_id,
+          (nextJob) => {
+            deps.setOperationStatus({
+              kind: 'import',
+              label: get(t).gallery.importingArchive,
+              detail: importJobDetail(nextJob),
+              progress: nextJob.progress
+            });
+          },
+          { signal }
+        )
+      );
       deps.setOperationStatus({
         kind: 'import',
         label: get(t).gallery.importingArchive,
@@ -630,6 +709,9 @@ export function createGalleryActions(deps: GalleryActionDeps) {
       });
       await deps.loadGallery(1);
       showToast(get(t).messages.imported(finished.imported_count));
+    } catch (error) {
+      if (isAbortError(error)) return;
+      throw error;
     } finally {
       deps.setOperationStatus(null);
     }

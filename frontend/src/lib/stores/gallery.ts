@@ -180,6 +180,7 @@ function createGalleryStore() {
   const prefetchedPages = new Map<string, GalleryResponse>();
   const prefetchRequests = new Map<string, Promise<GalleryResponse | null>>();
   const pendingSingleDeletes = new Map<string, { image: GalleryEntry; timer: ReturnType<typeof setTimeout> }>();
+  const activeActionControllers = new Set<AbortController>();
 
   subscribe((value) => {
     state = value;
@@ -187,6 +188,20 @@ function createGalleryStore() {
 
   function setOperationStatus(operationStatus: GalleryOperationStatus | null) {
     galleryActivityStore.setOperationStatus(operationStatus);
+  }
+
+  function registerAbortController(controller: AbortController) {
+    activeActionControllers.add(controller);
+    return () => {
+      activeActionControllers.delete(controller);
+    };
+  }
+
+  function abortActiveActions() {
+    for (const controller of activeActionControllers) {
+      controller.abort();
+    }
+    activeActionControllers.clear();
   }
 
   function clearThumbnailRefresh() {
@@ -661,6 +676,7 @@ function createGalleryStore() {
     requestSeq += 1;
     abortController?.abort();
     abortController = null;
+    abortActiveActions();
     prefetchedPages.clear();
     prefetchRequests.clear();
     setOperationStatus(null);
@@ -671,7 +687,8 @@ function createGalleryStore() {
     loadGallery,
     clearSelection,
     setOperationStatus,
-    clearPendingSingleDeletes
+    clearPendingSingleDeletes,
+    registerAbortController
   });
 
   return {
