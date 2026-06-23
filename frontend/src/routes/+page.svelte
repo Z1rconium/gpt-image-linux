@@ -16,7 +16,7 @@
   import SizeDialog from '$lib/components/SizeDialog.svelte';
   import ToastHost from '$lib/components/ToastHost.svelte';
   import { apiFetch } from '$lib/api/client';
-  import { t } from '$lib/i18n';
+  import { language, t } from '$lib/i18n';
   import type {
     ApiPath,
     GalleryEntry,
@@ -43,6 +43,7 @@
   import { toastStore, uiStore, type ToastOptions } from '$lib/stores/ui';
   import { versionStore } from '$lib/stores/version';
   import { copyText, displayImageSize, imageUrl } from '$lib/utils/format';
+  import { buildPromptOptimizeRequest } from '$lib/utils/promptOptimizer';
   import {
     galleryEntryToPromptForm,
     galleryEntryToPromptOnly,
@@ -651,14 +652,16 @@
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            prompt,
-            target_language: 'en',
-            api_path: form.apiPath,
-            model: form.model.trim() || null,
-            size: form.size,
-            quality: form.quality
-          })
+          body: JSON.stringify(
+            buildPromptOptimizeRequest({
+              prompt,
+              targetLanguage: $language,
+              apiPath: form.apiPath,
+              model: form.model,
+              size: form.size,
+              quality: form.quality
+            })
+          )
         },
         'optimizing prompt'
       );

@@ -4,9 +4,10 @@
   import { dialog } from '$lib/actions/dialog';
   import { plainTextInput } from '$lib/actions/plainTextInput';
   import { apiFetch } from '$lib/api/client';
-  import { t } from '$lib/i18n';
+  import { language, t } from '$lib/i18n';
   import type { ApiPath, PromptOptimizeResponse } from '$lib/api/types';
   import { initialPromptFormState, type PromptFormState } from '$lib/stores/preview';
+  import { buildPromptOptimizeRequest } from '$lib/utils/promptOptimizer';
 
   export let currentPrompt = '';
   export let apiPath: ApiPath = initialPromptFormState.apiPath;
@@ -48,9 +49,12 @@
   let suppressClick = false;
   let lastPointerPosition: FloatingPosition | null = null;
   let resizeObserver: ResizeObserver | null = null;
+  let observedTriggerButton: HTMLButtonElement | null = null;
+  let triggerSize: { width: number; height: number } | null = null;
 
   $: submitDisabled = optimizing || !intent.trim() || !currentPrompt.trim();
   $: if (!enabled && open) closeAssistant();
+  $: syncTriggerObserver(enabled, triggerButton);
 
   function readStoredPosition(): FloatingPosition | null {
     if (!browser) return null;
@@ -74,12 +78,24 @@
     }
   }
 
-  function clampPosition(position: FloatingPosition) {
-    if (!browser || !triggerButton) return position;
+  function readTriggerSize() {
+    if (!browser) return null;
 
-    const rect = triggerButton.getBoundingClientRect();
-    const maxX = Math.max(VIEWPORT_EDGE_GAP, window.innerWidth - rect.width - VIEWPORT_EDGE_GAP);
-    const maxY = Math.max(VIEWPORT_EDGE_GAP, window.innerHeight - rect.height - VIEWPORT_EDGE_GAP);
+    const rect = triggerButton?.getBoundingClientRect();
+    if (rect && rect.width > 0 && rect.height > 0) {
+      triggerSize = { width: rect.width, height: rect.height };
+      return triggerSize;
+    }
+
+    return triggerSize;
+  }
+
+  function clampPosition(position: FloatingPosition) {
+    const size = readTriggerSize();
+    if (!browser || !size) return position;
+
+    const maxX = Math.max(VIEWPORT_EDGE_GAP, window.innerWidth - size.width - VIEWPORT_EDGE_GAP);
+    const maxY = Math.max(VIEWPORT_EDGE_GAP, window.innerHeight - size.height - VIEWPORT_EDGE_GAP);
 
     return {
       x: Math.min(Math.max(position.x, VIEWPORT_EDGE_GAP), maxX),
@@ -91,6 +107,46 @@
     const nextPosition = clampPosition(position);
     floatingPosition = nextPosition;
     if (persist) persistPosition(nextPosition);
+  }
+
+  function clampToViewport() {
+    if (!floatingPosition) return;
+    floatingPosition = clampPosition(floatingPosition);
+  }
+
+  function disconnectTriggerObserver() {
+    resizeObserver?.disconnect();
+    resizeObserver = null;
+    observedTriggerButton = null;
+    triggerSize = null;
+  }
+
+  function syncTriggerObserver(isEnabled: boolean, button: HTMLButtonElement | null) {
+    if (!browser) return;
+
+    if (!isEnabled || !button) {
+      if (resizeObserver || observedTriggerButton || triggerSize) disconnectTriggerObserver();
+      return;
+    }
+
+    if (observedTriggerButton === button) {
+      readTriggerSize();
+      clampToViewport();
+      return;
+    }
+
+    disconnectTriggerObserver();
+    observedTriggerButton = button;
+    readTriggerSize();
+    clampToViewport();
+
+    if ('ResizeObserver' in window) {
+      resizeObserver = new ResizeObserver(() => {
+        readTriggerSize();
+        clampToViewport();
+      });
+      resizeObserver.observe(button);
+    }
   }
 
   function clearPressTimer() {
@@ -136,19 +192,6 @@
     intent = '';
   }
 
-  function buildOptimizationPrompt(prompt: string, changeIntent: string) {
-    return [
-      'Original prompt:',
-      prompt,
-      '',
-      'Modification intent:',
-      changeIntent,
-      '',
-      'Rewrite the original prompt to satisfy the modification intent while preserving the original subject, composition, and scene unless the intent explicitly changes them.',
-      'Return only the revised prompt.'
-    ].join('\n');
-  }
-
   async function submitOptimization() {
     const trimmedPrompt = currentPrompt.trim();
     const trimmedIntent = intent.trim();
@@ -168,14 +211,17 @@
           method: 'POST',
           signal: activeRequest.signal,
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            prompt: buildOptimizationPrompt(trimmedPrompt, trimmedIntent),
-            target_language: 'en',
-            api_path: apiPath,
-            model: model.trim() || null,
-            size,
-            quality
-          })
+          body: JSON.stringify(
+            buildPromptOptimizeRequest({
+              prompt: trimmedPrompt,
+              intent: trimmedIntent,
+              targetLanguage: $language,
+              apiPath,
+              model,
+              size,
+              quality
+            })
+          )
         },
         'optimizing prompt'
       );
@@ -320,24 +366,11 @@
       setFloatingPosition(floatingPosition, false);
     }
 
-    const clampToViewport = () => {
-      if (!floatingPosition) return;
-      floatingPosition = clampPosition(floatingPosition);
-    };
-
-    if (triggerButton && 'ResizeObserver' in window) {
-      resizeObserver = new ResizeObserver(() => {
-        clampToViewport();
-      });
-      resizeObserver.observe(triggerButton);
-    }
-
     window.addEventListener('resize', clampToViewport);
 
     return () => {
       window.removeEventListener('resize', clampToViewport);
-      resizeObserver?.disconnect();
-      resizeObserver = null;
+      disconnectTriggerObserver();
       resetPointerState();
     };
   });

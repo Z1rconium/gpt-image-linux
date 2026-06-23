@@ -183,6 +183,7 @@ export type GenerateRequestBody = {
 
 export type PromptOptimizeRequest = {
   prompt: string;
+  intent?: string | null;
   target_language?: 'en' | 'zh-CN' | 'same';
   api_path?: ApiPath | null;
   model?: string | null;

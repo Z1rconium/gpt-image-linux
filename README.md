@@ -21,7 +21,7 @@ This project is only a self-hosted control panel. It does not provide, proxy, re
 - Image generation through `/v1/images/generations`, `/v1/responses`, or OpenAI-compatible `/v1/chat/completions`.
 - Image editing through `/v1/images/edits`, including uploaded images and gallery-source edits.
 - API presets with base URL/path/key, default model, response format, health checks, and env-ref secret support.
-- Prompt helper tags, reusable prompt snippets, and optional server-side prompt optimizer.
+- Prompt helper tags, reusable prompt snippets, and optional server-side prompt optimizer with structured `prompt + intent` inputs and locale-aware output.
 - Job queue with SSE progress, cancellation, retry/reuse, persisted history, timing metadata, and shared generation/edit concurrency limits.
 - Local gallery with search/filtering, favorites, lightbox navigation, batch actions, ZIP import/export, thumbnails, and optional byte-size metadata.
 - Optional Cloudflare R2 gallery backup sync; local SQLite/images remain the source of truth.

@@ -48,6 +48,7 @@ type MockOptions = {
   generatedJob?: unknown;
   runningJobs?: unknown[];
   historyJobs?: unknown[];
+  language?: 'en' | 'zh-CN';
 };
 
 const baseGalleryImages: GalleryImageFixture[] = [
@@ -416,6 +417,7 @@ async function mockApi(page: Page, options: MockOptions = {}) {
   const selectionTokens = new Map<string, { prompt: string; favorite?: boolean | null }>();
   const runningJobs = options.runningJobs ?? [];
   let historyJobs = options.historyJobs ?? [job('history-1', 'saved prompt')];
+  const initialLanguage = options.language ?? 'en';
 
   function matchesGalleryFilters(image: GalleryImageFixture, filters: { prompt?: string; favorite?: boolean | null }) {
     const prompt = String(filters.prompt || '').trim().toLowerCase();
@@ -433,13 +435,13 @@ async function mockApi(page: Page, options: MockOptions = {}) {
     return body.ids || [];
   }
 
-  await page.addInitScript(() => {
-    localStorage.setItem('gpt-image-panel-language', 'en');
+  await page.addInitScript((languageValue: string) => {
+    localStorage.setItem('gpt-image-panel-language', languageValue);
     if (!sessionStorage.getItem('gpt-image-panel-theme-init')) {
       localStorage.removeItem('gpt-image-panel-theme');
       sessionStorage.setItem('gpt-image-panel-theme-init', '1');
     }
-  });
+  }, initialLanguage);
 
   await page.route('**/*', async (route) => {
     const request = route.request();
@@ -784,7 +786,7 @@ async function mockApi(page: Page, options: MockOptions = {}) {
 async function loadApp(page: Page, options: MockOptions = {}) {
   await mockApi(page, options);
   await page.goto('/');
-  await expect(page.getByRole('heading', { name: 'Prompt', exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: options.language === 'zh-CN' ? '提示词' : 'Prompt', exact: true })).toBeVisible();
 }
 
 test('access gate unlocks before loading the app', async ({ page }) => {
@@ -1098,6 +1100,7 @@ test('prompt helper tags append once and optimizer replaces prompt with undo', a
   const request = await optimizeRequest;
   expect(request.postDataJSON()).toMatchObject({
     prompt: 'small cabin, high detail',
+    target_language: 'en',
     api_path: '/v1/images/generations'
   });
   await expect(prompt).toHaveValue('Optimized small cabin, high detail');
@@ -1147,10 +1150,12 @@ test('floating prompt optimizer compares, rejects, cleans up, and accepts withou
   await dialog.getByRole('button', { name: 'Optimize', exact: true }).click();
   const request = await optimizeRequest;
   const body = request.postDataJSON();
-  expect(body.prompt).toContain('Original prompt:');
-  expect(body.prompt).toContain('Modification intent:');
-  expect(body.prompt).toContain('sunlit alley with a bicycle');
-  expect(body.prompt).toContain('make it rainy at dusk');
+  expect(body).toMatchObject({
+    prompt: 'sunlit alley with a bicycle',
+    intent: 'make it rainy at dusk',
+    target_language: 'en',
+    api_path: '/v1/images/generations'
+  });
 
   await expect(page.getByTestId('prompt-optimizer-original')).toContainText('sunlit alley with a bicycle');
   await expect(page.getByTestId('prompt-optimizer-optimized')).toContainText('Optimized ');
@@ -1166,10 +1171,27 @@ test('floating prompt optimizer compares, rejects, cleans up, and accepts withou
   await dialog.getByLabel('Modification intent').fill('make it rainy at dusk');
   const acceptRequest = page.waitForRequest((request) => new URL(request.url()).pathname === '/api/prompt/optimize');
   await dialog.getByRole('button', { name: 'Optimize', exact: true }).click();
-  await acceptRequest;
+  const acceptPayload = (await acceptRequest).postDataJSON();
+  expect(acceptPayload).toMatchObject({
+    prompt: 'sunlit alley with a bicycle',
+    intent: 'make it rainy at dusk'
+  });
   await dialog.getByRole('button', { name: 'Accept' }).click();
 
-  await expect(prompt).toHaveValue(/Optimized Original prompt:/);
+  await expect(prompt).toHaveValue('Optimized sunlit alley with a bicycle');
+});
+
+test('prompt optimize sends localized target language', async ({ page }) => {
+  await loadApp(page, { language: 'zh-CN' });
+
+  await page.getByRole('textbox', { name: '提示词', exact: true }).fill('一只小机器人');
+  const optimizeRequest = page.waitForRequest((request) => new URL(request.url()).pathname === '/api/prompt/optimize');
+  await page.getByRole('button', { name: '优化' }).click();
+  const request = await optimizeRequest;
+  expect(request.postDataJSON()).toMatchObject({
+    prompt: '一只小机器人',
+    target_language: 'zh-CN'
+  });
 });
 
 test('floating prompt optimizer opens on click and can be long-press dragged', async ({ page }) => {
@@ -1217,6 +1239,22 @@ test('floating prompt optimizer opens on click and can be long-press dragged', a
         Math.round((movedBox?.y || 0) + (movedBox?.height || 0) / 2)
     )
   ).toBeLessThanOrEqual(1);
+
+  await page.mouse.move(
+    Math.round((settledBox?.x || 0) + (settledBox?.width || 0) / 2),
+    Math.round((settledBox?.y || 0) + (settledBox?.height || 0) / 2)
+  );
+  await page.mouse.down();
+  await page.waitForTimeout(320);
+  await page.mouse.move(-140, -120, { steps: 8 });
+  await page.mouse.up();
+
+  const clampedBox = await trigger.boundingBox();
+  expect(clampedBox).not.toBeNull();
+  expect(clampedBox?.x || 0).toBeGreaterThanOrEqual(12);
+  expect(clampedBox?.y || 0).toBeGreaterThanOrEqual(12);
+  expect((clampedBox?.x || 0) + (clampedBox?.width || 0)).toBeLessThanOrEqual(390 - 12);
+  expect((clampedBox?.y || 0) + (clampedBox?.height || 0)).toBeLessThanOrEqual(844 - 12);
 
   await page.reload();
   await expect(page.getByRole('heading', { name: 'Prompt', exact: true })).toBeVisible();

@@ -1988,8 +1988,57 @@ def test_prompt_optimize_success_uses_configured_upstream(client, monkeypatch):
     assert seen["api_key"] == "optimizer-key"
     assert seen["model"] == "prompt-model"
     assert seen["timeout_seconds"] == 45
+    assert seen["prompt"] == "tiny robot"
+    assert seen["intent"] is None
+    assert seen["target_language"] == "en"
     assert seen["image_api_path"] == "/v1/responses"
     assert seen["system_prompt"] == "Custom optimizer prompt"
+
+
+def test_prompt_optimize_accepts_structured_intent(client, monkeypatch):
+    from backend.app.api.routers import prompt as prompt_router
+
+    monkeypatch.setattr(prompt_router, "validate_optimizer_endpoint", lambda _url: None)
+    settings = client.get("/api/settings").json()
+    configured = client.post(
+        "/api/settings",
+        json=_settings_payload(
+            settings,
+            prompt_optimizer={
+                "enabled": True,
+                "api_url": "https://example.com/v1/chat/completions",
+                "model": "prompt-model",
+                "api_key": "${TEST_PROMPT_OPTIMIZER_API_KEY}",
+            },
+        ),
+    )
+    assert configured.status_code == 200
+
+    seen: dict[str, object] = {}
+
+    async def fake_optimize_prompt(**kwargs):
+        seen.update(kwargs)
+        return ("Optimized prompt text", "prompt-model", 42)
+
+    monkeypatch.setattr(prompt_router, "optimize_prompt", fake_optimize_prompt)
+
+    resp = client.post(
+        "/api/prompt/optimize",
+        json={
+            "prompt": "tiny robot",
+            "intent": "make it rainy at dusk",
+            "target_language": "zh-CN",
+            "api_path": "/v1/images/generations",
+            "model": "gpt-image-2",
+            "size": "1024x1024",
+            "quality": "high",
+        },
+    )
+
+    assert resp.status_code == 200
+    assert seen["prompt"] == "tiny robot"
+    assert seen["intent"] == "make it rainy at dusk"
+    assert seen["target_language"] == "zh-CN"
 
 
 def test_prompt_optimize_upstream_error_and_timeout(client, monkeypatch):

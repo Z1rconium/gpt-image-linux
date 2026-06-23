@@ -53,6 +53,7 @@ Take the user's short image description and rewrite it into a detailed, high-qua
 PROMPT_OPTIMIZER_SYSTEM_PROMPT_FILENAME = "prompt_optimizer_system_prompt.md"
 PROMPT_OPTIMIZER_SYSTEM_PROMPT_MAX_CHARS = 20000
 _MARKDOWN_FENCE_RE = re.compile(r"^```[a-z]*\n|\n```$", re.MULTILINE)
+_PROMPT_OPTIMIZER_SYSTEM_PROMPT_CACHE: tuple[str, int | None, str] | None = None
 
 
 class UpstreamOptimizerError(Exception):
@@ -81,6 +82,16 @@ def has_custom_prompt_optimizer_system_prompt() -> bool:
     return prompt_optimizer_system_prompt_path().is_file()
 
 
+def _remember_prompt_optimizer_system_prompt(path: Path, system_prompt: str) -> str:
+    global _PROMPT_OPTIMIZER_SYSTEM_PROMPT_CACHE
+    try:
+        mtime_ns = path.stat().st_mtime_ns
+    except FileNotFoundError:
+        mtime_ns = None
+    _PROMPT_OPTIMIZER_SYSTEM_PROMPT_CACHE = (str(path), mtime_ns, system_prompt)
+    return system_prompt
+
+
 def _normalize_system_prompt(system_prompt: str) -> str:
     normalized = system_prompt.replace("\r\n", "\n").replace("\r", "\n").strip()
     if not normalized:
@@ -94,15 +105,30 @@ def _normalize_system_prompt(system_prompt: str) -> str:
 
 def load_prompt_optimizer_system_prompt() -> str:
     path = prompt_optimizer_system_prompt_path()
+    global _PROMPT_OPTIMIZER_SYSTEM_PROMPT_CACHE
+    path_key = str(path)
+    try:
+        mtime_ns = path.stat().st_mtime_ns
+    except FileNotFoundError:
+        cached = _PROMPT_OPTIMIZER_SYSTEM_PROMPT_CACHE
+        if cached and cached[0] == path_key and cached[1] is None:
+            return cached[2]
+        return _remember_prompt_optimizer_system_prompt(path, PROMPT_OPTIMIZER_SYSTEM_PROMPT)
+
+    cached = _PROMPT_OPTIMIZER_SYSTEM_PROMPT_CACHE
+    if cached and cached[0] == path_key and cached[1] == mtime_ns:
+        return cached[2]
+
     try:
         raw = path.read_text(encoding="utf-8")
     except FileNotFoundError:
-        return PROMPT_OPTIMIZER_SYSTEM_PROMPT
+        return _remember_prompt_optimizer_system_prompt(path, PROMPT_OPTIMIZER_SYSTEM_PROMPT)
 
     try:
-        return _normalize_system_prompt(raw)
+        normalized = _normalize_system_prompt(raw)
     except ValueError:
-        return PROMPT_OPTIMIZER_SYSTEM_PROMPT
+        normalized = PROMPT_OPTIMIZER_SYSTEM_PROMPT
+    return _remember_prompt_optimizer_system_prompt(path, normalized)
 
 
 def save_prompt_optimizer_system_prompt(system_prompt: str) -> str:
@@ -122,6 +148,7 @@ def save_prompt_optimizer_system_prompt(system_prompt: str) -> str:
             file.write(normalized)
             file.write("\n")
         os.replace(tmp_path, path)
+        _remember_prompt_optimizer_system_prompt(path, normalized)
     finally:
         if tmp_path.exists():
             tmp_path.unlink()
@@ -141,6 +168,7 @@ def _build_prompt_optimizer_payload(
     model: str,
     prompt: str,
     *,
+    intent: str | None = None,
     system_prompt: str,
     target_language: str = "en",
     image_api_path: str | None = None,
@@ -161,6 +189,7 @@ def _build_prompt_optimizer_payload(
                 "role": "user",
                 "content": _build_user_prompt(
                     prompt,
+                    intent=intent,
                     target_language=target_language,
                     image_api_path=image_api_path,
                     image_model=image_model,
@@ -187,12 +216,15 @@ def _target_language_instruction(target_language: str | None) -> str:
 def _build_user_prompt(
     prompt: str,
     *,
+    intent: str | None = None,
     target_language: str = "en",
     image_api_path: str | None = None,
     image_model: str | None = None,
     size: str | None = None,
     quality: str | None = None,
 ) -> str:
+    normalized_prompt = prompt.strip()
+    normalized_intent = (intent or "").strip()
     context = [
         f"Target language: {_target_language_instruction(target_language)}",
         f"Image API path: {image_api_path or 'unspecified'}",
@@ -200,7 +232,22 @@ def _build_user_prompt(
         f"Size: {size or 'unspecified'}",
         f"Quality: {quality or 'unspecified'}",
     ]
-    return "\n".join([*context, "", "User image idea:", prompt])
+    if normalized_intent:
+        return "\n".join(
+            [
+                *context,
+                "",
+                "Original prompt:",
+                normalized_prompt,
+                "",
+                "Modification intent:",
+                normalized_intent,
+                "",
+                "Rewrite the original prompt to satisfy the modification intent while preserving the original subject, composition, and scene unless the intent explicitly changes them.",
+                "Return only the revised prompt.",
+            ]
+        )
+    return "\n".join([*context, "", "User image idea:", normalized_prompt])
 
 
 async def optimize_prompt(
@@ -209,6 +256,7 @@ async def optimize_prompt(
     model: str,
     prompt: str,
     *,
+    intent: str | None = None,
     target_language: str = "en",
     image_api_path: str | None = None,
     image_model: str | None = None,
@@ -234,6 +282,7 @@ async def optimize_prompt(
     payload = _build_prompt_optimizer_payload(
         model,
         prompt,
+        intent=intent,
         system_prompt=(
             _normalize_system_prompt(system_prompt)
             if system_prompt is not None

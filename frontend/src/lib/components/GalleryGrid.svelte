@@ -258,62 +258,68 @@
       {/if}
     </div>
 
-    <div class="grid gap-2 lg:grid-cols-[minmax(180px,1.35fr)_minmax(128px,0.72fr)_minmax(128px,0.72fr)_minmax(112px,0.56fr)_minmax(255px,1fr)_auto]">
-      <input
-        type="search"
-        name="gallery_prompt"
-        value={filters.prompt}
-        placeholder={$t.gallery.filterPrompt}
-        autocomplete="off"
-        aria-label={$t.gallery.filterPrompt}
-        class="control-focus h-10 min-w-0 rounded-lg border border-stone-200 bg-white px-3 text-sm text-stone-900 shadow-sm shadow-stone-200/40 focus:border-emerald-500 dark:border-zinc-800 dark:bg-zinc-900/80 dark:text-zinc-100 dark:shadow-none"
-        on:input={handleSearchInput}
-      />
-      <select value={filters.model} aria-label={$t.common.model} class="control-focus form-select min-w-0 border-stone-200 bg-white shadow-sm shadow-stone-200/40 focus:border-emerald-500 dark:border-zinc-800 dark:bg-zinc-900/80 dark:text-zinc-100 dark:shadow-none" on:change={(event) => onFilter('model', event.currentTarget.value)}>
-        <option value="">{$t.gallery.allModels}</option>
-        {#each gallery?.filter_options.models || [] as model}
-          <option value={model}>{model}</option>
-        {/each}
-      </select>
-      <select value={filters.preset} aria-label={$t.common.preset} class="control-focus form-select min-w-0 border-stone-200 bg-white shadow-sm shadow-stone-200/40 focus:border-emerald-500 dark:border-zinc-800 dark:bg-zinc-900/80 dark:text-zinc-100 dark:shadow-none" on:change={(event) => onFilter('preset', event.currentTarget.value)}>
-        <option value="">{$t.gallery.allPresets}</option>
-        {#each gallery?.filter_options.presets || [] as preset}
-          <option value={preset}>{preset}</option>
-        {/each}
-      </select>
-      <select value={filters.size} aria-label={$t.common.size} class="control-focus form-select min-w-0 border-stone-200 bg-white shadow-sm shadow-stone-200/40 focus:border-emerald-500 dark:border-zinc-800 dark:bg-zinc-900/80 dark:text-zinc-100 dark:shadow-none" on:change={(event) => onFilter('size', event.currentTarget.value)}>
-        <option value="">{$t.gallery.allSizes}</option>
-        {#each gallery?.filter_options.sizes || [] as size}
-          <option value={size}>{size}</option>
-        {/each}
-      </select>
-      <div class="grid min-w-0 grid-cols-[1fr_auto_1fr] items-center rounded-lg border border-stone-200 bg-white shadow-sm shadow-stone-200/40 dark:border-zinc-800 dark:bg-zinc-900/80 dark:shadow-none" role="group" aria-label={$t.gallery.dateRange}>
-        <label class="sr-only" for="gallery-date-from">{$t.gallery.dateFrom}</label>
+    <div class="grid gap-2">
+      <div class="grid gap-2 xl:grid-cols-[minmax(220px,1.6fr)_minmax(160px,1fr)_minmax(160px,1fr)_minmax(140px,0.9fr)]">
         <input
-          id="gallery-date-from"
-          type="date"
-          value={filters.dateFrom}
-          aria-label={$t.gallery.dateFrom}
-          placeholder={$t.gallery.dateFrom}
-          class="control-focus h-10 min-w-0 border-0 bg-transparent px-2 text-sm text-stone-900 focus:border-emerald-500 dark:text-zinc-100"
-          on:change={(event) => onFilter('dateFrom', event.currentTarget.value)}
+          type="search"
+          name="gallery_prompt"
+          value={filters.prompt}
+          placeholder={$t.gallery.filterPrompt}
+          autocomplete="off"
+          aria-label={$t.gallery.filterPrompt}
+          class="control-focus h-10 min-w-0 rounded-lg border border-stone-200 bg-white px-3 text-sm text-stone-900 shadow-sm shadow-stone-200/40 focus:border-emerald-500 dark:border-zinc-800 dark:bg-zinc-900/80 dark:text-zinc-100 dark:shadow-none"
+          on:input={handleSearchInput}
         />
-        <span class="px-1 text-xs font-medium text-stone-400 dark:text-zinc-600" aria-hidden="true">-</span>
-        <label class="sr-only" for="gallery-date-to">{$t.gallery.dateTo}</label>
-        <input
-          id="gallery-date-to"
-          type="date"
-          value={filters.dateTo}
-          aria-label={$t.gallery.dateTo}
-          placeholder={$t.gallery.dateTo}
-          class="control-focus h-10 min-w-0 border-0 bg-transparent px-2 text-sm text-stone-900 focus:border-emerald-500 dark:text-zinc-100"
-          on:change={(event) => onFilter('dateTo', event.currentTarget.value)}
-        />
+        <select value={filters.model} aria-label={$t.common.model} class="control-focus form-select min-w-0 border-stone-200 bg-white shadow-sm shadow-stone-200/40 focus:border-emerald-500 dark:border-zinc-800 dark:bg-zinc-900/80 dark:text-zinc-100 dark:shadow-none" on:change={(event) => onFilter('model', event.currentTarget.value)}>
+          <option value="">{$t.gallery.allModels}</option>
+          {#each gallery?.filter_options.models || [] as model}
+            <option value={model}>{model}</option>
+          {/each}
+        </select>
+        <select value={filters.preset} aria-label={$t.common.preset} class="control-focus form-select min-w-0 border-stone-200 bg-white shadow-sm shadow-stone-200/40 focus:border-emerald-500 dark:border-zinc-800 dark:bg-zinc-900/80 dark:text-zinc-100 dark:shadow-none" on:change={(event) => onFilter('preset', event.currentTarget.value)}>
+          <option value="">{$t.gallery.allPresets}</option>
+          {#each gallery?.filter_options.presets || [] as preset}
+            <option value={preset}>{preset}</option>
+          {/each}
+        </select>
+        <select value={filters.size} aria-label={$t.common.size} class="control-focus form-select min-w-0 border-stone-200 bg-white shadow-sm shadow-stone-200/40 focus:border-emerald-500 dark:border-zinc-800 dark:bg-zinc-900/80 dark:text-zinc-100 dark:shadow-none" on:change={(event) => onFilter('size', event.currentTarget.value)}>
+          <option value="">{$t.gallery.allSizes}</option>
+          {#each gallery?.filter_options.sizes || [] as size}
+            <option value={size}>{size}</option>
+          {/each}
+        </select>
       </div>
-      <label class={`control-focus flex h-10 items-center justify-center gap-2 rounded-lg border px-3 text-sm font-medium shadow-sm shadow-stone-200/40 transition-colors dark:shadow-none ${filters.favorite ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-700 dark:text-emerald-200' : 'border-stone-200 bg-white text-stone-700 hover:bg-stone-100 dark:border-zinc-800 dark:bg-zinc-900/80 dark:text-zinc-300 dark:hover:bg-zinc-800'}`}>
-        <input type="checkbox" class="control-focus accent-emerald-500" checked={filters.favorite} on:change={(event) => onFilter('favorite', event.currentTarget.checked)} />
-        <span class="whitespace-nowrap">{$t.gallery.favorites}</span>
-      </label>
+
+      <div class="grid gap-2 xl:grid-cols-[minmax(0,1fr)_minmax(210px,0.45fr)]">
+        <div class="grid min-w-0 grid-cols-[1fr_auto_1fr] items-center rounded-lg border border-stone-200 bg-white shadow-sm shadow-stone-200/40 dark:border-zinc-800 dark:bg-zinc-900/80 dark:shadow-none" role="group" aria-label={$t.gallery.dateRange}>
+          <label class="sr-only" for="gallery-date-from">{$t.gallery.dateFrom}</label>
+          <input
+            id="gallery-date-from"
+            type="date"
+            value={filters.dateFrom}
+            aria-label={$t.gallery.dateFrom}
+            placeholder={$t.gallery.dateFrom}
+            class="control-focus h-10 min-w-0 border-0 bg-transparent px-2 text-sm text-stone-900 focus:border-emerald-500 dark:text-zinc-100"
+            on:change={(event) => onFilter('dateFrom', event.currentTarget.value)}
+          />
+          <span class="px-1 text-xs font-medium text-stone-400 dark:text-zinc-600" aria-hidden="true">-</span>
+          <label class="sr-only" for="gallery-date-to">{$t.gallery.dateTo}</label>
+          <input
+            id="gallery-date-to"
+            type="date"
+            value={filters.dateTo}
+            aria-label={$t.gallery.dateTo}
+            placeholder={$t.gallery.dateTo}
+            class="control-focus h-10 min-w-0 border-0 bg-transparent px-2 text-sm text-stone-900 focus:border-emerald-500 dark:text-zinc-100"
+            on:change={(event) => onFilter('dateTo', event.currentTarget.value)}
+          />
+        </div>
+
+        <label class={`control-focus flex h-10 min-w-0 items-center justify-center gap-2 rounded-lg border px-3 text-sm font-medium shadow-sm shadow-stone-200/40 transition-colors dark:shadow-none ${filters.favorite ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-700 dark:text-emerald-200' : 'border-stone-200 bg-white text-stone-700 hover:bg-stone-100 dark:border-zinc-800 dark:bg-zinc-900/80 dark:text-zinc-300 dark:hover:bg-zinc-800'}`}>
+          <input type="checkbox" class="control-focus accent-emerald-500" checked={filters.favorite} on:change={(event) => onFilter('favorite', event.currentTarget.checked)} />
+          <span class="whitespace-nowrap">{$t.gallery.favorites}</span>
+        </label>
+      </div>
     </div>
   </div>
 

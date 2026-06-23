@@ -51,3 +51,19 @@ def test_build_user_prompt_maps_same_language_to_user_input_language():
 
     assert 'Target language: same as user\'s input language' in built
     assert "User image idea:\ntiny robot making coffee" in built
+
+
+def test_build_user_prompt_includes_structured_intent():
+    built = _build_user_prompt(
+        "tiny robot making coffee",
+        intent="make it rainy at dusk",
+        target_language="zh-CN",
+        image_api_path="/v1/responses",
+        image_model="gpt-image-2",
+        size="1024x1024",
+        quality="high",
+    )
+
+    assert "Original prompt:\ntiny robot making coffee" in built
+    assert "Modification intent:\nmake it rainy at dusk" in built
+    assert "Return only the revised prompt." in built

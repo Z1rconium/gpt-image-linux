@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException
 
 from ..presets import (
     get_prompt_optimizer_settings,
+    normalize_prompt_optimizer_settings,
     resolve_prompt_optimizer_api_key,
 )
 from ...integrations.prompt_optimizer_client import (
@@ -29,6 +30,28 @@ from ...schemas.models import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _resolve_prompt_optimizer_runtime(settings: dict | None) -> tuple[str, str, int, str]:
+    normalized = normalize_prompt_optimizer_settings(settings)
+    if not normalized.get("enabled"):
+        raise HTTPException(status_code=400, detail="Prompt optimizer is not enabled")
+
+    api_url = str(normalized.get("api_url", "")).strip()
+    if not api_url:
+        raise HTTPException(status_code=400, detail="Prompt optimizer endpoint URL is not configured")
+
+    api_key = resolve_prompt_optimizer_api_key(settings)
+    if not api_key:
+        raise HTTPException(status_code=400, detail="Prompt optimizer API key is not configured")
+
+    try:
+        validated_api_url = validate_optimizer_endpoint(api_url)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    model = str(normalized.get("model", "")).strip()
+    timeout_seconds = int(normalized.get("timeout_seconds") or 60)
+    return (validated_api_url or api_url), model, timeout_seconds, api_key
 
 
 def _system_prompt_response(system_prompt: str) -> PromptOptimizerSystemPromptResponse:
@@ -68,30 +91,12 @@ async def update_prompt_optimizer_system_prompt(
 @router.post("/api/prompt/optimize", response_model=PromptOptimizeResponse)
 async def optimize_prompt_endpoint(req: PromptOptimizeRequest):
     settings = get_prompt_optimizer_settings()
-    if not settings or not settings.get("enabled"):
-        raise HTTPException(status_code=400, detail="Prompt optimizer is not enabled")
-
-    api_url = str(settings.get("api_url", "")).strip()
-    model = str(settings.get("model", "gpt-4o-mini")).strip() or "gpt-4o-mini"
-    timeout_seconds = int(settings.get("timeout_seconds") or 60)
     try:
-        api_key = resolve_prompt_optimizer_api_key(settings)
+        api_url, model, timeout_seconds, api_key = _resolve_prompt_optimizer_runtime(
+            settings
+        )
     except HTTPException as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail) from e
-
-    if not api_url:
-        raise HTTPException(status_code=400, detail="Prompt optimizer endpoint URL is not configured")
-    if not model:
-        raise HTTPException(status_code=400, detail="Prompt optimizer model is not configured")
-    if not api_key:
-        raise HTTPException(status_code=400, detail="Prompt optimizer API key is not configured")
-
-    try:
-        validated_api_url = validate_optimizer_endpoint(api_url)
-        if validated_api_url:
-            api_url = validated_api_url
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
 
     try:
         optimized_prompt, model_used, duration_ms = await optimize_prompt(
@@ -99,6 +104,7 @@ async def optimize_prompt_endpoint(req: PromptOptimizeRequest):
             api_key=api_key,
             model=model,
             prompt=req.prompt,
+            intent=req.intent,
             target_language=req.target_language,
             image_api_path=req.api_path,
             image_model=req.model,
@@ -125,20 +131,12 @@ async def optimize_prompt_endpoint(req: PromptOptimizeRequest):
 @router.post("/api/prompt/optimizer-health", response_model=PromptOptimizerHealthResponse)
 async def prompt_optimizer_health():
     settings = get_prompt_optimizer_settings()
-    if not settings or not settings.get("enabled"):
-        return PromptOptimizerHealthResponse(
-            status="error",
-            message="Prompt optimizer is not enabled",
-            model="",
-            duration_ms=0,
-            status_code=400,
-        )
-
-    api_url = str(settings.get("api_url", "")).strip()
-    model = str(settings.get("model", "gpt-4o-mini")).strip() or "gpt-4o-mini"
-    timeout_seconds = int(settings.get("timeout_seconds") or 60)
+    normalized = normalize_prompt_optimizer_settings(settings)
+    model = str(normalized.get("model", "")).strip() or "gpt-4o-mini"
     try:
-        api_key = resolve_prompt_optimizer_api_key(settings)
+        api_url, model, timeout_seconds, api_key = _resolve_prompt_optimizer_runtime(
+            settings
+        )
     except HTTPException as e:
         return PromptOptimizerHealthResponse(
             status="error",
@@ -146,31 +144,6 @@ async def prompt_optimizer_health():
             model=model,
             duration_ms=0,
             status_code=e.status_code,
-        )
-
-    if not api_url:
-        return PromptOptimizerHealthResponse(
-            status="error",
-            message="Prompt optimizer endpoint URL is not configured",
-            model=model,
-            duration_ms=0,
-            status_code=400,
-        )
-    if not model:
-        return PromptOptimizerHealthResponse(
-            status="error",
-            message="Prompt optimizer model is not configured",
-            model="",
-            duration_ms=0,
-            status_code=400,
-        )
-    if not api_key:
-        return PromptOptimizerHealthResponse(
-            status="error",
-            message="Prompt optimizer API key is not configured",
-            model=model,
-            duration_ms=0,
-            status_code=400,
         )
 
     try:

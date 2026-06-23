@@ -419,11 +419,30 @@ class PromptOptimizerSystemPromptRequest(StrictRequestModel):
 
 class PromptOptimizeRequest(StrictRequestModel):
     prompt: str = Field(..., min_length=1, max_length=4000)
+    intent: Optional[str] = Field(default=None, max_length=1200)
     target_language: Literal["en", "zh-CN", "same"] = "en"
     api_path: Optional[ApiPath] = None
     model: Optional[str] = Field(default=None, max_length=200)
     size: Optional[str] = Field(default=None, max_length=40)
     quality: Optional[Literal["auto", "low", "medium", "high"]] = None
+
+    @field_validator("prompt")
+    @classmethod
+    def validate_prompt(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("prompt must not be empty")
+        return normalized
+
+    @field_validator("intent")
+    @classmethod
+    def validate_intent(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            return None
+        return normalized
 
 
 class PromptOptimizeResponse(BaseModel):
