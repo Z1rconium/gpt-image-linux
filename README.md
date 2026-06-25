@@ -1,6 +1,6 @@
 # GPT Image Panel
 
-![FastAPI](https://img.shields.io/badge/FastAPI-0.109-009688?logo=fastapi)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688?logo=fastapi)
 ![SvelteKit](https://img.shields.io/badge/SvelteKit-2-FF3E00?logo=svelte)
 ![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python)
 ![SQLite](https://img.shields.io/badge/SQLite-3-003B57?logo=sqlite)
@@ -19,24 +19,25 @@ This project is only a self-hosted control panel. It does not provide, proxy, re
 ## Features
 
 - Image generation through `/v1/images/generations`, `/v1/responses`, or OpenAI-compatible `/v1/chat/completions`.
-- Image editing through `/v1/images/edits`, including uploaded images and gallery-source edits.
-- API presets with base URL/path/key, default model, response format, health checks, and env-ref secret support.
-- Prompt helper tags, reusable prompt snippets, and optional server-side prompt optimizer with structured `prompt + intent` inputs and locale-aware output.
-- Job queue with SSE progress, cancellation, retry/reuse, persisted history, timing metadata, and shared generation/edit concurrency limits.
-- Local gallery with search/filtering, favorites, lightbox navigation, batch actions, ZIP import/export, thumbnails, and optional byte-size metadata.
+- Image editing through `/v1/images/edits`, including uploaded references and gallery-source edits.
+- API presets with base URL/path/key, default model, response format, health checks, SOCKS5 proxy, webhook, and env-ref secret support.
+- Web-managed Overall Config for selected runtime settings, with env/default/override sources and restart/build-only badges.
+- Prompt helper tags, reusable prompt snippets, and optional server-side prompt optimizer with editable system prompt, structured `prompt + intent` inputs, and locale-aware output.
+- SQLite-backed job queue with SSE progress, cancellation, retry/reuse, persisted history, stage timing metadata, and shared generation/edit concurrency limits.
+- Local gallery with cursor pagination, search/filtering, favorites, lightbox navigation, selection-token batch actions, ZIP import/export, thumbnails, byte-size metadata, and async export/import jobs.
 - Optional Cloudflare R2 gallery backup sync; local SQLite/images remain the source of truth.
-- Access-key gate, IP/Host allowlists, proxy-header support, CSRF origin checks, CSP nonce injection, and optional metrics.
+- Access-key gate, IP/Host allowlists, trusted proxy-header support, CSRF origin checks, CSP nonce injection, version checks, and optional JSON/Prometheus metrics.
 
 ## Architecture
 
 - Backend: FastAPI under `backend/app/`; ASGI entrypoint is `backend.app.main:app`.
 - Frontend: SvelteKit static app under `frontend/`; production backend serves `frontend/build/`.
-- Storage: generated images under `images/`; SQLite runtime data under `data/app.sqlite3`.
+- Runtime storage: generated images under `images/`, thumbnails under `images/thumbs/`, SQLite data under `data/app.sqlite3`, and logs under `data/logs/` by default.
 - Public API routing: `backend/app/api/contract_app.py`.
 - DTOs: `backend/app/schemas/`.
 - Persistence: `backend/app/repositories/`.
 - Upstream API integration: `backend/app/integrations/`.
-- Runtime config: `backend/app/core/settings.py` and `.env.example`.
+- Runtime config: `backend/app/core/settings.py`, `backend/app/core/overall_config.py`, `.env.example`, and `docker-compose.yml`.
 
 ## Tech Stack
 
@@ -44,11 +45,17 @@ This project is only a self-hosted control panel. It does not provide, proxy, re
 - FastAPI
 - Granian
 - aiohttp
+- aiohttp-socks
+- boto3
 - SQLite
 - Pydantic v2
+- Pillow
+- zipstream-ng
 - SvelteKit
 - TypeScript
 - Tailwind CSS
+- Playwright
+- pytest
 
 ## Project Structure
 
@@ -66,6 +73,7 @@ frontend/
   src/
     lib/
     routes/
+  tests/
 deploy/
   nginx.conf
 images/
@@ -74,6 +82,7 @@ Dockerfile
 docker-compose.yml
 .env.example
 requirements.txt
+backend/requirements-dev.txt
 package.json
 ```
 
@@ -97,6 +106,7 @@ By default, `ACCESS_KEY` is required. For local-only testing you can set `ALLOW_
 docker build -t gpt-image-panel .
 docker run -d --name gpt-image-panel \
   -p 127.0.0.1:9090:9090 \
+  -e ACCESS_KEY=change-me \
   -v $(pwd)/images:/app/images \
   -v $(pwd)/data:/app/data \
   gpt-image-panel
@@ -131,12 +141,12 @@ Production-style local smoke test:
 
 ```bash
 npm run frontend:build
-granian --interface asgi backend.app.main:app --host 0.0.0.0 --port 9090 --reload
+ALLOW_UNAUTHENTICATED=true granian --interface asgi backend.app.main:app --host 127.0.0.1 --port 9090
 ```
 
 ## Configuration
 
-Most runtime options live in `.env.example` and can also be managed through Web Settings / Overall Config. Important variables:
+Most runtime options live in `.env.example`. API presets, prompt optimizer, R2 backup, and selected app/runtime options can also be managed through Web Settings / Overall Config. Important variables:
 
 | Variable | Purpose |
 | --- | --- |
@@ -144,17 +154,27 @@ Most runtime options live in `.env.example` and can also be managed through Web 
 | `DEFAULT_API_URL` | Default upstream API base URL; may omit or include `/v1`. |
 | `DEFAULT_API_KEY` | Default upstream API key. Prefer env refs such as `${OPENAI_API_KEY}` in Web Settings. |
 | `DEFAULT_API_PATH` | `/v1/images/generations`, `/v1/responses`, or `/v1/chat/completions`. |
+| `DEFAULT_RESPONSES_MODEL` | Fallback model for `/v1/responses` when no request/preset model is provided. |
+| `AIOHTTP_CONNECTION_LIMIT` / `AIOHTTP_CONNECTION_LIMIT_PER_HOST` | Shared aiohttp connector limits for upstream/probe/download calls. |
+| `APP_VERSION` / `GITHUB_REPO` / `ENABLE_VERSION_CHECK` | UI/API version reporting and latest-release checks. |
 | `MAX_ACTIVE_GENERATE_JOBS` | Global running generation/edit image-unit limit. |
 | `MAX_QUEUED_GENERATE_JOBS` | Queue capacity before new jobs return `429`. |
+| `MAX_PENDING_EDIT_SOURCE_MB` | Global pending edit-source byte reservation cap. |
+| `MAX_SSE_SUBSCRIBERS_GLOBAL` / `MAX_SSE_SUBSCRIBERS_PER_IP` / `SSE_CONNECTION_TTL_SECONDS` | SSE slot limits and max connection lifetime. |
 | `IMAGES_DIR` | Saved image directory. |
+| `THUMBNAILS_DIR` / `THUMBNAIL_*` | Gallery thumbnail storage and generation controls. |
 | `DATA_DIR` / `DATABASE_FILE` | SQLite runtime storage. |
 | `PROMPT_OPTIMIZER_*` | Optional server-side prompt optimizer settings. |
 | `R2_*` | Optional Cloudflare R2 gallery backup sync settings; custom endpoint hosts require `R2_ENDPOINT_HOST_ALLOWLIST`. |
 | `PUBLIC_ORIGIN` / `ALLOWED_HOSTS` | Reverse-proxy Host/CSRF hardening. |
+| `ENABLE_NGINX_ACCEL_REDIRECT` / `PUBLIC_IMAGE_BASE_URL` / `PUBLIC_THUMBNAIL_BASE_URL` | Optional nginx/CDN image byte serving behavior. |
+| `GRANIAN_*` | Production runtime process/thread/static-asset tuning. |
 | `ENABLE_METRICS` | Enables JSON/Prometheus metrics endpoints. |
 | `LOG_DIR` / `LOG_LEVEL` / `LOG_RETENTION_HOURS` | Backend logs on stdout plus rotated files, retained for 24h by default. |
 
 Secret fields prefer `${ENV_VAR_NAME}` references. Literal secrets stored in SQLite require `ALLOW_PLAINTEXT_SECRETS=true`.
+
+Overall Config persists overrides in SQLite. Some settings are hot-reloaded; restart-required and build-only settings are marked in the UI and should still be changed through `.env`/Compose for reproducible deployments.
 
 ## Usage
 
@@ -163,7 +183,7 @@ Secret fields prefer `${ENV_VAR_NAME}` references. Literal secrets stored in SQL
 3. Open Settings.
 4. Create or select an API preset.
 5. Set API base URL, API path, model, response format, and API key/env ref.
-6. Optionally configure SOCKS5 proxy, webhook, prompt optimizer, or R2 backup.
+6. Optionally configure SOCKS5 proxy, webhook, prompt optimizer, R2 backup, or Overall Config overrides.
 7. Save the preset and run its health check if needed.
 8. Generate images from a prompt, or upload/select source images and run edits.
 9. Use Gallery for reuse, filtering, favorites, batch actions, import/export, and R2 sync.
@@ -186,31 +206,70 @@ Key backend routes:
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/health` | Health check. |
-| `GET/POST` | `/api/settings` | Read/save active settings and presets. |
+| `GET` | `/api/access/status` | Read access state. |
+| `POST` | `/api/access` | Unlock the panel with the access key. |
+| `GET` | `/api/version`, `/api/version/latest` | Read current version and optional latest release information. |
+| `GET/PUT` | `/api/settings/overall-config` | Read/save Overall Config overrides. |
+| `GET/POST` | `/api/settings` | Read/save active preset, prompt optimizer, R2 backup, proxy, and webhook settings. |
+| `POST` | `/api/settings/presets` | Create an API preset. |
+| `POST` | `/api/settings/presets/{preset_id}/activate` | Activate a saved API preset. |
+| `DELETE` | `/api/settings/presets/{preset_id}` | Delete an API preset. |
 | `POST` | `/api/settings/presets/{preset_id}/health` | Validate a saved upstream preset. |
+| `POST` | `/api/settings/r2/health` | Validate draft R2 backup settings. |
+| `GET/POST` | `/api/prompt-snippets` | List/create reusable prompt snippets. |
+| `PATCH/DELETE` | `/api/prompt-snippets/{snippet_id}` | Update/delete a prompt snippet. |
+| `GET/POST` | `/api/prompt/optimizer-system-prompt` | Read/save the prompt optimizer system prompt. |
+| `POST` | `/api/prompt/optimize`, `/api/prompt/optimizer-health` | Optimize a prompt or probe optimizer connectivity. |
 | `POST` | `/api/generate` | Start generation job. |
 | `POST` | `/api/edits` | Start edit job with uploaded source images. |
 | `POST` | `/api/edits/from-gallery/{image_id}` | Start edit job from an existing gallery image. |
 | `GET` | `/api/generate/jobs` | List live jobs and optional persisted history. |
 | `GET` | `/api/generate/jobs/events` | SSE stream for job-list updates. |
+| `GET/DELETE` | `/api/generate/{job_id}` | Read or cancel one generation/edit job. |
 | `GET` | `/api/generate/{job_id}/events` | SSE stream for one job. |
+| `DELETE` | `/api/generate/jobs/history` | Clear terminal job history. |
 | `GET` | `/api/gallery` | List/search/filter gallery images. |
+| `GET/DELETE` | `/api/gallery/{image_id}` | Read or delete a gallery image. |
+| `PATCH` | `/api/gallery/{image_id}/favorite` | Favorite/unfavorite one gallery image. |
+| `POST/PATCH` | `/api/gallery/batch/*` | Selection-token, favorite, delete, and download batch actions. |
+| `POST` | `/api/gallery/export-jobs`, `/api/gallery/direct-export-jobs` | Create async gallery export jobs. |
+| `GET` | `/api/gallery/export-jobs/{job_id}`, `/api/gallery/direct-export-jobs/{job_id}` | Read async gallery export job status. |
+| `GET` | `/api/gallery/export-jobs/{job_id}/events`, `/api/gallery/direct-export-jobs/{job_id}/events` | SSE streams for gallery export jobs. |
+| `GET` | `/api/gallery/export-jobs/{job_id}/download` | Download a completed tracked export archive. |
+| `POST` | `/api/gallery/sync-jobs` | Create an R2 backup sync job. |
+| `GET` | `/api/gallery/sync-jobs/{job_id}`, `/api/gallery/sync-jobs/{job_id}/events` | Read or stream R2 backup sync job status. |
+| `GET` | `/api/gallery/import-jobs/{job_id}` | Read async import job status. |
+| `GET` | `/api/gallery/import-jobs/{job_id}/events` | SSE stream for async import job status. |
 | `GET` | `/api/image/{filename}` | Serve authorized image bytes. |
 | `GET` | `/api/thumb/{filename}` | Serve generated gallery thumbnail. |
+| `GET` | `/api/download/{filename}` | Download one gallery image. |
 | `GET` | `/api/download-all` | Stream gallery ZIP export. |
-| `POST` | `/api/import` | Import gallery ZIP archive. |
-| `GET` | `/api/metrics` | Optional metrics when `ENABLE_METRICS=true`. |
+| `POST` | `/api/import` | Import gallery ZIP archive; `async_job=true` creates an import job. |
+| `GET` | `/api/metrics`, `/api/metrics/prometheus` | Optional metrics when `ENABLE_METRICS=true`. |
 
 The public API surface is contract-tested; keep paths, methods, status codes, SSE event names, cookies, and response shapes stable unless a breaking change is intentional.
 
+## Modification Boundaries
+
+- Keep browser calls same-origin through `/api/*`; do not add direct frontend calls to upstream model APIs, R2, webhook targets, or arbitrary image URLs.
+- Keep route handlers in `backend/app/api/routers/`, DTOs in `backend/app/schemas/models.py`, repository/database behavior in `backend/app/repositories/`, and external integrations in `backend/app/integrations/`.
+- Keep frontend API types in sync with backend DTOs in `frontend/src/lib/api/types.ts`, and use the existing API client/stores for access, settings, jobs, gallery, prompt snippets, and version state.
+- Keep image byte validation, safe paths, archive limits, thumbnail generation, queue state, and SQLite coordination centralized in the existing storage/upload/archive helpers.
+- Keep SSRF-sensitive URL handling in validators/safe connectors/integration clients; SOCKS5 proxy mode is a deliberate trust boundary.
+- Keep secrets out of frontend-visible payloads except masked values and env-ref metadata.
+- When changing environment variables, update `backend/app/core/settings.py`, `backend/app/core/overall_config.py` when user-visible, `.env.example`, `docker-compose.yml` when configurable in Compose, and this README.
+
 ## Runtime Notes
 
-- Images and SQLite files are runtime data; do not commit `images/`, `data/`, `frontend/build/`, `.svelte-kit/`, Playwright reports, or logs.
+- Images, thumbnails, SQLite files, imports/exports, and logs are runtime data; do not commit `images/`, `data/`, `frontend/build/`, `.svelte-kit/`, Playwright reports, test results, dependency folders, local DB files, or logs.
 - API keys, proxy URLs, webhook URLs, and R2 credentials are masked in API/UI responses.
 - Uploaded/imported/downloaded images are byte-validated and decoded server-side; SVG upload is rejected for edits.
+- Edit jobs accept multiple raster source images, with a current limit of 16 sources.
 - Upstream image URL downloads are HTTPS-only and SSRF-aware.
 - Generation/edit tasks share SQLite-backed queue/concurrency limits and work across multiple Granian workers.
+- SSE connections use SQLite slot leases with global/per-IP limits and max connection lifetime.
 - Gallery ZIP import/export uses safety limits from `.env.example`.
+- Gallery thumbnails are generated lazily; missing thumbnail requests can enqueue thumbnail work.
 - R2 endpoints are HTTPS-only, SSRF-checked, and limited to `*.r2.cloudflarestorage.com` unless `R2_ENDPOINT_HOST_ALLOWLIST` names a custom host.
 - R2 sync is backup-only; the app never serves, overwrites, or deletes local gallery images from R2.
 - Backend logs go to stdout and `DATA_DIR/logs` by default, with hourly rotation and 24h retention.
@@ -228,6 +287,12 @@ npm run test:e2e:perf
 
 Run the focused subset relevant to your change. For release-bound or broad changes, run all of them.
 
+If Playwright browsers are missing:
+
+```bash
+npm --prefix frontend exec playwright install chromium
+```
+
 ## Contributing
 
 - Keep backend API contracts stable.
@@ -235,6 +300,7 @@ Run the focused subset relevant to your change. For release-bound or broad chang
 - Keep persistence in `backend/app/repositories/`.
 - Keep upstream API calls in `backend/app/integrations/`.
 - Keep browser calls same-origin through `/api/*`.
+- Keep secrets masked and image/ZIP/URL validation centralized.
 - Update `.env.example`, `README.md`, and `docker-compose.yml` when adding or changing environment variables.
 - Avoid committing runtime/generated artifacts.
 
@@ -263,24 +329,25 @@ GPT Image Panel 是一个轻量级 Web UI，用于图像生成、图像编辑、
 ## 功能
 
 - 支持 `/v1/images/generations`、`/v1/responses`、OpenAI 兼容 `/v1/chat/completions` 图像生成。
-- 支持 `/v1/images/edits` 图像编辑，可用上传图片或 Gallery 图片作为源图。
-- API 预设管理：base URL/path/key、默认模型、response format、健康检查、环境变量引用式密钥。
-- 提示词助手、提示词片段、可选服务端提示词优化器。
-- 任务队列：SSE 进度、取消、重试/复用、历史记录、阶段耗时、生成/编辑共享并发限制。
-- 本地 Gallery：搜索/筛选、收藏、Lightbox、批量操作、ZIP 导入导出、缩略图、可选大小统计。
+- 支持 `/v1/images/edits` 图像编辑，可用上传参考图或 Gallery 图片作为源图。
+- API 预设管理：base URL/path/key、默认模型、response format、健康检查、SOCKS5 代理、webhook、环境变量引用式密钥。
+- Web 管理的 Overall Config，显示 env/default/override 来源，以及需要重启或只影响构建的配置标记。
+- 提示词助手、提示词片段、可选服务端提示词优化器，支持自定义 system prompt、结构化 `prompt + intent` 输入和本地化输出。
+- SQLite 任务队列：SSE 进度、取消、重试/复用、历史记录、阶段耗时、生成/编辑共享并发限制。
+- 本地 Gallery：游标分页、搜索/筛选、收藏、Lightbox、selection token 批量操作、ZIP 导入导出、缩略图、大小统计、异步导出/导入任务。
 - 可选 Cloudflare R2 Gallery 备份同步；本地 SQLite 和图片文件仍是唯一源数据。
-- 访问密钥、IP/Host 白名单、反向代理头、CSRF 检查、CSP nonce、可选 metrics。
+- 访问密钥、IP/Host 白名单、可信反向代理头、CSRF 检查、CSP nonce、版本检查、可选 JSON/Prometheus metrics。
 
 ## 架构
 
 - 后端：`backend/app/` 下的 FastAPI；ASGI 入口是 `backend.app.main:app`。
 - 前端：`frontend/` 下的 SvelteKit 静态应用；生产后端服务 `frontend/build/`。
-- 存储：图片在 `images/`；SQLite 运行时数据在 `data/app.sqlite3`。
+- 运行时存储：图片默认在 `images/`，缩略图在 `images/thumbs/`，SQLite 数据在 `data/app.sqlite3`，日志在 `data/logs/`。
 - 公共 API 路由：`backend/app/api/contract_app.py`。
 - DTO：`backend/app/schemas/`。
 - 持久化：`backend/app/repositories/`。
 - 上游 API：`backend/app/integrations/`。
-- 运行配置：`backend/app/core/settings.py` 和 `.env.example`。
+- 运行配置：`backend/app/core/settings.py`、`backend/app/core/overall_config.py`、`.env.example` 和 `docker-compose.yml`。
 
 ## 技术栈
 
@@ -288,11 +355,17 @@ GPT Image Panel 是一个轻量级 Web UI，用于图像生成、图像编辑、
 - FastAPI
 - Granian
 - aiohttp
+- aiohttp-socks
+- boto3
 - SQLite
 - Pydantic v2
+- Pillow
+- zipstream-ng
 - SvelteKit
 - TypeScript
 - Tailwind CSS
+- Playwright
+- pytest
 
 ## 项目结构
 
@@ -310,6 +383,7 @@ frontend/
   src/
     lib/
     routes/
+  tests/
 deploy/
   nginx.conf
 images/
@@ -318,6 +392,7 @@ Dockerfile
 docker-compose.yml
 .env.example
 requirements.txt
+backend/requirements-dev.txt
 package.json
 ```
 
@@ -341,6 +416,7 @@ docker-compose up -d --force-recreate
 docker build -t gpt-image-panel .
 docker run -d --name gpt-image-panel \
   -p 127.0.0.1:9090:9090 \
+  -e ACCESS_KEY=change-me \
   -v $(pwd)/images:/app/images \
   -v $(pwd)/data:/app/data \
   gpt-image-panel
@@ -375,12 +451,12 @@ npm run frontend:dev
 
 ```bash
 npm run frontend:build
-granian --interface asgi backend.app.main:app --host 0.0.0.0 --port 9090 --reload
+ALLOW_UNAUTHENTICATED=true granian --interface asgi backend.app.main:app --host 127.0.0.1 --port 9090
 ```
 
 ## 配置
 
-大多数运行时配置在 `.env.example`，也可通过 Web Settings / Overall Config 管理。关键变量：
+大多数运行时配置在 `.env.example`。API 预设、提示词优化器、R2 备份和部分应用/运行时配置也可通过 Web Settings / Overall Config 管理。关键变量：
 
 | 变量 | 用途 |
 | --- | --- |
@@ -388,16 +464,27 @@ granian --interface asgi backend.app.main:app --host 0.0.0.0 --port 9090 --reloa
 | `DEFAULT_API_URL` | 默认上游 API base URL，可带或不带 `/v1`。 |
 | `DEFAULT_API_KEY` | 默认上游 API key。Web Settings 中建议用 `${OPENAI_API_KEY}` 这类 env ref。 |
 | `DEFAULT_API_PATH` | `/v1/images/generations`、`/v1/responses` 或 `/v1/chat/completions`。 |
+| `DEFAULT_RESPONSES_MODEL` | `/v1/responses` 在请求/预设未提供模型时使用的 fallback 模型。 |
+| `AIOHTTP_CONNECTION_LIMIT` / `AIOHTTP_CONNECTION_LIMIT_PER_HOST` | 上游请求、探测、下载共用的 aiohttp connector 限制。 |
+| `APP_VERSION` / `GITHUB_REPO` / `ENABLE_VERSION_CHECK` | UI/API 版本显示和 latest release 检查。 |
 | `MAX_ACTIVE_GENERATE_JOBS` | 全局运行中的生成/编辑 image unit 上限。 |
 | `MAX_QUEUED_GENERATE_JOBS` | 队列容量，超过后新任务返回 `429`。 |
+| `MAX_PENDING_EDIT_SOURCE_MB` | 全局待处理编辑源图片字节预留上限。 |
+| `MAX_SSE_SUBSCRIBERS_GLOBAL` / `MAX_SSE_SUBSCRIBERS_PER_IP` / `SSE_CONNECTION_TTL_SECONDS` | SSE slot 限制和最大连接生命周期。 |
 | `IMAGES_DIR` | 图片保存目录。 |
+| `THUMBNAILS_DIR` / `THUMBNAIL_*` | Gallery 缩略图存储和生成控制。 |
 | `DATA_DIR` / `DATABASE_FILE` | SQLite 运行时数据。 |
 | `PROMPT_OPTIMIZER_*` | 可选提示词优化器配置。 |
 | `R2_*` | 可选 Cloudflare R2 Gallery 备份配置；自定义 endpoint host 需要配置 `R2_ENDPOINT_HOST_ALLOWLIST`。 |
 | `PUBLIC_ORIGIN` / `ALLOWED_HOSTS` | 反向代理 Host/CSRF 加固。 |
+| `ENABLE_NGINX_ACCEL_REDIRECT` / `PUBLIC_IMAGE_BASE_URL` / `PUBLIC_THUMBNAIL_BASE_URL` | 可选 nginx/CDN 图片字节服务行为。 |
+| `GRANIAN_*` | 生产运行时进程、线程和静态资源调优。 |
 | `ENABLE_METRICS` | 启用 JSON/Prometheus metrics 接口。 |
+| `LOG_DIR` / `LOG_LEVEL` / `LOG_RETENTION_HOURS` | 后端日志输出到 stdout 和轮转文件，默认保留 24 小时。 |
 
 Secret 字段优先使用 `${ENV_VAR_NAME}` 引用。若要把明文 secret 写入 SQLite，必须显式设置 `ALLOW_PLAINTEXT_SECRETS=true`。
+
+Overall Config 会把 override 持久化到 SQLite。部分配置可热更新；需要重启或只影响构建的配置会在 UI 中标记，可复现部署仍建议通过 `.env`/Compose 管理。
 
 ## 使用
 
@@ -406,7 +493,7 @@ Secret 字段优先使用 `${ENV_VAR_NAME}` 引用。若要把明文 secret 写�
 3. 打开 Settings。
 4. 创建或选择 API 预设。
 5. 设置 API base URL、API path、模型、response format 和 API key/env ref。
-6. 按需配置 SOCKS5 代理、webhook、提示词优化器或 R2 备份。
+6. 按需配置 SOCKS5 代理、webhook、提示词优化器、R2 备份或 Overall Config override。
 7. 保存预设，必要时执行健康检查。
 8. 输入 prompt 生成图片，或上传/选择源图执行编辑。
 9. 在 Gallery 中复用参数、筛选、收藏、批量操作、导入导出或执行 R2 同步。
@@ -429,33 +516,73 @@ Secret 字段优先使用 `${ENV_VAR_NAME}` 引用。若要把明文 secret 写�
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
 | `GET` | `/health` | 健康检查。 |
-| `GET/POST` | `/api/settings` | 读取/保存设置和预设。 |
+| `GET` | `/api/access/status` | 读取访问状态。 |
+| `POST` | `/api/access` | 使用访问密钥解锁面板。 |
+| `GET` | `/api/version`, `/api/version/latest` | 读取当前版本和可选最新 release 信息。 |
+| `GET/PUT` | `/api/settings/overall-config` | 读取/保存 Overall Config override。 |
+| `GET/POST` | `/api/settings` | 读取/保存当前预设、提示词优化器、R2 备份、代理和 webhook 设置。 |
+| `POST` | `/api/settings/presets` | 创建 API 预设。 |
+| `POST` | `/api/settings/presets/{preset_id}/activate` | 激活已保存 API 预设。 |
+| `DELETE` | `/api/settings/presets/{preset_id}` | 删除 API 预设。 |
 | `POST` | `/api/settings/presets/{preset_id}/health` | 校验已保存上游预设。 |
+| `POST` | `/api/settings/r2/health` | 校验草稿 R2 备份设置。 |
+| `GET/POST` | `/api/prompt-snippets` | 查询/创建提示词片段。 |
+| `PATCH/DELETE` | `/api/prompt-snippets/{snippet_id}` | 更新/删除提示词片段。 |
+| `GET/POST` | `/api/prompt/optimizer-system-prompt` | 读取/保存提示词优化器 system prompt。 |
+| `POST` | `/api/prompt/optimize`, `/api/prompt/optimizer-health` | 优化提示词或探测优化器连通性。 |
 | `POST` | `/api/generate` | 创建生成任务。 |
 | `POST` | `/api/edits` | 用上传源图创建编辑任务。 |
 | `POST` | `/api/edits/from-gallery/{image_id}` | 用 Gallery 图片创建编辑任务。 |
 | `GET` | `/api/generate/jobs` | 查询实时任务和可选历史。 |
 | `GET` | `/api/generate/jobs/events` | 任务列表 SSE。 |
+| `GET/DELETE` | `/api/generate/{job_id}` | 读取或取消单个生成/编辑任务。 |
 | `GET` | `/api/generate/{job_id}/events` | 单任务 SSE。 |
+| `DELETE` | `/api/generate/jobs/history` | 清理终态任务历史。 |
 | `GET` | `/api/gallery` | 查询/搜索/筛选 Gallery。 |
+| `GET/DELETE` | `/api/gallery/{image_id}` | 读取或删除 Gallery 图片。 |
+| `PATCH` | `/api/gallery/{image_id}/favorite` | 收藏/取消收藏单张 Gallery 图片。 |
+| `POST/PATCH` | `/api/gallery/batch/*` | selection token、收藏、删除和下载等批量操作。 |
+| `POST` | `/api/gallery/export-jobs`, `/api/gallery/direct-export-jobs` | 创建异步 Gallery 导出任务。 |
+| `GET` | `/api/gallery/export-jobs/{job_id}`, `/api/gallery/direct-export-jobs/{job_id}` | 读取异步 Gallery 导出任务状态。 |
+| `GET` | `/api/gallery/export-jobs/{job_id}/events`, `/api/gallery/direct-export-jobs/{job_id}/events` | Gallery 导出任务 SSE。 |
+| `GET` | `/api/gallery/export-jobs/{job_id}/download` | 下载已完成的受跟踪导出 ZIP。 |
+| `POST` | `/api/gallery/sync-jobs` | 创建 R2 备份同步任务。 |
+| `GET` | `/api/gallery/sync-jobs/{job_id}`, `/api/gallery/sync-jobs/{job_id}/events` | 读取或订阅 R2 备份同步任务状态。 |
+| `GET` | `/api/gallery/import-jobs/{job_id}` | 读取异步导入任务状态。 |
+| `GET` | `/api/gallery/import-jobs/{job_id}/events` | 异步导入任务 SSE。 |
 | `GET` | `/api/image/{filename}` | 返回鉴权后的图片字节。 |
 | `GET` | `/api/thumb/{filename}` | 返回 Gallery 缩略图。 |
+| `GET` | `/api/download/{filename}` | 下载单张 Gallery 图片。 |
 | `GET` | `/api/download-all` | 流式导出 Gallery ZIP。 |
-| `POST` | `/api/import` | 导入 Gallery ZIP。 |
-| `GET` | `/api/metrics` | `ENABLE_METRICS=true` 时可用。 |
+| `POST` | `/api/import` | 导入 Gallery ZIP；`async_job=true` 会创建导入任务。 |
+| `GET` | `/api/metrics`, `/api/metrics/prometheus` | `ENABLE_METRICS=true` 时可用。 |
 
 公共 API 已有契约测试；除非明确做 breaking change，否则保持路径、方法、状态码、SSE 事件名、cookie 和响应结构稳定。
 
+## 修改边界
+
+- 浏览器请求保持同源 `/api/*`；不要在前端直接调用上游模型 API、R2、webhook 目标或任意图片 URL。
+- 路由处理放在 `backend/app/api/routers/`，DTO 放在 `backend/app/schemas/models.py`，仓储/数据库行为放在 `backend/app/repositories/`，外部服务集成放在 `backend/app/integrations/`。
+- 后端 DTO 变化要同步 `frontend/src/lib/api/types.ts`，并沿用现有 API client/store 管理 access、settings、jobs、gallery、prompt snippets 和 version 状态。
+- 图片字节校验、安全路径、归档限制、缩略图生成、队列状态和 SQLite 协调逻辑保持在现有 storage/upload/archive helper 中。
+- SSRF 敏感 URL 处理保持在 validators、safe connector 和 integration client 中；SOCKS5 代理模式是明确的信任边界。
+- Secret 不进入前端可见 payload，除非是打码值或 env-ref 元数据。
+- 新增或修改环境变量时，同步更新 `backend/app/core/settings.py`、用户可见时的 `backend/app/core/overall_config.py`、`.env.example`、可由 Compose 配置时的 `docker-compose.yml`，以及本 README。
+
 ## 运行时注意
 
-- `images/`、`data/`、`frontend/build/`、`.svelte-kit/`、Playwright 报告和日志都属于运行/生成产物，不要提交。
+- 图片、缩略图、SQLite 文件、导入/导出临时文件和日志都属于运行数据；不要提交 `images/`、`data/`、`frontend/build/`、`.svelte-kit/`、Playwright 报告、测试结果、依赖目录、本地 DB 文件或日志。
 - API key、代理 URL、webhook URL 和 R2 凭据会在 API/UI 响应中打码。
 - 上传、导入、下载得到的图片会在服务端做字节校验和完整解码；编辑源不接受 SVG。
+- 编辑任务支持多张 raster 源图，当前上限为 16 张。
 - 上游图片 URL 下载只接受 HTTPS，并做 SSRF 防护。
 - 生成/编辑共享 SQLite 队列和并发限制，可跨多个 Granian worker 工作。
+- SSE 连接通过 SQLite slot lease 做全局/单 IP 限制，并有最大连接生命周期。
 - Gallery ZIP 导入导出受 `.env.example` 中的安全限制约束。
+- Gallery 缩略图按需生成；请求缺失缩略图时可能入队生成任务。
 - R2 endpoint 只接受 HTTPS，带 SSRF 校验，且默认限制为 `*.r2.cloudflarestorage.com`；自定义 host 需配置 `R2_ENDPOINT_HOST_ALLOWLIST`。
 - R2 同步只是备份路径；应用不会从 R2 服务、覆盖或删除本地 Gallery 图片。
+- 后端日志默认输出到 stdout 和 `DATA_DIR/logs`，按小时轮转并保留 24 小时。
 
 ## 测试
 
@@ -470,6 +597,12 @@ npm run test:e2e:perf
 
 普通改动跑相关子集即可；大范围或发布前改动跑全套。
 
+如果缺少 Playwright 浏览器：
+
+```bash
+npm --prefix frontend exec playwright install chromium
+```
+
 ## 贡献
 
 - 保持后端 API 契约稳定。
@@ -477,6 +610,7 @@ npm run test:e2e:perf
 - 持久化逻辑放在 `backend/app/repositories/`。
 - 上游 API 调用放在 `backend/app/integrations/`。
 - 浏览器请求保持同源 `/api/*`。
+- 保持 secret 打码，并集中管理图片/ZIP/URL 校验。
 - 新增或修改环境变量时同步更新 `.env.example`、`README.md` 和 `docker-compose.yml`。
 - 不提交运行时/生成产物。
 

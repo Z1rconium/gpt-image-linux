@@ -5,7 +5,14 @@ import { t } from '$lib/i18n';
 import { confirmStore } from '$lib/stores/confirm';
 import type { ToastOptions, ToastVariant } from '$lib/stores/ui';
 import { formatBytes } from '$lib/utils/format';
-import type { GalleryBatchResponse, GalleryExportJobStatus, GalleryImportJobStatus, GalleryResponse, GallerySyncJobStatus } from '$lib/api/types';
+import type {
+  GalleryBatchResponse,
+  GalleryEntry,
+  GalleryExportJobStatus,
+  GalleryImportJobStatus,
+  GalleryResponse,
+  GallerySyncJobStatus
+} from '$lib/api/types';
 import type { GalleryNavigation, GalleryOperationStatus, GalleryState } from '$lib/stores/gallery';
 
 const STREAMING_ZIP_DOWNLOAD_BYTES_THRESHOLD = 64 * 1024 * 1024;
@@ -14,6 +21,7 @@ const GALLERY_JOB_EVENT_NETWORK_TIMEOUT_MS = 30_000;
 type GalleryActionDeps = {
   getState: () => GalleryState;
   loadGallery: (page?: number, includeTotalBytes?: boolean | GalleryNavigation, navigation?: GalleryNavigation) => Promise<void>;
+  patchGalleryEntries: (ids: Iterable<string>, updater: (image: GalleryEntry) => GalleryEntry | null) => void;
   clearSelection: () => void;
   setOperationStatus: (operationStatus: GalleryOperationStatus | null) => void;
   clearPendingSingleDeletes: () => void;
@@ -149,9 +157,31 @@ function selectedVisibleIds(state: GalleryState) {
   return state.gallery?.images.filter((image) => state.selectedIds.has(image.id)).map((image) => image.id) || [];
 }
 
+function selectedVisibleEntries(state: GalleryState) {
+  const visibleIds = selectedVisibleIds(state);
+  if (!visibleIds.length) return { visibleIds, visibleIdSet: new Set<string>(), entries: [] };
+  const visibleIdSet = new Set(visibleIds);
+  return {
+    visibleIds,
+    visibleIdSet,
+    entries: state.gallery?.images.filter((image) => visibleIdSet.has(image.id)) || []
+  };
+}
+
 function batchRequestBody(state: GalleryState) {
   if (state.selectionToken) return { selection_token: state.selectionToken.token };
   return { ids: [...state.selectedIds] };
+}
+
+async function refreshGalleryPageBestEffort(
+  deps: GalleryActionDeps,
+  page: number
+) {
+  try {
+    await deps.loadGallery(page);
+  } catch {
+    // Keep the optimistic batch update visible if the follow-up refresh fails.
+  }
 }
 
 function abortError() {
@@ -372,6 +402,7 @@ export function createGalleryActions(deps: GalleryActionDeps) {
     const state = deps.getState();
     const count = selectedCount(state);
     if (!count) return;
+    const { visibleIds } = selectedVisibleEntries(state);
     const result = await apiFetch<GalleryBatchResponse>(
       '/api/gallery/batch/favorite',
       {
@@ -381,9 +412,17 @@ export function createGalleryActions(deps: GalleryActionDeps) {
       },
       'updating selected favorites'
     );
-    await deps.loadGallery(state.page);
-    onAffected?.(selectedVisibleIds(state), favorite);
+    const refreshRequired = (!favorite && state.filters.favorite) || result.count !== visibleIds.length;
+    deps.patchGalleryEntries(
+      visibleIds,
+      (image) => (state.filters.favorite && !favorite ? null : { ...image, favorite })
+    );
+    deps.clearSelection();
+    onAffected?.(visibleIds, favorite);
     showToast(batchToastMessage('favorite', result));
+    if (refreshRequired) {
+      await refreshGalleryPageBestEffort(deps, state.page);
+    }
   }
 
   async function batchDelete(
@@ -393,8 +432,7 @@ export function createGalleryActions(deps: GalleryActionDeps) {
     const state = deps.getState();
     const count = selectedCount(state);
     if (!count) return;
-    const visibleIds = selectedVisibleIds(state);
-    const selectedEntries = state.gallery?.images.filter((image) => visibleIds.includes(image.id)) || [];
+    const { visibleIds, entries: selectedEntries } = selectedVisibleEntries(state);
     const selectedBytes = selectedEntries.reduce((sum, image) => sum + (image.bytes || 0), 0);
     const details = [
       get(t).confirm.deleteSelectedDetail(count),
@@ -419,10 +457,11 @@ export function createGalleryActions(deps: GalleryActionDeps) {
       },
       'deleting selected images'
     );
+    deps.patchGalleryEntries(visibleIds, () => null);
     onDeleted?.(visibleIds);
     deps.clearSelection();
-    await deps.loadGallery(state.page);
     showToast(batchToastMessage('delete', result));
+    await refreshGalleryPageBestEffort(deps, state.page);
   }
 
   async function batchDownload(showToast?: (message: string) => void) {
@@ -430,8 +469,7 @@ export function createGalleryActions(deps: GalleryActionDeps) {
     const count = selectedCount(state);
     if (!count) return;
     const label = get(t).gallery.downloadingSelected;
-    const visibleIds = selectedVisibleIds(state);
-    const selectedEntries = state.selectionToken ? [] : state.gallery?.images.filter((image) => visibleIds.includes(image.id)) || [];
+    const { entries: selectedEntries } = selectedVisibleEntries(state);
     const selectedBytes = selectedEntries.reduce((sum, image) => sum + (image.bytes || 0), 0);
     deps.setOperationStatus({
       kind: 'download',

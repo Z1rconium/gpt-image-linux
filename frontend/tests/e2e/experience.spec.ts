@@ -635,10 +635,14 @@ async function mockApi(page: Page, options: MockOptions = {}) {
     }
     if (url.pathname === '/api/gallery' && request.method() === 'GET') {
       const prompt = url.searchParams.get('prompt') || '';
+      const favoriteParam = url.searchParams.get('favorite');
       const requestedPage = Number.parseInt(url.searchParams.get('page') || '1', 10);
-      const images = prompt
-        ? galleryImages.filter((image) => matchesGalleryFilters(image, { prompt }))
-        : galleryImages;
+      const images = galleryImages.filter((image) =>
+        matchesGalleryFilters(image, {
+          prompt,
+          favorite: favoriteParam === 'true' ? true : favoriteParam === 'false' ? false : null
+        })
+      );
       await route.fulfill(
         json(
           galleryResponse(
@@ -1613,6 +1617,73 @@ test('gallery selects current filtered results through a batch token', async ({ 
   await expect(page.getByRole('status')).toContainText('Updated 10 selected images');
 });
 
+test('cross-page batch delete refreshes filtered gallery state after the optimistic update', async ({ page }) => {
+  await loadApp(page, { galleryImages: manyGalleryImages(10) });
+
+  const filterRequest = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return response.request().method() === 'GET' && url.pathname === '/api/gallery' && url.searchParams.get('prompt') === 'Paged gallery image';
+  });
+  await page.getByLabel('Filter prompt').fill('Paged gallery image');
+  await filterRequest;
+
+  const tokenRequest = page.waitForRequest((request) => {
+    const url = new URL(request.url());
+    return request.method() === 'POST' && url.pathname === '/api/gallery/batch/selection-tokens';
+  });
+  await page.getByRole('button', { name: 'Select' }).click();
+  await page.getByRole('button', { name: 'Select filtered' }).click();
+  await tokenRequest;
+
+  const refreshRequest = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return (
+      response.request().method() === 'GET' &&
+      url.pathname === '/api/gallery' &&
+      url.searchParams.get('prompt') === 'Paged gallery image' &&
+      url.searchParams.get('page') === '1'
+    );
+  });
+  await page.getByRole('button', { name: 'Delete selected' }).click();
+  const confirmDialog = page.getByRole('dialog', { name: 'Delete 10 selected images?' });
+  await confirmDialog.getByRole('button', { name: 'Delete selected' }).click();
+  await refreshRequest;
+
+  await expect(page.getByText('No images', { exact: true })).toBeVisible();
+  await expect(page.getByText('No images match', { exact: true })).toBeVisible();
+});
+
+test('favorites-only batch unfavorite reloads the page with the remaining matches', async ({ page }) => {
+  await loadApp(page, {
+    galleryImages: manyGalleryImages(10).map((image) => ({ ...image, favorite: true }))
+  });
+
+  const favoritesRequest = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return response.request().method() === 'GET' && url.pathname === '/api/gallery' && url.searchParams.get('favorite') === 'true';
+  });
+  await page.getByLabel('Favorites').check();
+  await favoritesRequest;
+
+  await page.getByRole('button', { name: 'Select' }).click();
+  await page.getByRole('button', { name: 'Select page' }).click();
+  const refreshRequest = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return (
+      response.request().method() === 'GET' &&
+      url.pathname === '/api/gallery' &&
+      url.searchParams.get('favorite') === 'true' &&
+      url.searchParams.get('page') === '1'
+    );
+  });
+  await page.getByRole('button', { name: 'Unfavorite selected', exact: true }).click();
+  await refreshRequest;
+
+  await expect(page.getByRole('img', { name: 'Paged gallery image 10', exact: true })).toBeVisible();
+  await expect(page.getByRole('img', { name: 'Paged gallery image 1', exact: true })).toBeHidden();
+  await expect(page.getByRole('button', { name: 'Show size' }).locator('..')).toContainText('1 image');
+});
+
 test('gallery queued thumbnails use source images until thumbnails are ready', async ({ page }) => {
   const fullImageRequests: string[] = [];
   page.on('request', (request) => {
@@ -1637,6 +1708,23 @@ test('gallery queued thumbnails use source images until thumbnails are ready', a
   await expect(image).toBeVisible();
   await expect(image).toHaveAttribute('src', '/api/image/queued-thumb.png');
   expect(fullImageRequests).toContain('/api/image/queued-thumb.png');
+});
+
+test('gallery thumbnail refresh rotates queued probes across later pending ids', async ({ page }) => {
+  const refreshedIds = new Set<string>();
+  page.on('request', (request) => {
+    const url = new URL(request.url());
+    if (request.method() === 'GET' && url.pathname.startsWith('/api/gallery/paged-img-')) {
+      refreshedIds.add(url.pathname.split('/').pop() || '');
+    }
+  });
+
+  await loadApp(page, {
+    galleryImages: manyGalleryImages(5).map((image) => ({ ...image, thumbnail_status: 'queued' as const }))
+  });
+
+  await expect(page.getByRole('img', { name: 'Paged gallery image 1', exact: true })).toBeVisible();
+  await expect.poll(() => refreshedIds.has('paged-img-5'), { timeout: 6000 }).toBe(true);
 });
 
 test('lightbox navigates across pages with 2000 mocked images', async ({ page }) => {

@@ -32,42 +32,62 @@ const initialJobsState: JobsState = {
 const HISTORY_PAGE_SIZE = 50;
 const HISTORY_CACHE_LIMIT = 500;
 
-function jobImageSignature(image: NonNullable<GenerateJobStatus['images']>[number]) {
-  return [
-    image.image_id,
-    image.image_url || '',
-    image.filename || '',
-    image.image_width ?? '',
-    image.image_height ?? ''
-  ].join('|');
+function sameJobImage(
+  left: NonNullable<GenerateJobStatus['images']>[number],
+  right: NonNullable<GenerateJobStatus['images']>[number]
+) {
+  return (
+    left.image_id === right.image_id &&
+    left.image_url === right.image_url &&
+    left.filename === right.filename &&
+    left.image_width === right.image_width &&
+    left.image_height === right.image_height
+  );
 }
 
-function jobSignature(job: GenerateJobStatus) {
-  const imageSignature = job.images?.map((image) => jobImageSignature(image)).join(',') || '';
-  const stageSignature = job.stage_timings
-    ? Object.entries(job.stage_timings)
-        .sort(([left], [right]) => left.localeCompare(right))
-        .map(([key, value]) => `${key}:${value}`)
-        .join(',')
-    : '';
-  return [
-    job.job_id,
-    job.status,
-    job.stage || '',
-    job.message || '',
-    job.operation || '',
-    job.updated_at || '',
-    job.completed_at || '',
-    job.image_id || '',
-    job.image_url || '',
-    job.prompt || '',
-    job.size || '',
-    job.model || '',
-    job.duration || '',
-    job.error || '',
-    imageSignature,
-    stageSignature
-  ].join('::');
+function sameJobImages(left: GenerateJobStatus['images'], right: GenerateJobStatus['images']) {
+  const leftImages = left || [];
+  const rightImages = right || [];
+  if (leftImages.length !== rightImages.length) return false;
+  for (let index = 0; index < leftImages.length; index += 1) {
+    const leftImage = leftImages[index];
+    const rightImage = rightImages[index];
+    if (!rightImage || !sameJobImage(leftImage, rightImage)) return false;
+  }
+  return true;
+}
+
+function sameStageTimings(left: GenerateJobStatus['stage_timings'], right: GenerateJobStatus['stage_timings']) {
+  const leftTimings = left || {};
+  const rightTimings = right || {};
+  const leftKeys = Object.keys(leftTimings);
+  const rightKeys = Object.keys(rightTimings);
+  if (leftKeys.length !== rightKeys.length) return false;
+  for (const key of leftKeys) {
+    if (leftTimings[key] !== rightTimings[key]) return false;
+  }
+  return true;
+}
+
+function sameJob(left: GenerateJobStatus, right: GenerateJobStatus) {
+  return (
+    left.job_id === right.job_id &&
+    left.status === right.status &&
+    left.stage === right.stage &&
+    left.message === right.message &&
+    left.operation === right.operation &&
+    left.updated_at === right.updated_at &&
+    left.completed_at === right.completed_at &&
+    left.image_id === right.image_id &&
+    left.image_url === right.image_url &&
+    left.prompt === right.prompt &&
+    left.size === right.size &&
+    left.model === right.model &&
+    left.duration === right.duration &&
+    left.error === right.error &&
+    sameJobImages(left.images, right.images) &&
+    sameStageTimings(left.stage_timings, right.stage_timings)
+  );
 }
 
 function sameJobList(left: GenerateJobStatus[], right: GenerateJobStatus[]) {
@@ -75,7 +95,7 @@ function sameJobList(left: GenerateJobStatus[], right: GenerateJobStatus[]) {
   for (let index = 0; index < left.length; index += 1) {
     const current = left[index];
     const next = right[index];
-    if (!next || current.job_id !== next.job_id || jobSignature(current) !== jobSignature(next)) return false;
+    if (!next || !sameJob(current, next)) return false;
   }
   return true;
 }
@@ -154,8 +174,6 @@ function createJobsStore() {
       if (append && cursorJob?.updated_at && cursorJob.job_id) {
         params.set('before_updated_at', cursorJob.updated_at);
         params.set('before_job_id', cursorJob.job_id);
-      } else if (append) {
-        params.set('offset', String(state.historyJobs.length));
       }
       if (failedOnly) params.set('failed_only', 'true');
       const historyJobs = await apiFetch<GenerateJobStatus[]>(`/api/generate/jobs?${params.toString()}`, {}, 'loading job history');

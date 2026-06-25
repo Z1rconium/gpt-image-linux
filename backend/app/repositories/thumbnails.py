@@ -67,11 +67,7 @@ def _get_thumbnail_resampling_filter():
     return getattr(getattr(Image, "Resampling", Image), "LANCZOS")
 
 
-def _write_thumbnail_file(
-    image_bytes: bytes,
-    filename: str,
-    thumbnail_path: Path,
-) -> bool:
+def _render_thumbnail(open_image, filename: str, thumbnail_path: Path) -> bool:
     if Image is None or ImageOps is None:
         logger.warning("Pillow is not installed; thumbnail generation skipped")
         return False
@@ -80,7 +76,7 @@ def _write_thumbnail_file(
         configure_pillow_image_limits()
         with warnings.catch_warnings():
             warnings.simplefilter("error", DecompressionBombWarning)
-            with Image.open(io.BytesIO(image_bytes)) as image:
+            with open_image() as image:
                 if getattr(image, "is_animated", False):
                     image.seek(0)
                 thumbnail = ImageOps.exif_transpose(image)
@@ -106,6 +102,18 @@ def _write_thumbnail_file(
         return False
 
     return True
+
+
+def _write_thumbnail_file(
+    image_bytes: bytes,
+    filename: str,
+    thumbnail_path: Path,
+) -> bool:
+    return _render_thumbnail(
+        lambda: Image.open(io.BytesIO(image_bytes)),
+        filename,
+        thumbnail_path,
+    )
 
 
 def _write_thumbnail_from_path(
@@ -114,40 +122,7 @@ def _write_thumbnail_from_path(
     thumbnail_path: Path,
 ) -> bool:
     """Generate a thumbnail by opening the image file directly (no full read into memory)."""
-    if Image is None or ImageOps is None:
-        logger.warning("Pillow is not installed; thumbnail generation skipped")
-        return False
-
-    try:
-        configure_pillow_image_limits()
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", DecompressionBombWarning)
-            with Image.open(image_path) as image:
-                if getattr(image, "is_animated", False):
-                    image.seek(0)
-                thumbnail = ImageOps.exif_transpose(image)
-                if thumbnail.mode not in {"RGB", "RGBA"}:
-                    thumbnail = thumbnail.convert(
-                        "RGBA" if "A" in thumbnail.getbands() else "RGB"
-                    )
-                thumbnail.thumbnail(
-                    (config.THUMBNAIL_MAX_SIDE, config.THUMBNAIL_MAX_SIDE),
-                    _get_thumbnail_resampling_filter(),
-                )
-                thumbnail_path.parent.mkdir(parents=True, exist_ok=True)
-                thumbnail.save(thumbnail_path, "WEBP", quality=82, method=4)
-    except (
-        OSError,
-        UnidentifiedImageError,
-        SyntaxError,
-        ValueError,
-        DecompressionBombWarning,
-    ) as e:
-        thumbnail_path.unlink(missing_ok=True)
-        logger.warning("Failed to generate thumbnail for %s: %s", filename, e)
-        return False
-
-    return True
+    return _render_thumbnail(lambda: Image.open(image_path), filename, thumbnail_path)
 
 
 def create_thumbnail_temp(image_bytes: bytes, filename: str) -> tuple[str, Path] | None:

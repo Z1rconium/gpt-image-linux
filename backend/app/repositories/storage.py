@@ -364,8 +364,9 @@ _dirs_initialized = False
 _last_permissions_check = -DATA_PERMISSION_CHECK_INTERVAL_SECONDS
 _permissions_check_lock = threading.RLock()
 
-_filter_options_cache: "GalleryFilterOptions | None" = None
+_filter_options_cache: "_GalleryFilterOptionsCacheEntry | None" = None
 _filter_options_cache_lock = threading.RLock()
+_filter_options_cache_version: int = 0
 _gallery_total_bytes_cache: OrderedDict[
     tuple[str, str, tuple[Any, ...]],
     tuple[float, int],
@@ -516,10 +517,52 @@ class _PreparedGalleryFile:
     thumbnail_temp_path: Path | None = None
 
 
+@dataclass(frozen=True)
+class _GalleryFilterOptionsCacheEntry:
+    version: int
+    options: GalleryFilterOptions
+
+
+@dataclass(frozen=True)
+class _GalleryPaginationState:
+    rows: list[sqlite3.Row]
+    has_prev: bool
+    has_next: bool
+    effective_page: int
+    total: int
+    total_pages: int
+
+
+@dataclass(frozen=True)
+class _GalleryQueryComponents:
+    where_sql: str
+    params: list[Any]
+    requested_page: int
+    page_size: int
+    include_counts: bool
+    include_filter_options: bool
+    include_total_bytes: bool
+    decoded_cursor: tuple[int, str] | None
+    direction: str
+    has_filters: bool
+
+
 def _invalidate_filter_options_cache():
-    global _filter_options_cache
+    global _filter_options_cache, _filter_options_cache_version
     with _filter_options_cache_lock:
         _filter_options_cache = None
+        _filter_options_cache_version += 1
+
+
+def _bump_filter_options_cache_version():
+    global _filter_options_cache_version
+    with _filter_options_cache_lock:
+        _filter_options_cache_version += 1
+
+
+def _get_filter_options_cache_version() -> int:
+    with _filter_options_cache_lock:
+        return _filter_options_cache_version
 
 
 def _invalidate_gallery_total_bytes_cache():
@@ -1922,7 +1965,7 @@ def _gallery_row_values(entry: dict[str, Any]) -> tuple[Any, ...]:
 
 def _gallery_thumbnail_status_for_row(
     row: sqlite3.Row,
-    conn: sqlite3.Connection | None = None,
+    thumbnail_status_map: dict[str, str] | None = None,
 ) -> str:
     filename = str(row["filename"] or "")
     thumbnail_filename = str(row["thumbnail_filename"] or "").strip()
@@ -1933,28 +1976,17 @@ def _gallery_thumbnail_status_for_row(
     if thumbnail_path and thumbnail_path.is_file():
         return "ready"
 
-    if conn is not None and filename:
-        job = conn.execute(
-            """
-            SELECT status, lease_expires_at
-            FROM thumbnail_jobs
-            WHERE filename = ?
-            """,
-            (filename,),
-        ).fetchone()
-        if job:
-            status = str(job["status"] or "")
-            if status == "queued" or (
-                status == "running" and str(job["lease_expires_at"] or "") > utc_now()
-            ):
-                return "queued"
+    if filename and thumbnail_status_map:
+        status = thumbnail_status_map.get(filename)
+        if status:
+            return status
 
     return "missing"
 
 
 def _gallery_entry_from_row(
     row: sqlite3.Row,
-    conn: sqlite3.Connection | None = None,
+    thumbnail_status_map: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     entry = {
         column: row[column]
@@ -1967,7 +1999,9 @@ def _gallery_entry_from_row(
         str(entry["thumbnail_filename"])
     ):
         entry.pop("thumbnail_filename", None)
-    entry["thumbnail_status"] = _gallery_thumbnail_status_for_row(row, conn)
+    entry["thumbnail_status"] = _gallery_thumbnail_status_for_row(
+        row, thumbnail_status_map
+    )
     return _attach_gallery_thumbnail_url(entry)
 
 
@@ -2395,7 +2429,7 @@ def _apply_gallery_filter_option_deltas_on_conn(
         [(kind, value, delta, now) for (kind, value), delta in deltas.items()],
     )
     conn.execute("DELETE FROM gallery_filter_options WHERE ref_count <= 0")
-    _invalidate_filter_options_cache()
+    _bump_filter_options_cache_version()
 
 
 def _increment_gallery_filter_options_on_conn(
@@ -2422,7 +2456,7 @@ def _rebuild_gallery_filter_options_on_conn(conn: sqlite3.Connection):
             """,
             (kind, now),
         )
-    _invalidate_filter_options_cache()
+    _bump_filter_options_cache_version()
 
 
 def rebuild_gallery_filter_options() -> GalleryFilterOptions:
@@ -3519,6 +3553,36 @@ def _gallery_has_row_after_cursor(
     return found is not None
 
 
+def _get_gallery_thumbnail_status_map_on_conn(
+    conn: sqlite3.Connection,
+    rows: Sequence[sqlite3.Row],
+) -> dict[str, str]:
+    filenames = _unique_sqlite_values(row["filename"] for row in rows if row["filename"])
+    if not filenames:
+        return {}
+
+    now = utc_now()
+    queued_filenames: set[str] = set()
+    for chunk in _iter_sqlite_in_chunks(filenames):
+        placeholders = ", ".join("?" for _ in chunk)
+        jobs = conn.execute(
+            f"""
+            SELECT filename, status, lease_expires_at
+            FROM thumbnail_jobs
+            WHERE filename IN ({placeholders})
+            """,
+            tuple(chunk),
+        ).fetchall()
+        for job in jobs:
+            status = str(job["status"] or "")
+            if status == "queued" or (
+                status == "running" and str(job["lease_expires_at"] or "") > now
+            ):
+                queued_filenames.add(str(job["filename"]))
+
+    return {filename: "queued" for filename in queued_filenames}
+
+
 def _get_gallery_rows_on_conn(
     conn: sqlite3.Connection,
     where_sql: str,
@@ -3593,7 +3657,11 @@ def get_gallery(
             limit=limit,
             offset=offset,
         )
-    return [GalleryEntry(**_gallery_entry_from_row(row)) for row in rows]
+        thumbnail_status_map = _get_gallery_thumbnail_status_map_on_conn(conn, rows)
+    return [
+        GalleryEntry(**_gallery_entry_from_row(row, thumbnail_status_map))
+        for row in rows
+    ]
 
 
 def iter_gallery_export_rows(
@@ -3619,10 +3687,11 @@ def iter_gallery_export_rows(
                 last_id=last_id,
                 limit=batch_size,
             )
+            thumbnail_status_map = _get_gallery_thumbnail_status_map_on_conn(conn, rows)
         if not rows:
             return
         for row in rows:
-            yield _gallery_entry_from_row(row)
+            yield _gallery_entry_from_row(row, thumbnail_status_map)
         if len(rows) < batch_size:
             return
         last_row = rows[-1]
@@ -3834,10 +3903,11 @@ def update_gallery_entry_hash(filename: str, sha256: str, byte_size: int) -> Non
 
 def _get_gallery_filter_options_on_conn(conn: sqlite3.Connection) -> GalleryFilterOptions:
     global _filter_options_cache
+    cache_version = _get_filter_options_cache_version()
     with _filter_options_cache_lock:
         cached = _filter_options_cache
-        if cached is not None:
-            return cached
+        if cached is not None and cached.version == cache_version:
+            return cached.options
 
     options: dict[str, list[str]] = {}
     for key, kind in (
@@ -3858,7 +3928,10 @@ def _get_gallery_filter_options_on_conn(conn: sqlite3.Connection) -> GalleryFilt
 
     result = GalleryFilterOptions(**options)
     with _filter_options_cache_lock:
-        _filter_options_cache = result
+        _filter_options_cache = _GalleryFilterOptionsCacheEntry(
+            version=cache_version,
+            options=result,
+        )
     return result
 
 
@@ -3866,6 +3939,214 @@ def get_gallery_filter_options() -> GalleryFilterOptions:
     _ensure_database()
     with _connect() as conn:
         return _get_gallery_filter_options_on_conn(conn)
+
+
+def _normalize_gallery_page_components(
+    *,
+    page: int,
+    page_size: int,
+    filters: dict[str, Any] | None,
+    include_total_bytes: bool,
+    include_counts: bool,
+    include_filter_options: bool,
+    cursor: str | None,
+    direction: str,
+) -> _GalleryQueryComponents:
+    requested_page = max(int(page), 1)
+    normalized_page_size = max(int(page_size), 1)
+    normalized_cursor = str(cursor or "").strip()
+    normalized_direction = str(direction or "next").strip().lower()
+    if normalized_direction not in {"next", "prev"}:
+        raise ValueError("Invalid gallery cursor direction")
+
+    decoded_cursor = (
+        decode_gallery_cursor(normalized_cursor) if normalized_cursor else None
+    )
+    where_sql, params = _build_gallery_filter_where(filters)
+    return _GalleryQueryComponents(
+        where_sql=where_sql,
+        params=params,
+        requested_page=requested_page,
+        page_size=normalized_page_size,
+        include_counts=include_counts,
+        include_filter_options=include_filter_options,
+        include_total_bytes=include_total_bytes,
+        decoded_cursor=decoded_cursor,
+        direction=normalized_direction,
+        has_filters=bool(where_sql),
+    )
+
+
+def _get_gallery_page_rows_on_conn(
+    conn: sqlite3.Connection,
+    components: _GalleryQueryComponents,
+    timings_ms: dict[str, float],
+) -> _GalleryPaginationState:
+    effective_page = components.requested_page
+    total = 0
+    total_pages = 1
+    page_has_sentinel = False
+
+    if components.decoded_cursor is None and components.include_counts:
+        count_started_at = time.perf_counter()
+        total = _get_gallery_count_on_conn(
+            conn, components.where_sql, components.params
+        )
+        timings_ms["count_ms"] = round(
+            (time.perf_counter() - count_started_at) * 1000,
+            2,
+        )
+        total_pages = max((total + components.page_size - 1) // components.page_size, 1)
+        effective_page = min(components.requested_page, total_pages)
+
+    rows_started_at = time.perf_counter()
+    if components.decoded_cursor is None:
+        offset = (effective_page - 1) * components.page_size
+        rows = _get_gallery_rows_on_conn(
+            conn,
+            components.where_sql,
+            components.params,
+            limit=components.page_size + 1,
+            offset=offset,
+        )
+        page_has_sentinel = len(rows) > components.page_size
+        has_next = page_has_sentinel
+        if has_next:
+            rows = rows[: components.page_size]
+        if components.include_counts:
+            has_next = effective_page < total_pages
+        has_prev = effective_page > 1
+    else:
+        cursor_sort_seq, cursor_id = components.decoded_cursor
+        if components.direction == "prev":
+            cursor_where = _combine_gallery_where(
+                components.where_sql,
+                "(sort_seq > ? OR (sort_seq = ? AND id > ?))",
+            )
+            raw_rows = conn.execute(
+                f"""
+                SELECT {", ".join(GALLERY_COLUMNS)}
+                FROM gallery_entries
+                {cursor_where}
+                ORDER BY sort_seq ASC, id ASC
+                LIMIT ?
+                """,
+                (
+                    *components.params,
+                    cursor_sort_seq,
+                    cursor_sort_seq,
+                    cursor_id,
+                    components.page_size + 1,
+                ),
+            ).fetchall()
+            has_prev = len(raw_rows) > components.page_size
+            if has_prev:
+                raw_rows = raw_rows[: components.page_size]
+            rows = list(reversed(raw_rows))
+            has_next = (
+                False
+                if not rows
+                else _gallery_has_row_after_cursor(
+                    conn, components.where_sql, components.params, rows[-1]
+                )
+            )
+        else:
+            cursor_where = _combine_gallery_where(
+                components.where_sql,
+                "(sort_seq < ? OR (sort_seq = ? AND id < ?))",
+            )
+            rows = conn.execute(
+                f"""
+                SELECT {", ".join(GALLERY_COLUMNS)}
+                FROM gallery_entries
+                {cursor_where}
+                ORDER BY sort_seq DESC, id DESC
+                LIMIT ?
+                """,
+                (
+                    *components.params,
+                    cursor_sort_seq,
+                    cursor_sort_seq,
+                    cursor_id,
+                    components.page_size + 1,
+                ),
+            ).fetchall()
+            has_next = len(rows) > components.page_size
+            if has_next:
+                rows = rows[: components.page_size]
+            has_prev = (
+                False
+                if not rows
+                else _gallery_has_row_before_cursor(
+                    conn, components.where_sql, components.params, rows[0]
+                )
+            )
+    timings_ms["rows_ms"] = round((time.perf_counter() - rows_started_at) * 1000, 2)
+
+    if components.include_counts and components.decoded_cursor is not None:
+        count_started_at = time.perf_counter()
+        total = _get_gallery_count_on_conn(conn, components.where_sql, components.params)
+        timings_ms["count_ms"] = round(
+            (time.perf_counter() - count_started_at) * 1000,
+            2,
+        )
+        total_pages = max((total + components.page_size - 1) // components.page_size, 1)
+        effective_page = min(components.requested_page, total_pages)
+    elif not components.include_counts:
+        total_pages = max(components.requested_page + (1 if has_next else 0), 1)
+        effective_page = components.requested_page
+
+    if (
+        components.decoded_cursor is None
+        and components.requested_page == 1
+        and not components.has_filters
+    ):
+        has_prev = False
+        if not components.include_counts:
+            has_next = page_has_sentinel
+
+    return _GalleryPaginationState(
+        rows=rows,
+        has_prev=has_prev,
+        has_next=has_next,
+        effective_page=effective_page,
+        total=total,
+        total_pages=total_pages,
+    )
+
+
+def _get_gallery_page_total_bytes_on_conn(
+    conn: sqlite3.Connection,
+    components: _GalleryQueryComponents,
+    timings_ms: dict[str, float],
+) -> int:
+    if not components.include_total_bytes:
+        return 0
+    total_bytes_started_at = time.perf_counter()
+    total_bytes = _get_gallery_total_bytes_on_conn(
+        conn, components.where_sql, components.params
+    )
+    timings_ms["total_bytes_ms"] = round(
+        (time.perf_counter() - total_bytes_started_at) * 1000,
+        2,
+    )
+    return total_bytes
+
+
+def _get_gallery_page_filter_options_on_conn(
+    conn: sqlite3.Connection,
+    components: _GalleryQueryComponents,
+    timings_ms: dict[str, float],
+) -> GalleryFilterOptions:
+    if not components.include_filter_options:
+        return GalleryFilterOptions()
+    filter_options_started_at = time.perf_counter()
+    filter_options = _get_gallery_filter_options_on_conn(conn)
+    timings_ms["filter_options_ms"] = round(
+        (time.perf_counter() - filter_options_started_at) * 1000,
+        2,
+    )
+    return filter_options
 
 
 def get_gallery_page(
@@ -3880,16 +4161,6 @@ def get_gallery_page(
     direction: str = "next",
 ) -> GalleryPage:
     _ensure_database()
-    requested_page = max(int(page), 1)
-    page_size = max(int(page_size), 1)
-    normalized_cursor = str(cursor or "").strip()
-    normalized_direction = str(direction or "next").strip().lower()
-    if normalized_direction not in {"next", "prev"}:
-        raise ValueError("Invalid gallery cursor direction")
-    decoded_cursor = (
-        decode_gallery_cursor(normalized_cursor) if normalized_cursor else None
-    )
-
     query_started_at = time.perf_counter()
     timings_ms: dict[str, float] = {
         "rows_ms": 0.0,
@@ -3898,137 +4169,42 @@ def get_gallery_page(
         "filter_options_ms": 0.0,
     }
     with _connect() as conn:
-        where_sql, params = _build_gallery_filter_where(filters)
-
-        effective_page = requested_page
-        total = 0
-        total_pages = 1
-
-        if decoded_cursor is None and include_counts:
-            count_started_at = time.perf_counter()
-            total = _get_gallery_count_on_conn(conn, where_sql, params)
-            timings_ms["count_ms"] = round(
-                (time.perf_counter() - count_started_at) * 1000,
-                2,
-            )
-            total_pages = max((total + page_size - 1) // page_size, 1)
-            effective_page = min(requested_page, total_pages)
-
-        rows_started_at = time.perf_counter()
-        if decoded_cursor is None:
-            offset = (effective_page - 1) * page_size
-            rows = _get_gallery_rows_on_conn(
-                conn,
-                where_sql,
-                params,
-                limit=page_size + 1,
-                offset=offset,
-            )
-
-            has_next = len(rows) > page_size
-            if has_next:
-                rows = rows[:page_size]
-            if include_counts:
-                has_next = effective_page < total_pages
-            has_prev = effective_page > 1
-        else:
-            cursor_sort_seq, cursor_id = decoded_cursor
-            if normalized_direction == "prev":
-                cursor_where = _combine_gallery_where(
-                    where_sql,
-                    "(sort_seq > ? OR (sort_seq = ? AND id > ?))",
-                )
-                raw_rows = conn.execute(
-                    f"""
-                    SELECT {", ".join(GALLERY_COLUMNS)}
-                    FROM gallery_entries
-                    {cursor_where}
-                    ORDER BY sort_seq ASC, id ASC
-                    LIMIT ?
-                    """,
-                    (
-                        *params,
-                        cursor_sort_seq,
-                        cursor_sort_seq,
-                        cursor_id,
-                        page_size + 1,
-                    ),
-                ).fetchall()
-                has_prev = len(raw_rows) > page_size
-                if has_prev:
-                    raw_rows = raw_rows[:page_size]
-                rows = list(reversed(raw_rows))
-                has_next = (
-                    _gallery_has_row_after_cursor(conn, where_sql, params, rows[-1])
-                    if rows
-                    else False
-                )
-            else:
-                cursor_where = _combine_gallery_where(
-                    where_sql,
-                    "(sort_seq < ? OR (sort_seq = ? AND id < ?))",
-                )
-                rows = conn.execute(
-                    f"""
-                    SELECT {", ".join(GALLERY_COLUMNS)}
-                    FROM gallery_entries
-                    {cursor_where}
-                    ORDER BY sort_seq DESC, id DESC
-                    LIMIT ?
-                    """,
-                    (
-                        *params,
-                        cursor_sort_seq,
-                        cursor_sort_seq,
-                        cursor_id,
-                        page_size + 1,
-                    ),
-                ).fetchall()
-                has_next = len(rows) > page_size
-                if has_next:
-                    rows = rows[:page_size]
-                has_prev = (
-                    _gallery_has_row_before_cursor(conn, where_sql, params, rows[0])
-                    if rows
-                    else False
-                )
-        timings_ms["rows_ms"] = round((time.perf_counter() - rows_started_at) * 1000, 2)
-
-        if include_counts and decoded_cursor is not None:
-            count_started_at = time.perf_counter()
-            total = _get_gallery_count_on_conn(conn, where_sql, params)
-            timings_ms["count_ms"] = round((time.perf_counter() - count_started_at) * 1000, 2)
-            total_pages = max((total + page_size - 1) // page_size, 1)
-            effective_page = min(requested_page, total_pages)
-        elif not include_counts:
-            total_pages = max(requested_page + (1 if has_next else 0), 1)
-            effective_page = requested_page
-        prev_cursor = _gallery_cursor_from_row(rows[0]) if rows and has_prev else None
-        next_cursor = _gallery_cursor_from_row(rows[-1]) if rows and has_next else None
-
-        if include_total_bytes:
-            total_bytes_started_at = time.perf_counter()
-            total_bytes = _get_gallery_total_bytes_on_conn(conn, where_sql, params)
-            timings_ms["total_bytes_ms"] = round((time.perf_counter() - total_bytes_started_at) * 1000, 2)
-        else:
-            total_bytes = 0
-        if include_filter_options:
-            filter_options_started_at = time.perf_counter()
-            filter_options = _get_gallery_filter_options_on_conn(conn)
-            timings_ms["filter_options_ms"] = round((time.perf_counter() - filter_options_started_at) * 1000, 2)
-        else:
-            filter_options = GalleryFilterOptions()
-        images = [GalleryEntry(**_gallery_entry_from_row(row, conn)) for row in rows]
+        components = _normalize_gallery_page_components(
+            page=page,
+            page_size=page_size,
+            filters=filters,
+            include_total_bytes=include_total_bytes,
+            include_counts=include_counts,
+            include_filter_options=include_filter_options,
+            cursor=cursor,
+            direction=direction,
+        )
+        pagination = _get_gallery_page_rows_on_conn(conn, components, timings_ms)
+        total_bytes = _get_gallery_page_total_bytes_on_conn(conn, components, timings_ms)
+        filter_options = _get_gallery_page_filter_options_on_conn(conn, components, timings_ms)
+        thumbnail_status_map = _get_gallery_thumbnail_status_map_on_conn(
+            conn, pagination.rows
+        )
+        prev_cursor = (
+            _gallery_cursor_from_row(pagination.rows[0]) if pagination.rows and pagination.has_prev else None
+        )
+        next_cursor = (
+            _gallery_cursor_from_row(pagination.rows[-1]) if pagination.rows and pagination.has_next else None
+        )
+        images = [
+            GalleryEntry(**_gallery_entry_from_row(row, thumbnail_status_map))
+            for row in pagination.rows
+        ]
     query_elapsed_ms = (time.perf_counter() - query_started_at) * 1000
 
     return GalleryPage(
-        total=total,
+        total=pagination.total,
         total_bytes=total_bytes,
-        page=effective_page,
-        page_size=page_size,
-        total_pages=total_pages,
-        has_prev=has_prev,
-        has_next=has_next,
+        page=pagination.effective_page,
+        page_size=components.page_size,
+        total_pages=pagination.total_pages,
+        has_prev=pagination.has_prev,
+        has_next=pagination.has_next,
         next_cursor=next_cursor,
         prev_cursor=prev_cursor,
         images=images,
@@ -4051,9 +4227,12 @@ def get_gallery_entry(image_id: str) -> GalleryEntry | None:
             """,
             (image_id,),
         ).fetchone()
+        thumbnail_status_map = _get_gallery_thumbnail_status_map_on_conn(
+            conn, [row] if row else []
+        )
     if not row:
         return None
-    return GalleryEntry(**_gallery_entry_from_row(row))
+    return GalleryEntry(**_gallery_entry_from_row(row, thumbnail_status_map))
 
 
 def get_gallery_entries_by_ids(image_ids: Sequence[str]) -> list[GalleryEntry]:
@@ -4079,9 +4258,12 @@ def get_gallery_entries_by_ids(image_ids: Sequence[str]) -> list[GalleryEntry]:
                 tuple(chunk),
             ).fetchall()
             rows_by_id.update({row["id"]: row for row in rows})
+        thumbnail_status_map = _get_gallery_thumbnail_status_map_on_conn(
+            conn, rows_by_id.values()
+        )
 
     return [
-        GalleryEntry(**_gallery_entry_from_row(rows_by_id[image_id]))
+        GalleryEntry(**_gallery_entry_from_row(rows_by_id[image_id], thumbnail_status_map))
         for image_id in unique_ids
         if image_id in rows_by_id
     ]
@@ -4184,7 +4366,9 @@ def update_gallery_entry(image_id: str, updates: dict[str, Any]) -> GalleryEntry
                     )
                     _increment_gallery_filter_options_on_conn(conn, row, 1)
 
-    return GalleryEntry(**_gallery_entry_from_row(row))
+    with _connect() as conn:
+        thumbnail_status_map = _get_gallery_thumbnail_status_map_on_conn(conn, [row])
+    return GalleryEntry(**_gallery_entry_from_row(row, thumbnail_status_map))
 
 
 def update_gallery_entries_favorite(image_ids: list[str], favorite: bool) -> int:

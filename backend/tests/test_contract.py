@@ -3840,6 +3840,28 @@ def test_gallery_page_overflow_clamps_before_fetching_rows(client):
     assert [image["id"] for image in data["images"]] == ["overflow-0"]
 
 
+def test_gallery_first_page_without_counts_preserves_the_prefetched_has_next_sentinel(
+    client,
+):
+    for index in range(9):
+        _fake_gallery_entry(
+            f"boundary-{index}",
+            f"boundary {index}",
+            "1024x1024",
+            f"boundary-{index}.png",
+        )
+
+    resp = client.get("/api/gallery?page=1&page_size=9&include_counts=false")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["page"] == 1
+    assert data["total_pages"] == 1
+    assert data["has_prev"] is False
+    assert data["has_next"] is False
+    assert len(data["images"]) == 9
+
+
 def test_gallery_filter_options_are_materialized_and_incremental(client):
     first = _fake_gallery_entry("filter-1", "filter one", "1024x1024", "filter-1.png")
     second = _fake_gallery_entry("filter-2", "filter two", "1536x1024", "filter-2.png")

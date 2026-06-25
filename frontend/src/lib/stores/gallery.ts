@@ -71,6 +71,7 @@ const initialGalleryActivityState: GalleryActivityState = {
 };
 
 const THUMBNAIL_REFRESH_DELAYS_MS = [1500, 3000, 6000, 12000, 24000];
+const THUMBNAIL_REFRESH_BATCH_SIZE = 4;
 
 function createGalleryActivityStore() {
   const { subscribe, update } = writable<GalleryActivityState>(initialGalleryActivityState);
@@ -177,6 +178,7 @@ function createGalleryStore() {
   let thumbnailRefreshKey = '';
   let thumbnailRefreshAttempts = 0;
   let thumbnailRefreshPendingIds: string[] = [];
+  let thumbnailRefreshPendingOffset = 0;
   const prefetchedPages = new Map<string, GalleryResponse>();
   const prefetchRequests = new Map<string, Promise<GalleryResponse | null>>();
   const pendingSingleDeletes = new Map<string, { image: GalleryEntry; timer: ReturnType<typeof setTimeout> }>();
@@ -210,6 +212,7 @@ function createGalleryStore() {
     thumbnailRefreshKey = '';
     thumbnailRefreshAttempts = 0;
     thumbnailRefreshPendingIds = [];
+    thumbnailRefreshPendingOffset = 0;
   }
 
   function pendingThumbnailRefreshState(gallery: GalleryResponse, filters: GalleryFilters) {
@@ -227,14 +230,14 @@ function createGalleryStore() {
     expectedKey: string,
     page: number,
     filters: GalleryFilters,
-    pendingIds: string[]
+    probeIds: string[]
   ) {
     if (!state.gallery || state.gallery.page !== page || !sameGalleryFilters(filters, state.filters)) return;
     if (expectedKey !== thumbnailRefreshKey) return;
 
     try {
       const refreshedEntries = await Promise.all(
-        pendingIds.map((imageId) =>
+        probeIds.map((imageId) =>
           apiFetch<GalleryEntry>(`/api/gallery/${encodeURIComponent(imageId)}`, {}, 'refreshing gallery thumbnail').catch(() => null)
         )
       );
@@ -242,13 +245,14 @@ function createGalleryStore() {
       if (expectedKey !== thumbnailRefreshKey) return;
       const updates = refreshedEntries.filter((entry): entry is GalleryEntry => Boolean(entry));
       if (!updates.length) return;
+      const updatesById = new Map(updates.map((entry) => [entry.id, entry]));
       update((current) => ({
         ...current,
         gallery: current.gallery
           ? {
               ...current.gallery,
               images: current.gallery.images.map((image) => {
-                const refreshed = updates.find((entry) => entry.id === image.id);
+                const refreshed = updatesById.get(image.id);
                 if (!refreshed || sameGalleryEntryThumbnail(image, refreshed)) return image;
                 return refreshed;
               })
@@ -259,6 +263,15 @@ function createGalleryStore() {
     } catch {
       // A failed background thumbnail refresh should not disturb the visible gallery state.
     }
+  }
+
+  function nextThumbnailRefreshProbeIds(pendingIds: string[]) {
+    if (pendingIds.length <= THUMBNAIL_REFRESH_BATCH_SIZE) return [...pendingIds];
+    const start = Math.min(thumbnailRefreshPendingOffset, pendingIds.length - 1);
+    const end = Math.min(start + THUMBNAIL_REFRESH_BATCH_SIZE, pendingIds.length);
+    const probeIds = pendingIds.slice(start, end);
+    thumbnailRefreshPendingOffset = end >= pendingIds.length ? 0 : end;
+    return probeIds;
   }
 
   function scheduleThumbnailRefresh(gallery: GalleryResponse) {
@@ -279,9 +292,11 @@ function createGalleryStore() {
     const page = gallery.page;
     const filters = { ...state.filters };
     const pendingIds = [...thumbnailRefreshPendingIds];
+    const probeIds = nextThumbnailRefreshProbeIds(pendingIds);
+    if (!probeIds.length) return;
     thumbnailRefreshTimer = setTimeout(() => {
       thumbnailRefreshTimer = null;
-      void refreshPendingThumbnails(thumbnailRefreshKey, page, filters, pendingIds);
+      void refreshPendingThumbnails(thumbnailRefreshKey, page, filters, probeIds);
     }, delay);
   }
 
@@ -497,6 +512,48 @@ function createGalleryStore() {
     });
   }
 
+  function patchGalleryEntries(
+    ids: Iterable<string>,
+    updater: (image: GalleryEntry) => GalleryEntry | null,
+    options: { pruneSelection?: boolean } = {}
+  ) {
+    const idSet = new Set(ids);
+    if (!idSet.size) return;
+    update((current) => {
+      if (!current.gallery) return current;
+      let changed = false;
+      const nextImages: GalleryEntry[] = [];
+      let removedCount = 0;
+      let removedBytes = 0;
+      for (const image of current.gallery.images) {
+        if (!idSet.has(image.id)) {
+          nextImages.push(image);
+          continue;
+        }
+        const nextImage = updater(image);
+        if (nextImage === null) {
+          changed = true;
+          removedCount += 1;
+          removedBytes += image.bytes || 0;
+          continue;
+        }
+        if (nextImage !== image) changed = true;
+        nextImages.push(nextImage);
+      }
+      if (!changed) return current;
+      return {
+        ...current,
+        gallery: {
+          ...current.gallery,
+          images: nextImages,
+          total: Math.max(0, current.gallery.total - removedCount),
+          total_bytes: Math.max(0, current.gallery.total_bytes - removedBytes)
+        },
+        selectedIds: options.pruneSelection === false ? current.selectedIds : new Set([...current.selectedIds].filter((id) => !idSet.has(id)))
+      };
+    });
+  }
+
   function updateFilter(key: keyof GalleryFilters, value: string | boolean) {
     prefetchedPages.clear();
     clearThumbnailRefresh();
@@ -587,7 +644,7 @@ function createGalleryStore() {
   }
 
   async function toggleFavorite(image: GalleryEntry, onChanged?: (image: GalleryEntry) => void) {
-    await apiFetch<GalleryEntry>(
+    const nextImage = await apiFetch<GalleryEntry>(
       `/api/gallery/${encodeURIComponent(image.id)}/favorite`,
       {
         method: 'PATCH',
@@ -596,8 +653,12 @@ function createGalleryStore() {
       },
       'updating favorite'
     );
-    await loadGallery(state.page);
-    onChanged?.({ ...image, favorite: !image.favorite });
+    patchGalleryEntries(
+      [image.id],
+      (current) => (state.filters.favorite && !nextImage.favorite ? null : { ...current, favorite: nextImage.favorite }),
+      { pruneSelection: false }
+    );
+    onChanged?.(nextImage);
   }
 
   function cancelPendingSingleDelete(imageId: string) {
@@ -685,6 +746,7 @@ function createGalleryStore() {
   const galleryActions = createGalleryActions({
     getState: () => state,
     loadGallery,
+    patchGalleryEntries,
     clearSelection,
     setOperationStatus,
     clearPendingSingleDeletes,
