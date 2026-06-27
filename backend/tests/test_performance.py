@@ -189,6 +189,90 @@ def test_gallery_large_query_baselines(
     assert p95 < 3000
 
 
+def test_gallery_deep_page_anchor_cache_100k(tmp_path, record_property):
+    _configure_runtime(tmp_path)
+    _seed_gallery_rows(100_000)
+
+    started_at = time.perf_counter()
+    first_page = storage.get_gallery_page(
+        page=5_000,
+        page_size=9,
+        include_filter_options=False,
+    )
+    first_ms = (time.perf_counter() - started_at) * 1000
+    assert first_page.images
+    assert first_page.timings_ms.get("anchor_seeded_by_offset") == 1.0
+
+    def query():
+        page = storage.get_gallery_page(
+            page=5_000,
+            page_size=9,
+            include_filter_options=False,
+        )
+        assert page.images
+        assert page.timings_ms.get("anchor_seeded_by_offset", 0.0) == 0.0
+
+    p50, p95 = _measure_ms(query, iterations=12)
+    record_property("gallery_100000_rows_deep_page_first_ms", round(first_ms, 2))
+    record_property("gallery_100000_rows_deep_page_cached_p50_ms", round(p50, 2))
+    record_property("gallery_100000_rows_deep_page_cached_p95_ms", round(p95, 2))
+    assert p95 < 1000
+
+
+@pytest.mark.parametrize(
+    ("case_name", "page", "filters"),
+    [
+        (
+            "favorite_model_size",
+            200,
+            {
+                "model": "gpt-image-2",
+                "size": "1024x1024",
+                "favorite": True,
+            },
+        ),
+        ("prompt_fts", 50, {"prompt": "benchmark prompt 4"}),
+    ],
+)
+def test_gallery_filtered_deep_page_anchor_baselines(
+    tmp_path,
+    monkeypatch,
+    case_name,
+    page,
+    filters,
+    record_property,
+):
+    _configure_runtime(tmp_path)
+    monkeypatch.setattr(storage, "GALLERY_PAGE_ANCHOR_SMALL_OFFSET_THRESHOLD", 100)
+    monkeypatch.setattr(storage, "GALLERY_PAGE_ANCHOR_INTERVAL_PAGES", 25)
+    _seed_gallery_rows(100_000)
+
+    first_page = storage.get_gallery_page(
+        page=page,
+        page_size=9,
+        filters=filters,
+        include_filter_options=False,
+    )
+    assert first_page.images
+    assert first_page.timings_ms.get("anchor_seeded_by_offset") == 1.0
+
+    def query():
+        gallery_page = storage.get_gallery_page(
+            page=page,
+            page_size=9,
+            filters=filters,
+            include_filter_options=False,
+        )
+        assert gallery_page.images
+        assert gallery_page.timings_ms.get("anchor_seeded_by_offset", 0.0) == 0.0
+
+    p50, p95 = _measure_ms(query, iterations=12)
+    prefix = f"gallery_100000_rows_{case_name}_deep_anchor"
+    record_property(f"{prefix}_p50_ms", round(p50, 2))
+    record_property(f"{prefix}_p95_ms", round(p95, 2))
+    assert p95 < 1000
+
+
 def test_gallery_cursor_query_baseline(tmp_path, record_property):
     _configure_runtime(tmp_path)
     _seed_gallery_rows(10_000)

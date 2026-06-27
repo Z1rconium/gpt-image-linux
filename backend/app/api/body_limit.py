@@ -7,6 +7,10 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from ..core import settings as config
+from .edit_limits import (
+    EDIT_MULTIPART_METADATA_OVERHEAD_BYTES,
+    MAX_EDIT_SOURCE_IMAGES,
+)
 
 
 def _is_json_content_type(content_type: str) -> bool:
@@ -20,10 +24,10 @@ def _max_body_for_path(path: str, content_type: str = "") -> int:
         (
             "/api/edits",
             config.MAX_FILE_SIZE_MB
-            * config.MAX_ACTIVE_GENERATE_JOBS
-            * 16
+            * MAX_EDIT_SOURCE_IMAGES
             * 1024
-            * 1024,
+            * 1024
+            + EDIT_MULTIPART_METADATA_OVERHEAD_BYTES,
         ),
     ]
     for prefix, limit in path_limits:

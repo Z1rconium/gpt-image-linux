@@ -346,6 +346,18 @@ GALLERY_FTS_MIN_QUERY_LENGTH = 3
 SQLITE_IN_CLAUSE_CHUNK_SIZE = 900
 GALLERY_COUNT_CACHE_SECONDS = 2.0
 GALLERY_TOTAL_BYTES_CACHE_SECONDS = 2.0
+GALLERY_PAGE_ANCHOR_INTERVAL_PAGES = 100
+GALLERY_PAGE_ANCHOR_SMALL_OFFSET_THRESHOLD = 10_000
+GALLERY_PAGE_ANCHOR_MAX_PER_QUERY = 256
+GALLERY_PAGE_ANCHOR_INVALIDATING_UPDATE_FIELDS = {
+    "prompt",
+    "model",
+    "api_preset_name",
+    "size",
+    "favorite",
+    "created_at",
+    "sort_seq",
+}
 GALLERY_ORPHAN_FILE_TTL_SECONDS = 300
 GALLERY_ORPHAN_GC_BATCH_SIZE = 500
 _GALLERY_COUNT_CACHE_MAX_SIZE = 512
@@ -537,6 +549,7 @@ class _GalleryPaginationState:
 class _GalleryQueryComponents:
     where_sql: str
     params: list[Any]
+    query_key: str
     requested_page: int
     page_size: int
     include_counts: bool
@@ -575,9 +588,53 @@ def _invalidate_gallery_count_cache():
         _gallery_count_cache.clear()
 
 
+def _get_gallery_version_on_conn(conn: sqlite3.Connection) -> int:
+    row = conn.execute(
+        "SELECT value FROM gallery_meta WHERE key = 'gallery_version'"
+    ).fetchone()
+    if row:
+        return int(row["value"] or 0)
+    started_transaction = not conn.in_transaction
+    if started_transaction:
+        conn.execute("BEGIN IMMEDIATE")
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO gallery_meta (key, value)
+        VALUES ('gallery_version', 0)
+        """
+    )
+    if started_transaction:
+        conn.commit()
+    return 0
+
+
+def _bump_gallery_version_on_conn(conn: sqlite3.Connection) -> int:
+    conn.execute(
+        """
+        INSERT INTO gallery_meta (key, value)
+        VALUES ('gallery_version', 1)
+        ON CONFLICT(key) DO UPDATE SET value = value + 1
+        """
+    )
+    row = conn.execute(
+        "SELECT value FROM gallery_meta WHERE key = 'gallery_version'"
+    ).fetchone()
+    gallery_version = int(row["value"] or 0) if row else 0
+    conn.execute(
+        "DELETE FROM gallery_page_anchors WHERE gallery_version != ?",
+        (gallery_version,),
+    )
+    return gallery_version
+
+
 def _invalidate_gallery_query_caches():
     _invalidate_gallery_count_cache()
     _invalidate_gallery_total_bytes_cache()
+
+
+def _invalidate_gallery_query_caches_on_conn(conn: sqlite3.Connection):
+    _bump_gallery_version_on_conn(conn)
+    _invalidate_gallery_query_caches()
 
 
 def _default_settings() -> dict:
@@ -823,12 +880,16 @@ def verify_storage_writable():
     _ensure_database()
 
 
-def _open_connection() -> sqlite3.Connection:
+def _open_connection(
+    *,
+    timeout: float = SQLITE_TIMEOUT_SECONDS,
+    busy_timeout_ms: int = 30000,
+) -> sqlite3.Connection:
     _ensure_directories()
-    conn = sqlite3.connect(config.DATABASE_FILE, timeout=SQLITE_TIMEOUT_SECONDS)
+    conn = sqlite3.connect(config.DATABASE_FILE, timeout=timeout)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA busy_timeout = 30000")
+    conn.execute(f"PRAGMA busy_timeout = {int(busy_timeout_ms)}")
     conn.execute("PRAGMA synchronous = NORMAL")
     return conn
 
@@ -1062,6 +1123,26 @@ def _ensure_database():
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY(kind, value)
                 );
+
+                CREATE TABLE IF NOT EXISTS gallery_meta (
+                    key TEXT PRIMARY KEY,
+                    value INTEGER NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS gallery_page_anchors (
+                    query_key TEXT NOT NULL,
+                    page_size INTEGER NOT NULL,
+                    page INTEGER NOT NULL,
+                    sort_seq INTEGER NOT NULL,
+                    image_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    gallery_version INTEGER NOT NULL,
+                    PRIMARY KEY(query_key, page_size, page)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_gallery_page_anchors_lookup
+                    ON gallery_page_anchors(query_key, page_size, gallery_version, page);
 
                 CREATE TABLE IF NOT EXISTS thumbnail_jobs (
                     filename TEXT PRIMARY KEY,
@@ -1384,12 +1465,51 @@ def _migration_gallery_sort_filter_indexes(conn: sqlite3.Connection):
     )
 
 
+def _migration_gallery_page_anchors(conn: sqlite3.Connection):
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS gallery_meta (
+            key TEXT PRIMARY KEY,
+            value INTEGER NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO gallery_meta (key, value)
+        VALUES ('gallery_version', 0)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS gallery_page_anchors (
+            query_key TEXT NOT NULL,
+            page_size INTEGER NOT NULL,
+            page INTEGER NOT NULL,
+            sort_seq INTEGER NOT NULL,
+            image_id TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            gallery_version INTEGER NOT NULL,
+            PRIMARY KEY(query_key, page_size, page)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_gallery_page_anchors_lookup
+            ON gallery_page_anchors(query_key, page_size, gallery_version, page)
+        """
+    )
+
+
 SCHEMA_MIGRATIONS = (
     (1, "baseline_legacy_schema", _migration_baseline_legacy_schema),
     (2, "gallery_filter_options", _migration_gallery_filter_options),
     (3, "thumbnail_jobs", _migration_thumbnail_jobs),
     (4, "gallery_keyset_index", _migration_gallery_keyset_index),
     (5, "gallery_sort_filter_indexes", _migration_gallery_sort_filter_indexes),
+    (6, "gallery_page_anchors", _migration_gallery_page_anchors),
 )
 
 
@@ -2076,6 +2196,19 @@ def _build_gallery_filter_where(filters: dict[str, Any] | None) -> tuple[str, li
     return " WHERE " + " AND ".join(clauses), params
 
 
+def _gallery_query_key_from_components(
+    where_sql: str,
+    params: Sequence[Any],
+) -> str:
+    payload = {
+        "sort": "sort_seq_desc_id_desc",
+        "where": " ".join(where_sql.split()),
+        "params": ["" if value is None else str(value) for value in params],
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
 def _normalize_generate_job(job: dict[str, Any]) -> dict[str, Any]:
     now = utc_now()
     normalized: dict[str, Any] = {
@@ -2525,7 +2658,7 @@ def _insert_gallery_entries_on_conn(
         _add_gallery_filter_option_deltas(filter_option_deltas, entry, 1)
         _enqueue_thumbnail_job_on_conn(conn, str(entry.get("filename") or ""))
     _apply_gallery_filter_option_deltas_on_conn(conn, filter_option_deltas)
-    _invalidate_gallery_query_caches()
+    _invalidate_gallery_query_caches_on_conn(conn)
 
 
 def load_settings() -> dict:
@@ -3607,6 +3740,266 @@ def _get_gallery_rows_on_conn(
     return conn.execute(sql, query_params).fetchall()
 
 
+def _get_gallery_page_rows_by_offset_on_conn(
+    conn: sqlite3.Connection,
+    components: _GalleryQueryComponents,
+    *,
+    page: int,
+    limit: int,
+) -> list[sqlite3.Row]:
+    offset = (page - 1) * components.page_size
+    return _get_gallery_rows_on_conn(
+        conn,
+        components.where_sql,
+        components.params,
+        limit=limit,
+        offset=offset,
+    )
+
+
+def _get_gallery_anchor_for_page_on_conn(
+    conn: sqlite3.Connection,
+    components: _GalleryQueryComponents,
+    *,
+    gallery_version: int,
+    page: int,
+) -> sqlite3.Row | None:
+    return conn.execute(
+        """
+        SELECT page, sort_seq, image_id
+        FROM gallery_page_anchors
+        WHERE query_key = ?
+          AND page_size = ?
+          AND gallery_version = ?
+          AND page <= ?
+        ORDER BY page DESC
+        LIMIT 1
+        """,
+        (components.query_key, components.page_size, gallery_version, page),
+    ).fetchone()
+
+
+def _store_gallery_page_anchor_best_effort(
+    components: _GalleryQueryComponents,
+    *,
+    gallery_version: int,
+    page: int,
+    row: sqlite3.Row,
+):
+    if page < 1:
+        return
+    conn = _open_connection(timeout=0.0, busy_timeout_ms=0)
+    try:
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+        except sqlite3.OperationalError as e:
+            message = str(e).lower()
+            if "locked" in message or "busy" in message:
+                return
+            raise
+        current_version = _get_gallery_version_on_conn(conn)
+        if current_version != gallery_version:
+            conn.commit()
+            return
+        now = utc_now()
+        conn.execute(
+            """
+            INSERT INTO gallery_page_anchors (
+                query_key,
+                page_size,
+                page,
+                sort_seq,
+                image_id,
+                created_at,
+                updated_at,
+                gallery_version
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(query_key, page_size, page) DO UPDATE SET
+                sort_seq = excluded.sort_seq,
+                image_id = excluded.image_id,
+                updated_at = excluded.updated_at,
+                gallery_version = excluded.gallery_version
+            """,
+            (
+                components.query_key,
+                components.page_size,
+                page,
+                int(row["sort_seq"] or 0),
+                str(row["id"]),
+                now,
+                now,
+                gallery_version,
+            ),
+        )
+        stale_rows = conn.execute(
+            """
+            SELECT page
+            FROM gallery_page_anchors
+            WHERE query_key = ?
+              AND page_size = ?
+              AND gallery_version = ?
+            ORDER BY updated_at DESC, page DESC
+            LIMIT -1 OFFSET ?
+            """,
+            (
+                components.query_key,
+                components.page_size,
+                gallery_version,
+                GALLERY_PAGE_ANCHOR_MAX_PER_QUERY,
+            ),
+        ).fetchall()
+        stale_pages = [int(stale["page"]) for stale in stale_rows]
+        if stale_pages:
+            placeholders = ", ".join("?" for _ in stale_pages)
+            conn.execute(
+                f"""
+                DELETE FROM gallery_page_anchors
+                WHERE query_key = ?
+                  AND page_size = ?
+                  AND gallery_version = ?
+                  AND page IN ({placeholders})
+                """,
+                (
+                    components.query_key,
+                    components.page_size,
+                    gallery_version,
+                    *stale_pages,
+                ),
+            )
+        conn.commit()
+    except sqlite3.Error as e:
+        if conn.in_transaction:
+            conn.rollback()
+        logger.debug("Failed to store gallery page anchor: %s", e)
+    finally:
+        conn.close()
+
+
+def _get_gallery_rows_after_anchor_on_conn(
+    conn: sqlite3.Connection,
+    components: _GalleryQueryComponents,
+    *,
+    sort_seq: int,
+    image_id: str,
+    limit: int,
+) -> list[sqlite3.Row]:
+    cursor_where = _combine_gallery_where(
+        components.where_sql,
+        "(sort_seq < ? OR (sort_seq = ? AND id < ?))",
+    )
+    return conn.execute(
+        f"""
+        SELECT {", ".join(GALLERY_COLUMNS)}
+        FROM gallery_entries
+        {cursor_where}
+        ORDER BY sort_seq DESC, id DESC
+        LIMIT ?
+        """,
+        (*components.params, sort_seq, sort_seq, image_id, limit),
+    ).fetchall()
+
+
+def _get_gallery_page_rows_by_anchor_on_conn(
+    conn: sqlite3.Connection,
+    components: _GalleryQueryComponents,
+    *,
+    page: int,
+    limit: int,
+    timings_ms: dict[str, float],
+) -> list[sqlite3.Row]:
+    anchor_started_at = time.perf_counter()
+    gallery_version = _get_gallery_version_on_conn(conn)
+    anchor = _get_gallery_anchor_for_page_on_conn(
+        conn,
+        components,
+        gallery_version=gallery_version,
+        page=page,
+    )
+    interval = max(1, int(GALLERY_PAGE_ANCHOR_INTERVAL_PAGES))
+    anchored_by_offset = False
+    anchor_gap = page - int(anchor["page"]) if anchor is not None else interval + 1
+    if anchor is None or anchor_gap > interval:
+        anchor_page = max(1, ((page - 1) // interval) * interval)
+        if anchor_page >= page:
+            anchor_page = max(1, page - 1)
+        anchor_rows = _get_gallery_page_rows_by_offset_on_conn(
+            conn,
+            components,
+            page=anchor_page,
+            limit=1,
+        )
+        if not anchor_rows:
+            timings_ms["anchor_ms"] = round(
+                (time.perf_counter() - anchor_started_at) * 1000,
+                2,
+            )
+            timings_ms["anchor_scan_rows"] = 0.0
+            return []
+        _store_gallery_page_anchor_best_effort(
+            components,
+            gallery_version=gallery_version,
+            page=anchor_page,
+            row=anchor_rows[0],
+        )
+        anchor_page = int(anchor_page)
+        anchor_sort_seq = int(anchor_rows[0]["sort_seq"] or 0)
+        anchor_id = str(anchor_rows[0]["id"])
+        anchored_by_offset = True
+    else:
+        anchor_page = int(anchor["page"])
+        anchor_sort_seq = int(anchor["sort_seq"] or 0)
+        anchor_id = str(anchor["image_id"])
+
+    page_delta = max(0, page - anchor_page)
+    if page_delta == 0:
+        anchor_row = conn.execute(
+            f"""
+            SELECT {", ".join(GALLERY_COLUMNS)}
+            FROM gallery_entries
+            {_combine_gallery_where(components.where_sql, "sort_seq = ? AND id = ?")}
+            LIMIT 1
+            """,
+            (*components.params, anchor_sort_seq, anchor_id),
+        ).fetchone()
+        scanned_rows = ([anchor_row] if anchor_row else []) + _get_gallery_rows_after_anchor_on_conn(
+            conn,
+            components,
+            sort_seq=anchor_sort_seq,
+            image_id=anchor_id,
+            limit=max(0, limit - (1 if anchor_row else 0)),
+        )
+        result_rows = scanned_rows[:limit]
+    else:
+        rows_to_skip = page_delta * components.page_size - 1
+        scan_limit = rows_to_skip + limit
+        scanned_rows = _get_gallery_rows_after_anchor_on_conn(
+            conn,
+            components,
+            sort_seq=anchor_sort_seq,
+            image_id=anchor_id,
+            limit=scan_limit,
+        )
+        result_rows = scanned_rows[rows_to_skip : rows_to_skip + limit]
+
+    if result_rows:
+        _store_gallery_page_anchor_best_effort(
+            components,
+            gallery_version=gallery_version,
+            page=page,
+            row=result_rows[0],
+        )
+
+    timings_ms["anchor_ms"] = round(
+        (time.perf_counter() - anchor_started_at) * 1000,
+        2,
+    )
+    timings_ms["anchor_scan_rows"] = float(len(scanned_rows))
+    if anchored_by_offset:
+        timings_ms["anchor_seeded_by_offset"] = 1.0
+    return result_rows
+
+
 def _get_gallery_row_batch_after_cursor_on_conn(
     conn: sqlite3.Connection,
     where_sql: str,
@@ -3896,7 +4289,7 @@ def update_gallery_entry_hash(filename: str, sha256: str, byte_size: int) -> Non
                     """,
                     (sha256, byte_size, filename),
                 )
-                _invalidate_gallery_query_caches()
+                _invalidate_gallery_total_bytes_cache()
     except sqlite3.Error as e:
         logger.warning("Failed to persist sha256 for %s: %s", filename, e)
 
@@ -3963,9 +4356,11 @@ def _normalize_gallery_page_components(
         decode_gallery_cursor(normalized_cursor) if normalized_cursor else None
     )
     where_sql, params = _build_gallery_filter_where(filters)
+    query_key = _gallery_query_key_from_components(where_sql, params)
     return _GalleryQueryComponents(
         where_sql=where_sql,
         params=params,
+        query_key=query_key,
         requested_page=requested_page,
         page_size=normalized_page_size,
         include_counts=include_counts,
@@ -4002,13 +4397,24 @@ def _get_gallery_page_rows_on_conn(
     rows_started_at = time.perf_counter()
     if components.decoded_cursor is None:
         offset = (effective_page - 1) * components.page_size
-        rows = _get_gallery_rows_on_conn(
-            conn,
-            components.where_sql,
-            components.params,
-            limit=components.page_size + 1,
-            offset=offset,
-        )
+        if (
+            effective_page > 1
+            and offset > GALLERY_PAGE_ANCHOR_SMALL_OFFSET_THRESHOLD
+        ):
+            rows = _get_gallery_page_rows_by_anchor_on_conn(
+                conn,
+                components,
+                page=effective_page,
+                limit=components.page_size + 1,
+                timings_ms=timings_ms,
+            )
+        else:
+            rows = _get_gallery_page_rows_by_offset_on_conn(
+                conn,
+                components,
+                page=effective_page,
+                limit=components.page_size + 1,
+            )
         page_has_sentinel = len(rows) > components.page_size
         has_next = page_has_sentinel
         if has_next:
@@ -4349,7 +4755,10 @@ def update_gallery_entry(image_id: str, updates: dict[str, Any]) -> GalleryEntry
                     f"UPDATE gallery_entries SET {assignments} WHERE id = ?",
                     (*allowed_updates.values(), image_id),
                 )
-                _invalidate_gallery_query_caches()
+                if allowed_updates.keys() & GALLERY_PAGE_ANCHOR_INVALIDATING_UPDATE_FIELDS:
+                    _invalidate_gallery_query_caches_on_conn(conn)
+                elif "bytes" in allowed_updates:
+                    _invalidate_gallery_total_bytes_cache()
                 row = conn.execute(
                     f"""
                     SELECT {", ".join(GALLERY_COLUMNS)}
@@ -4398,8 +4807,36 @@ def update_gallery_entries_favorite(image_ids: list[str], favorite: bool) -> int
                     f"UPDATE gallery_entries SET favorite = ? WHERE id IN ({update_placeholders})",
                     (normalized_favorite, *chunk),
                 )
-            _invalidate_gallery_query_caches()
+            _invalidate_gallery_query_caches_on_conn(conn)
             return len(found_ids)
+
+
+def _update_gallery_entries_favorite_by_where_on_conn(
+    conn: sqlite3.Connection,
+    where_sql: str,
+    params: Sequence[Any],
+    normalized_favorite: int,
+) -> tuple[int, int]:
+    count_row = conn.execute(
+        f"SELECT COUNT(*) FROM gallery_entries{where_sql}",
+        tuple(params),
+    ).fetchone()
+    matched_count = int(count_row[0] or 0) if count_row else 0
+    if matched_count <= 0:
+        return 0, 0
+
+    update_where_sql = _combine_gallery_where(where_sql, "favorite != ?")
+    conn.execute(
+        f"""
+        UPDATE gallery_entries
+        SET favorite = ?
+        {update_where_sql}
+        """,
+        (normalized_favorite, *params, normalized_favorite),
+    )
+    row = conn.execute("SELECT changes()").fetchone()
+    updated_count = int(row[0] or 0) if row else 0
+    return matched_count, updated_count
 
 
 def update_gallery_entries_favorite_by_filters(
@@ -4411,43 +4848,19 @@ def update_gallery_entries_favorite_by_filters(
     _ensure_database()
     normalized_favorite = _normalize_gallery_favorite(favorite)
     where_sql, params = _build_gallery_filter_where(filters)
-    total_updated = 0
-    last_sort_seq: int | None = None
-    last_id: str | None = None
-    normalized_batch_size = max(1, int(batch_size or 1))
 
     with _connect() as conn:
         with _transaction(conn):
-            while True:
-                rows = _get_gallery_row_batch_after_cursor_on_conn(
-                    conn,
-                    where_sql,
-                    params,
-                    last_sort_seq=last_sort_seq,
-                    last_id=last_id,
-                    limit=normalized_batch_size,
-                    columns=("id", "sort_seq"),
-                )
-                if not rows:
-                    break
+            matched_count, updated_count = _update_gallery_entries_favorite_by_where_on_conn(
+                conn,
+                where_sql,
+                params,
+                normalized_favorite,
+            )
+            if updated_count:
+                _invalidate_gallery_query_caches_on_conn(conn)
 
-                ids = [str(row["id"]) for row in rows if row["id"]]
-                conn.executemany(
-                    "UPDATE gallery_entries SET favorite = ? WHERE id = ?",
-                    [(normalized_favorite, image_id) for image_id in ids],
-                )
-                total_updated += len(ids)
-
-                if len(rows) < normalized_batch_size:
-                    break
-                last_row = rows[-1]
-                last_sort_seq = int(last_row["sort_seq"] or 0)
-                last_id = str(last_row["id"])
-
-            if total_updated:
-                _invalidate_gallery_query_caches()
-
-    return total_updated
+    return matched_count
 
 
 def upsert_generate_job(job: dict[str, Any]) -> dict[str, Any]:
@@ -6122,7 +6535,7 @@ def sync_gallery_with_image_files() -> int:
                         conn,
                         filter_option_deltas,
                     )
-                    _invalidate_gallery_query_caches()
+                    _invalidate_gallery_query_caches_on_conn(conn)
                     _clear_verified_thumbnails()
                 return removed_count
 
@@ -6167,7 +6580,7 @@ def _delete_gallery_entries_by_ids(
     for row in rows:
         _add_gallery_filter_option_deltas(filter_option_deltas, row, -1)
     _apply_gallery_filter_option_deltas_on_conn(conn, filter_option_deltas)
-    _invalidate_gallery_query_caches()
+    _invalidate_gallery_query_caches_on_conn(conn)
 
     remaining_filenames: set[str] = set()
     if removed_filenames:
@@ -6238,7 +6651,7 @@ def _delete_gallery_entries_by_filters(
         return 0, set()
 
     _apply_gallery_filter_option_deltas_on_conn(conn, filter_option_deltas)
-    _invalidate_gallery_query_caches()
+    _invalidate_gallery_query_caches_on_conn(conn)
 
     remaining_filenames: set[str] = set()
     if removed_filenames:
@@ -6483,7 +6896,7 @@ def delete_all_gallery_images() -> tuple[int, int]:
                 conn.execute("DELETE FROM gallery_entries")
                 conn.execute("DELETE FROM gallery_filter_options")
                 _invalidate_filter_options_cache()
-                _invalidate_gallery_query_caches()
+                _invalidate_gallery_query_caches_on_conn(conn)
 
     filenames_to_delete = referenced_filenames | disk_filenames
     deleted_count = 0

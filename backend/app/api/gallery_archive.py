@@ -21,6 +21,8 @@ from ..schemas.models import GalleryEntry
 from .uploads import IMAGE_UPLOAD_CONTENT_TYPES, IMAGE_UPLOAD_EXTENSIONS
 
 GalleryZipProgressCallback = Callable[[dict[str, Any]], None]
+MAX_IMPORT_FILENAME_BYTES = 240
+IMPORT_FILENAME_DEDUPE_SUFFIX_BYTES = 16
 
 
 @dataclass(frozen=True)
@@ -482,7 +484,22 @@ def sanitize_import_filename(filename: str, fallback_ext: str = ".png") -> str:
         char if char.isalnum() or char in {"-", "_", "."} else "_"
         for char in stem
     ).strip("._")
+    max_stem_bytes = max(
+        1,
+        MAX_IMPORT_FILENAME_BYTES
+        - len(suffix.encode("utf-8"))
+        - IMPORT_FILENAME_DEDUPE_SUFFIX_BYTES,
+    )
+    safe_stem = _truncate_filename_stem(safe_stem or uuid.uuid4().hex, max_stem_bytes)
     return f"{safe_stem or uuid.uuid4().hex}{suffix}"
+
+
+def _truncate_filename_stem(stem: str, max_bytes: int) -> str:
+    candidate = str(stem or "")
+    encoded = candidate.encode("utf-8")
+    if len(encoded) > max_bytes:
+        candidate = encoded[:max_bytes].decode("utf-8", "ignore")
+    return candidate.strip("._")
 
 
 def is_safe_zip_member_name(filename: str) -> bool:

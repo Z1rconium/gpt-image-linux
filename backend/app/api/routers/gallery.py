@@ -1897,6 +1897,8 @@ async def get_gallery_handler(
     metrics.observe_ms("gallery.request", elapsed_ms)
     metrics.observe_ms("gallery.db_query", gallery_page.query_elapsed_ms)
     for timing_name, timing_ms in gallery_page.timings_ms.items():
+        if not timing_name.endswith("_ms"):
+            continue
         metrics.observe_ms(f"gallery.{timing_name.removesuffix('_ms')}", timing_ms)
     if elapsed_ms >= config.SLOW_GALLERY_QUERY_MS:
         metrics.increment("gallery.slow_queries")

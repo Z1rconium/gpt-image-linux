@@ -7,6 +7,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, UploadFile
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
+from ..edit_limits import MAX_EDIT_SOURCE_IMAGES
 from ..gallery_archive import max_upload_bytes
 from ..jobs import EditImageSource, build_edit_request_from_form, queue_edit_job
 from ..uploads import (
@@ -25,7 +26,6 @@ router = APIRouter()
 
 EDIT_SOURCE_SNIFF_BYTES = 512
 EDIT_SOURCE_CHUNK_BYTES = 1024 * 1024
-MAX_EDIT_SOURCE_IMAGES = 16
 
 
 def edit_request_from_form(

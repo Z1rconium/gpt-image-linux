@@ -20,7 +20,12 @@ from fastapi.testclient import TestClient
 
 from backend.app import main as backend_main
 from backend.app.api import app_state
+from backend.app.api import body_limit
 from backend.app.api import jobs
+from backend.app.api.edit_limits import (
+    EDIT_MULTIPART_METADATA_OVERHEAD_BYTES,
+    MAX_EDIT_SOURCE_IMAGES,
+)
 from backend.app.api.routers import access as access_router
 from backend.app.api.routers import gallery as gallery_router
 from backend.app.api.routers import settings as settings_router
@@ -1093,6 +1098,16 @@ def test_json_body_limit_rejects_oversized_json(client):
 
     assert resp.status_code == 413
     assert resp.json()["detail"] == "Request body too large"
+
+
+def test_edits_body_limit_matches_source_image_count(client):
+    config.MAX_FILE_SIZE_MB = 2
+    config.MAX_ACTIVE_GENERATE_JOBS = 20
+
+    assert body_limit._max_body_for_path("/api/edits", "multipart/form-data") == (
+        config.MAX_FILE_SIZE_MB * MAX_EDIT_SOURCE_IMAGES * 1024 * 1024
+        + EDIT_MULTIPART_METADATA_OVERHEAD_BYTES
+    )
 
 
 def test_request_models_forbid_extra_fields_and_require_prompt(client):
@@ -3675,7 +3690,15 @@ def test_schema_migrations_are_recorded_and_idempotent(tmp_path):
         versions = conn.execute(
             "SELECT version, name FROM schema_migrations ORDER BY version"
         ).fetchall()
-    assert [row["version"] for row in versions] == [1, 2, 3, 4, 5]
+        gallery_version = conn.execute(
+            "SELECT value FROM gallery_meta WHERE key = 'gallery_version'"
+        ).fetchone()
+        anchor_table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE name = 'gallery_page_anchors'"
+        ).fetchone()
+    assert [row["version"] for row in versions] == [1, 2, 3, 4, 5, 6]
+    assert gallery_version["value"] == 0
+    assert anchor_table is not None
 
     storage.close_database_connections()
     storage._db_initialized = False
@@ -3689,7 +3712,9 @@ def test_schema_migrations_are_recorded_and_idempotent(tmp_path):
     ]
 
 
-def test_gallery_image_download_and_zip(client):
+def test_gallery_image_download_and_zip(client, monkeypatch):
+    original_generate_thumbnail = storage.generate_thumbnail_for_image
+    monkeypatch.setattr(storage, "generate_thumbnail_for_image", lambda filename: None)
     entry = _fake_gallery_entry("gallery-zip", "zip me", "1024x1024", "gallery-zip.png")
     assert entry.bytes == len(PNG_BYTES)
     assert entry.thumbnail_filename is None
@@ -3724,6 +3749,7 @@ def test_gallery_image_download_and_zip(client):
     assert thumb.headers["cache-control"] == "no-cache"
     assert storage.get_gallery_entry("gallery-zip").thumbnail_filename is None
 
+    monkeypatch.setattr(storage, "generate_thumbnail_for_image", original_generate_thumbnail)
     assert storage.generate_thumbnail_for_image("gallery-zip.png")
     thumb = client.get("/api/thumb/gallery-zip.png")
     assert thumb.status_code == 200
@@ -3838,6 +3864,50 @@ def test_gallery_page_overflow_clamps_before_fetching_rows(client):
     assert data["has_prev"] is True
     assert data["has_next"] is False
     assert [image["id"] for image in data["images"]] == ["overflow-0"]
+
+
+def test_gallery_deep_page_uses_persisted_anchor(client, monkeypatch):
+    monkeypatch.setattr(storage, "GALLERY_PAGE_ANCHOR_SMALL_OFFSET_THRESHOLD", 0)
+    monkeypatch.setattr(storage, "GALLERY_PAGE_ANCHOR_INTERVAL_PAGES", 2)
+    for index in range(12):
+        _fake_gallery_entry(
+            f"anchor-{index}",
+            f"anchor {index}",
+            "1024x1024",
+            f"anchor-{index}.png",
+        )
+
+    first = storage.get_gallery_page(
+        page=4,
+        page_size=2,
+        include_filter_options=False,
+    )
+    assert [image.id for image in first.images] == ["anchor-5", "anchor-4"]
+    assert first.timings_ms["anchor_seeded_by_offset"] == 1.0
+
+    with storage._connect() as conn:
+        anchors = conn.execute(
+            "SELECT page FROM gallery_page_anchors ORDER BY page"
+        ).fetchall()
+    assert [row["page"] for row in anchors] == [2, 4]
+
+    storage.update_gallery_entry(
+        "anchor-0",
+        {
+            "duration": "1.23s",
+            "completed_at": "2026-01-01T00:00:00+00:00",
+            "n": 2,
+        },
+    )
+
+    second = storage.get_gallery_page(
+        page=4,
+        page_size=2,
+        include_filter_options=False,
+    )
+    assert [image.id for image in second.images] == ["anchor-5", "anchor-4"]
+    assert second.timings_ms.get("anchor_seeded_by_offset", 0.0) == 0.0
+    assert second.timings_ms["anchor_scan_rows"] <= 3
 
 
 def test_gallery_first_page_without_counts_preserves_the_prefetched_has_next_sentinel(
@@ -4777,6 +4847,35 @@ def test_gallery_batch_selection_token_avoids_full_id_materialization(client, mo
     monkeypatch.setattr(storage, "get_gallery_ids", fail_materialized_ids)
     monkeypatch.setattr(storage, "get_gallery_entries_by_ids", fail_materialized_ids)
 
+    original_connect = storage._connect
+    original_transaction = storage._transaction
+
+    class NoExecutemanyForFavoriteConnection:
+        def __init__(self, conn: sqlite3.Connection):
+            self._conn = conn
+
+        def __getattr__(self, name: str):
+            return getattr(self._conn, name)
+
+        def executemany(self, sql: str, params):
+            if "UPDATE gallery_entries SET favorite" in str(sql):
+                raise AssertionError(
+                    "selection-token favorite should use set-based UPDATE"
+                )
+            return self._conn.executemany(sql, params)
+
+    @contextmanager
+    def no_favorite_executemany_connect():
+        with original_connect() as conn:
+            yield NoExecutemanyForFavoriteConnection(conn)
+
+    monkeypatch.setattr(storage, "_connect", no_favorite_executemany_connect)
+    monkeypatch.setattr(
+        storage,
+        "_transaction",
+        lambda conn: original_transaction(conn._conn),
+    )
+
     favorite = client.patch(
         "/api/gallery/batch/favorite",
         json={"selection_token": token, "favorite": True},
@@ -4787,6 +4886,14 @@ def test_gallery_batch_selection_token_avoids_full_id_materialization(client, mo
     assert storage.get_gallery_entry("token-stream-1").favorite is True
     assert storage.get_gallery_entry("token-stream-2").favorite is False
     assert storage.get_gallery_entry("token-stream-3").favorite is True
+
+    favorite_again = client.patch(
+        "/api/gallery/batch/favorite",
+        json={"selection_token": token, "favorite": True},
+    )
+    assert favorite_again.status_code == 200
+    assert favorite_again.json()["requested_count"] == 2
+    assert favorite_again.json()["updated_count"] == 2
 
     archive = client.post("/api/gallery/batch/download", json={"selection_token": token})
     assert archive.status_code == 200
@@ -4871,6 +4978,26 @@ def test_import_archive(client):
     assert imported.bytes == len(PNG_BYTES)
     assert imported.thumbnail_filename is None
     assert imported.thumbnail_url == "/api/thumb/import-1.png"
+
+
+def test_import_archive_truncates_long_image_filename(client):
+    long_stem = "x" * 320
+    long_name = f"images/{long_stem}.png"
+
+    resp = _post_import_archive(
+        client,
+        _import_archive_bytes(image_name=long_name),
+    )
+
+    assert resp.status_code == 200
+    imported = storage.get_gallery_entry("import-1")
+    assert imported is not None
+    assert imported.filename.endswith(".png")
+    assert len(imported.filename.encode("utf-8")) <= 240
+    assert len(Path(imported.filename).stem) < len(long_stem)
+    path = storage.safe_image_path(imported.filename)
+    assert path is not None
+    assert path.exists()
 
 
 def test_import_archive_async_job_reports_progress_and_terminal_sse(client):
@@ -4991,6 +5118,43 @@ def test_thumbnail_endpoint_enqueues_missing_thumbnail_job(client, monkeypatch):
 
     resp = client.get("/api/thumb/lazy-thumb.png")
     assert resp.status_code == 200
+
+
+def test_thumbnail_endpoint_requeues_running_job(client, monkeypatch):
+    monkeypatch.setattr(gallery_router, "kick_thumbnail_dispatcher", lambda: None)
+    _fake_gallery_entry(
+        "running-thumb",
+        "running",
+        "1024x1024",
+        "running-thumb.png",
+    )
+    owner = "thumbnail-running-worker"
+    job = storage.claim_next_thumbnail_job(
+        owner=owner,
+        lease_expires_at="2999-01-01T00:10:00+00:00",
+        now="2999-01-01T00:00:00+00:00",
+    )
+    assert job
+    assert job["filename"] == "running-thumb.png"
+
+    resp = client.get("/api/thumb/running-thumb.png")
+    assert resp.status_code == 404
+
+    with storage._connect() as conn:
+        row = conn.execute(
+            """
+            SELECT status, attempts, lease_owner, lease_expires_at
+            FROM thumbnail_jobs
+            WHERE filename = ?
+            """,
+            ("running-thumb.png",),
+        ).fetchone()
+    assert dict(row) == {
+        "status": "queued",
+        "attempts": 1,
+        "lease_owner": None,
+        "lease_expires_at": None,
+    }
 
 
 def test_thumbnail_job_queue_claims_and_completes(tmp_path):
