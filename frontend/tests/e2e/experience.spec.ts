@@ -1038,6 +1038,19 @@ test('generation, gallery edit source, batch favorite, and lightbox flows work w
   await filterRequest;
   await expect(page.getByRole('img', { name: 'First gallery image' })).toBeVisible();
 
+  const firstCard = page.locator('.gallery-card').filter({ hasText: 'First gallery image' });
+  const favoriteButton = firstCard.locator('button').nth(3);
+  const favoriteRequest = page.waitForRequest((request) => {
+    const url = new URL(request.url());
+    if (request.method() !== 'PATCH' || url.pathname !== '/api/gallery/img-1/favorite') return false;
+    const body = JSON.parse(request.postData() || '{}');
+    return body.favorite === true;
+  });
+  await favoriteButton.click();
+  await favoriteRequest;
+  await expect(favoriteButton).toHaveAttribute('aria-pressed', 'true');
+  await expect(favoriteButton).toHaveCSS('color', 'rgb(217, 119, 6)');
+
   await page.getByRole('button', { name: 'Select' }).click();
   await page.getByRole('button', { name: 'Select page' }).click();
   await page.getByRole('button', { name: 'Favorite selected', exact: true }).click();

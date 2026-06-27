@@ -173,11 +173,24 @@ html.dark input::placeholder {
   transition:
     background-color 0.15s,
     border-color 0.15s,
-    color 0.15s;
+    color 0.15s,
+    box-shadow 0.15s;
 }
 
 html.dark .gallery-icon-action {
   background: rgba(9, 9, 11, 0.28);
+}
+
+.gallery-icon-action[aria-pressed='true'] {
+  color: #d97706;
+  background: rgba(245, 158, 11, 0.14);
+  box-shadow: inset 0 0 0 1px rgba(245, 158, 11, 0.16);
+}
+
+html.dark .gallery-icon-action[aria-pressed='true'] {
+  color: #fbbf24;
+  background: rgba(245, 158, 11, 0.16);
+  box-shadow: inset 0 0 0 1px rgba(245, 158, 11, 0.22);
 }
 
 .gallery-icon-action svg {
@@ -188,6 +201,10 @@ html.dark .gallery-icon-action {
   stroke-width: 1.8;
   stroke-linecap: round;
   stroke-linejoin: round;
+}
+
+.gallery-icon-action[aria-pressed='true'] svg {
+  fill: currentColor;
 }
 
 @media (hover: hover) and (pointer: fine) {
