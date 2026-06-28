@@ -145,6 +145,7 @@
   <div class="mobile-drawer-root fixed inset-0 z-50">
     <button class="drawer-backdrop absolute inset-0" type="button" tabindex="-1" aria-label={$t.jobs.closeLabel} on:click={onClose}></button>
     <aside
+      id="jobs-drawer"
       class="mobile-drawer-panel fade-in absolute right-0 top-0 flex h-full w-full max-w-lg flex-col border-l border-stone-200 bg-white shadow-2xl shadow-stone-300/50 dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-none"
       aria-labelledby="jobs-drawer-title"
       use:dialog={{ open, onClose }}
@@ -210,7 +211,13 @@
           <div class="space-y-3">
             {#each jobs as job (job.job_id)}
               <div class="flex gap-3 rounded-xl border border-stone-200 bg-stone-50/80 p-4 dark:border-zinc-800 dark:bg-zinc-950/45">
-                <input type="checkbox" class="control-focus mt-1 accent-emerald-500" checked={selectedIds.has(job.job_id)} on:change={() => onToggle(job.job_id)} />
+                <input
+                  type="checkbox"
+                  class="control-focus mt-1 accent-emerald-500"
+                  checked={selectedIds.has(job.job_id)}
+                  aria-label={`${$t.jobs.selectAll}: ${job.prompt || $t.common.untitledJob}`}
+                  on:change={() => onToggle(job.job_id)}
+                />
                 <div class="min-w-0 flex-1">
                   <div class="flex items-center justify-between gap-3">
                     <span class="rounded-md border border-stone-300 px-2 py-0.5 text-[11px] text-stone-500 dark:border-zinc-700 dark:text-zinc-400">{operationLabel(job.operation, $t.operations)}</span>

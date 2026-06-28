@@ -19,9 +19,35 @@
   import { dialog } from '$lib/actions/dialog';
   import { plainTextInput } from '$lib/actions/plainTextInput';
   import { swipeClose } from '$lib/actions/swipeClose';
+  import { confirmStore } from '$lib/stores/confirm';
   import { RESPONSE_FORMAT_OPTIONS, normalizeResponseFormat } from '$lib/utils/promptForm';
 
   const MASKED_API_KEY_VALUE = '********';
+
+  type SettingsDraft = {
+    activePresetId: string;
+    presetName: string;
+    apiUrl: string;
+    defaultModel: string;
+    defaultResponseFormat: ResponseFormatDefault;
+    apiKey: string;
+    apiPath: ApiPath;
+    upstreamSocks5Proxy: string;
+    webhookUrl: string;
+    promptOptimizerEnabled: boolean;
+    promptOptimizerApiUrl: string;
+    promptOptimizerModel: string;
+    promptOptimizerTimeoutSeconds: number;
+    promptOptimizerApiKey: string;
+    r2BackupEnabled: boolean;
+    r2EndpointUrl: string;
+    r2BucketName: string;
+    r2Region: string;
+    r2KeyPrefix: string;
+    r2SyncIntervalHours: number;
+    r2AccessKeyId: string;
+    r2SecretAccessKey: string;
+  };
 
   export let open = false;
   export let settings: SettingsResponse | null = null;
@@ -102,6 +128,7 @@
   let overallConfigItems: OverallConfigItem[] = [];
   let overallConfigDraft: Record<string, string | boolean | number> = {};
   let overallConfigClears: Record<string, boolean> = {};
+  let systemPromptInitialText = '';
 
   $: activePreset = settings?.presets.find((preset) => preset.id === settings.active_preset_id) || settings?.presets[0] || null;
   $: if (settings && activePreset) {
@@ -169,23 +196,54 @@
     {} as Record<string, OverallConfigItem[]>
   );
   $: overallConfigGroupNames = Object.keys(overallConfigGroups);
+  $: settingsDirty =
+    Boolean(settings && activePreset) &&
+    hasSettingsChanges({
+      activePresetId,
+      presetName,
+      apiUrl,
+      defaultModel,
+      defaultResponseFormat,
+      apiKey,
+      apiPath,
+      upstreamSocks5Proxy,
+      webhookUrl,
+      promptOptimizerEnabled,
+      promptOptimizerApiUrl,
+      promptOptimizerModel,
+      promptOptimizerTimeoutSeconds: promptOptimizerTimeoutValue(promptOptimizerTimeoutSeconds),
+      promptOptimizerApiKey,
+      r2BackupEnabled,
+      r2EndpointUrl,
+      r2BucketName,
+      r2Region,
+      r2KeyPrefix,
+      r2SyncIntervalHours: r2SyncIntervalHoursValue(r2SyncIntervalHours),
+      r2AccessKeyId,
+      r2SecretAccessKey
+    });
+  $: systemPromptDirty = systemPromptOpen && !systemPromptLoading && systemPromptText !== systemPromptInitialText;
+  $: overallConfigDirty = overallConfigItems.some((item) => {
+    if (overallConfigClears[item.name]) return item.has_override;
+    if (!hasOverallDraft(item.name)) return false;
+    return overallConfigDraft[item.name] !== item.value;
+  });
 
   function normalizePromptOptimizerTimeout() {
-    const parsed = Number.parseInt(String(promptOptimizerTimeoutSeconds), 10);
-    promptOptimizerTimeoutSeconds = Number.isFinite(parsed) && parsed > 0 ? parsed : 60;
+    promptOptimizerTimeoutSeconds = promptOptimizerTimeoutValue(promptOptimizerTimeoutSeconds);
   }
 
-  function promptOptimizerTimeoutValue() {
-    const parsed = Number.parseInt(String(promptOptimizerTimeoutSeconds), 10);
+  function promptOptimizerTimeoutValue(value: number | string = promptOptimizerTimeoutSeconds) {
+    const parsed = Number.parseInt(String(value), 10);
     return Number.isFinite(parsed) && parsed > 0 ? parsed : 60;
   }
 
   function normalizeR2SyncIntervalHours() {
-    r2SyncIntervalHours = r2SyncIntervalHoursValue();
+    r2SyncIntervalHours = r2SyncIntervalHoursValue(r2SyncIntervalHours);
   }
 
-  function r2SyncIntervalHoursValue() {
-    const parsed = Number(r2SyncIntervalHours);
+  function r2SyncIntervalHoursValue(value: number | string = r2SyncIntervalHours) {
+    const parsed = Number(value);
     return Number.isInteger(parsed) && parsed >= 0 ? parsed : 0;
   }
 
@@ -220,6 +278,69 @@
 
   function closePresetHealth() {
     onClearPresetHealth();
+  }
+
+  function hasSettingsChanges(draft: SettingsDraft) {
+    const proxyValue = draft.upstreamSocks5Proxy.trim();
+    const currentProxyMask = settings?.upstream_socks5_proxy_masked || '';
+    const webhookValue = draft.webhookUrl.trim();
+    const currentWebhookMask = settings?.webhook_url_masked || '';
+
+    return (
+      draft.activePresetId !== (settings?.active_preset_id || '') ||
+      draft.presetName !== (activePreset?.name || '') ||
+      draft.apiUrl !== (activePreset?.api_url || settings?.api_url || '') ||
+      draft.defaultModel !== (activePreset?.default_model || settings?.default_model || 'gpt-image-2') ||
+      draft.defaultResponseFormat !== normalizeResponseFormat(activePreset?.default_response_format ?? settings?.default_response_format, 'url') ||
+      draft.apiKey !==
+        (activePreset?.api_key_source === 'env' && activePreset.api_key_env_var
+          ? `\${${activePreset.api_key_env_var}}`
+          : activePreset?.has_api_key || settings?.has_api_key
+            ? MASKED_API_KEY_VALUE
+            : '') ||
+      draft.apiPath !== (activePreset?.api_path || settings?.api_path || '/v1/images/generations') ||
+      proxyValue !== currentProxyMask ||
+      webhookValue !== currentWebhookMask ||
+      draft.promptOptimizerEnabled !== Boolean(settings?.prompt_optimizer?.enabled) ||
+      draft.promptOptimizerApiUrl !== (settings?.prompt_optimizer?.api_url || '') ||
+      draft.promptOptimizerModel !== (settings?.prompt_optimizer?.model || 'gpt-4o-mini') ||
+      draft.promptOptimizerTimeoutSeconds !== (settings?.prompt_optimizer?.timeout_seconds || 60) ||
+      draft.promptOptimizerApiKey !==
+        (settings?.prompt_optimizer?.api_key_source === 'env' && settings.prompt_optimizer.api_key_env_var
+          ? `\${${settings.prompt_optimizer.api_key_env_var}}`
+          : settings?.prompt_optimizer?.has_api_key
+            ? MASKED_API_KEY_VALUE
+            : '') ||
+      draft.r2BackupEnabled !== Boolean(settings?.r2_backup?.enabled) ||
+      draft.r2EndpointUrl !== (settings?.r2_backup?.endpoint_url || '') ||
+      draft.r2BucketName !== (settings?.r2_backup?.bucket_name || '') ||
+      draft.r2Region !== (settings?.r2_backup?.region || 'auto') ||
+      draft.r2KeyPrefix !== (settings?.r2_backup?.key_prefix || 'gallery/') ||
+      draft.r2SyncIntervalHours !== (settings?.r2_backup?.sync_interval_hours ?? 0) ||
+      draft.r2AccessKeyId !==
+        (settings?.r2_backup?.access_key_id_source === 'env' && settings.r2_backup.access_key_id_env_var
+          ? `\${${settings.r2_backup.access_key_id_env_var}}`
+          : settings?.r2_backup?.has_access_key_id
+            ? MASKED_API_KEY_VALUE
+            : '') ||
+      draft.r2SecretAccessKey !==
+        (settings?.r2_backup?.secret_access_key_source === 'env' && settings.r2_backup.secret_access_key_env_var
+          ? `\${${settings.r2_backup.secret_access_key_env_var}}`
+          : settings?.r2_backup?.has_secret_access_key
+            ? MASKED_API_KEY_VALUE
+            : '')
+    );
+  }
+
+  async function confirmDiscardChanges() {
+    return confirmStore.confirm({
+      title: $t.confirm.unsavedChangesTitle,
+      message: $t.confirm.unsavedChangesMessage,
+      confirmLabel: $t.common.discard,
+      cancelLabel: $t.common.keepEditing,
+      closeLabel: $t.confirm.closeLabel,
+      variant: 'danger'
+    });
   }
 
   async function save() {
@@ -299,6 +420,7 @@
     try {
       const response = await onLoadPromptOptimizerSystemPrompt();
       systemPromptText = response.system_prompt;
+      systemPromptInitialText = response.system_prompt;
     } catch (error) {
       systemPromptError = error instanceof Error ? error.message : $t.messages.requestFailed;
     } finally {
@@ -306,8 +428,9 @@
     }
   }
 
-  function closeSystemPromptEditor() {
+  async function closeSystemPromptEditor() {
     if (systemPromptSaving) return;
+    if (systemPromptDirty && !(await confirmDiscardChanges())) return;
     systemPromptOpen = false;
     systemPromptError = '';
   }
@@ -323,6 +446,7 @@
     try {
       const response = await onSavePromptOptimizerSystemPrompt(nextSystemPrompt);
       systemPromptText = response.system_prompt;
+      systemPromptInitialText = response.system_prompt;
       systemPromptOpen = false;
     } catch (error) {
       systemPromptError = error instanceof Error ? error.message : $t.messages.requestFailed;
@@ -364,8 +488,9 @@
     }
   }
 
-  function closeOverallConfigModal() {
+  async function closeOverallConfigModal() {
     if (overallConfigSaving) return;
+    if (overallConfigDirty && !(await confirmDiscardChanges())) return;
     overallConfigOpen = false;
     overallConfigError = '';
     overallConfigDraft = {};
@@ -399,11 +524,26 @@
       overallConfigItems = response.items;
       overallConfigDraft = {};
       overallConfigClears = {};
+      overallConfigOpen = false;
     } catch (error) {
       overallConfigError = error instanceof Error ? error.message : $t.messages.requestFailed;
     } finally {
       overallConfigSaving = false;
     }
+  }
+
+  async function requestCloseDrawer() {
+    if (saving) return;
+    if (systemPromptOpen) {
+      await closeSystemPromptEditor();
+      return;
+    }
+    if (overallConfigOpen) {
+      await closeOverallConfigModal();
+      return;
+    }
+    if (settingsDirty && !(await confirmDiscardChanges())) return;
+    onClose();
   }
 
   function sourceLabel(source: OverallConfigItem['source']) {
@@ -415,19 +555,20 @@
 
 {#if open}
   <div class="mobile-drawer-root fixed inset-0 z-50">
-    <button class="drawer-backdrop absolute inset-0" type="button" tabindex="-1" aria-label={$t.settings.closeLabel} on:click={onClose}></button>
+    <button class="drawer-backdrop absolute inset-0" type="button" tabindex="-1" aria-label={$t.settings.closeLabel} on:click={requestCloseDrawer}></button>
     <aside
+      id="settings-drawer"
       class="mobile-drawer-panel fade-in absolute right-0 top-0 flex h-full w-full max-w-lg flex-col border-l border-zinc-800 bg-zinc-900 shadow-2xl"
       aria-labelledby="settings-drawer-title"
-      use:dialog={{ open, onClose }}
-      use:swipeClose={{ enabled: open, onClose }}
+      use:dialog={{ open, onClose: requestCloseDrawer }}
+      use:swipeClose={{ enabled: open, onClose: requestCloseDrawer }}
     >
       <div class="flex items-center justify-between border-b border-zinc-800 p-5">
         <div>
           <h2 id="settings-drawer-title" class="text-lg font-semibold text-zinc-100">{$t.settings.title}</h2>
           <p class="mt-1 text-xs text-zinc-500">{$t.settings.subtitle}</p>
         </div>
-        <button type="button" class="mobile-touch-target control-focus rounded-lg p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100" aria-label={$t.settings.closeLabel} on:click={onClose}>x</button>
+        <button type="button" class="mobile-touch-target control-focus rounded-lg p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100" aria-label={$t.settings.closeLabel} on:click={requestCloseDrawer}>x</button>
       </div>
 
       <div class="mobile-drawer-scroll min-h-0 flex-1 overflow-y-auto p-5">

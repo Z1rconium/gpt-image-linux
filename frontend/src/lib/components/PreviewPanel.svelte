@@ -88,7 +88,7 @@
 
   <div class={`mt-4 flex min-h-[360px] items-center justify-center overflow-hidden rounded-xl border border-stone-200 dark:border-zinc-800 ${selectedImageUrl ? 'bg-stone-100 dark:bg-zinc-950' : 'preview-empty'}`}>
     {#if loading}
-      <div class="flex max-w-sm flex-col items-center px-6 text-center">
+      <div class="flex max-w-sm flex-col items-center px-6 text-center" role="status" aria-live="polite" aria-atomic="true">
         <span class="spinner"></span>
         <p class="mt-4 text-sm font-semibold text-stone-900 dark:text-zinc-100">{stageLabel(job, $t.stages) || $t.preview.working}</p>
         <p class="mt-2 text-xs text-stone-500 dark:text-zinc-400">{statusLabel(job?.status, $t.statuses) || $t.preview.queued}</p>

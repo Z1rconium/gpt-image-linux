@@ -30,12 +30,17 @@ export function formatBytes(totalBytes: number) {
   return `${(totalBytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-let beijingTimeFormatter: Intl.DateTimeFormat | null = null;
+const dateTimeFormatters = new Map<string, Intl.DateTimeFormat>();
 
-function getBeijingTimeFormatter(): Intl.DateTimeFormat {
-  if (!beijingTimeFormatter) {
-    beijingTimeFormatter = new Intl.DateTimeFormat('zh-CN', {
-      timeZone: 'Asia/Shanghai',
+function getLocalDateTimeFormatter(): Intl.DateTimeFormat {
+  const locale = typeof navigator !== 'undefined' && navigator.language ? navigator.language : undefined;
+  const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+  const cacheKey = `${locale || 'default'}|${timeZone}`;
+  const existing = dateTimeFormatters.get(cacheKey);
+  if (existing) return existing;
+
+  const formatter = new Intl.DateTimeFormat(locale, {
+      timeZone,
       year: 'numeric',
       month: '2-digit',
       day: '2-digit',
@@ -44,20 +49,22 @@ function getBeijingTimeFormatter(): Intl.DateTimeFormat {
       second: '2-digit',
       hour12: false
     });
-  }
-  return beijingTimeFormatter;
+  dateTimeFormatters.set(cacheKey, formatter);
+  return formatter;
 }
 
-export function formatBeijingTime(value: string | null | undefined) {
+export function formatLocalTime(value: string | null | undefined) {
   if (!value) return '-';
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return '-';
 
-  const parts = getBeijingTimeFormatter().formatToParts(date);
+  const parts = getLocalDateTimeFormatter().formatToParts(date);
   const part = (type: Intl.DateTimeFormatPartTypes) => parts.find((item) => item.type === type)?.value || '';
 
   return `${part('year')}-${part('month')}-${part('day')} ${part('hour')}:${part('minute')}:${part('second')}`;
 }
+
+export const formatBeijingTime = formatLocalTime;
 
 type ImageSizeLike = {
   size?: string | null;

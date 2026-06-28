@@ -124,6 +124,10 @@
     commitPageInput();
   }
 
+  function handlePageInputBlur() {
+    commitPageInput();
+  }
+
   function handleSearchInput(event: Event) {
     const value = (event.currentTarget as HTMLInputElement).value;
     onFilter('prompt', value);
@@ -391,11 +395,18 @@
       <div class={`grid gap-4 sm:grid-cols-2 md:gap-5 lg:grid-cols-3 lg:gap-4 ${loading ? 'opacity-70' : ''}`}>
         {#each images as image, index (image.id)}
           <article class={`gallery-card overflow-hidden rounded-xl border ${isImageSelected(image) ? 'border-emerald-400 bg-emerald-500/10' : 'border-stone-200 bg-white/85 dark:border-zinc-800 dark:bg-zinc-950/45'}`}>
-            <button type="button" class="control-focus relative block aspect-square w-full bg-stone-100 dark:bg-zinc-950" aria-label={image.prompt} on:click={() => handleImageClick(image)}>
+            <button
+              type="button"
+              class="control-focus relative block aspect-square w-full bg-stone-100 dark:bg-zinc-950"
+              aria-label={image.prompt}
+              aria-pressed={selectionMode ? isImageSelected(image) : undefined}
+              on:click={() => handleImageClick(image)}
+            >
               {#if selectionMode}
                 <span class="absolute left-2 top-2 z-10 rounded-md bg-white/90 px-2 py-1 text-xs font-medium text-stone-800 dark:bg-zinc-950/80 dark:text-zinc-100">
                   {isImageSelected(image) ? '✓' : ''}
                 </span>
+                <span class="sr-only">{isImageSelected(image) ? $t.gallery.selectedCount(1) : $t.gallery.select}</span>
               {/if}
               <picture class="block h-full w-full">
                 <img
@@ -498,6 +509,7 @@
           class="control-focus h-9 w-16 rounded-lg border border-stone-200 bg-stone-50 px-2 text-center text-sm text-stone-900 focus:border-emerald-500 disabled:opacity-50 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-100"
           on:input={(event) => (pageInput = event.currentTarget.value)}
           on:keydown={handlePageInputKeydown}
+          on:blur={handlePageInputBlur}
         />
         <span>{$t.gallery.pageInputSuffix(totalPages)}</span>
       </label>

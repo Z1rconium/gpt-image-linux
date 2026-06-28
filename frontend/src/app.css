@@ -82,6 +82,32 @@ body {
     color 0.2s ease;
 }
 
+.skip-link {
+  position: fixed;
+  top: 0.75rem;
+  left: 1rem;
+  z-index: 120;
+  transform: translateY(-160%);
+  border-radius: 0.75rem;
+  border: 1px solid #10b981;
+  background: rgba(255, 255, 255, 0.96);
+  color: #065f46;
+  padding: 0.7rem 1rem;
+  font-size: 0.875rem;
+  font-weight: 700;
+  box-shadow: 0 18px 40px rgba(15, 23, 42, 0.18);
+  transition: transform 0.16s ease;
+}
+
+.skip-link:focus {
+  transform: translateY(0);
+}
+
+html.dark .skip-link {
+  background: rgba(9, 9, 11, 0.96);
+  color: #a7f3d0;
+}
+
 html.dark body {
   background:
     radial-gradient(circle at top, rgba(16, 185, 129, 0.1), transparent 32%),

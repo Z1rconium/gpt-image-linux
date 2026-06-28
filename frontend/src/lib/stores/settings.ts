@@ -116,11 +116,11 @@ function createSettingsStore() {
   async function saveSettings(body: SettingsInput, showToast: ShowToast) {
     if (!String(body.api_url || '').trim()) {
       showToast(get(t).messages.apiUrlRequired, 'error');
-      return;
+      return false;
     }
     if (body.api_key !== null && !String(body.api_key || '').trim()) {
       showToast(get(t).messages.apiKeyRequired, 'error');
-      return;
+      return false;
     }
 
     settingsActivityStore.setSaving(true);
@@ -139,6 +139,7 @@ function createSettingsStore() {
       settingsActivityStore.setR2Health(null);
       settingsActivityStore.clearPromptOptimizerHealth();
       showToast(get(t).messages.presetSaved);
+      return true;
     } finally {
       settingsActivityStore.setSaving(false);
     }

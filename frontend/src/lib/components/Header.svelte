@@ -7,6 +7,9 @@
   export let latestVersion = '';
   export let hasVersionUpdate = false;
   export let releaseUrl: string | null = null;
+  export let promptSnippetsOpen = false;
+  export let jobsOpen = false;
+  export let settingsOpen = false;
   export let onOpenPromptSnippets: () => void = () => {};
   export let onOpenJobs: () => void = () => {};
   export let onOpenSettings: () => void = () => {};
@@ -83,6 +86,8 @@
         class="mobile-touch-target control-focus relative inline-flex h-10 min-w-10 items-center justify-center rounded-lg px-2 text-stone-500 transition-colors hover:bg-stone-100 hover:text-stone-950 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
         title={$t.header.promptSnippets}
         aria-label={$t.header.promptSnippets}
+        aria-controls="prompt-snippets-drawer"
+        aria-expanded={promptSnippetsOpen}
         on:click={() => onOpenPromptSnippets()}
       >
         <span class="text-sm font-semibold leading-none">{$t.header.prompts}</span>
@@ -92,6 +97,8 @@
         class="mobile-touch-target control-focus relative inline-flex h-10 min-w-10 items-center justify-center rounded-lg px-2 text-stone-500 transition-colors hover:bg-stone-100 hover:text-stone-950 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
         title={$t.header.jobHistory}
         aria-label={$t.header.jobHistory}
+        aria-controls="jobs-drawer"
+        aria-expanded={jobsOpen}
         on:click={() => onOpenJobs()}
       >
         <span class="text-sm font-semibold leading-none">{$t.header.jobs}</span>
@@ -106,6 +113,8 @@
         class="mobile-touch-target control-focus inline-flex h-10 min-w-10 items-center justify-center rounded-lg px-2 text-stone-500 transition-colors hover:bg-stone-100 hover:text-stone-950 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
         title={$t.common.settings}
         aria-label={$t.common.settings}
+        aria-controls="settings-drawer"
+        aria-expanded={settingsOpen}
         on:click={() => onOpenSettings()}
       >
         <span class="text-sm font-semibold leading-none">{$t.header.settingsShort}</span>

@@ -449,7 +449,9 @@
   }
 
   function saveSettings(body: SettingsInput) {
-    void settingsStore.saveSettings(body, showToast).then(() => setUi('settingsOpen', false));
+    void settingsStore.saveSettings(body, showToast).then((saved) => {
+      if (saved) setUi('settingsOpen', false);
+    });
   }
 
   function createPreset() {
@@ -901,9 +903,6 @@
         if ($uiStore.editPreviewOpen) setUi('editPreviewOpen', false);
         else if ($lightboxStore.image) closeLightbox();
         else if ($uiStore.sizeDialogOpen) setUi('sizeDialogOpen', false);
-        else if ($uiStore.promptSnippetsOpen) closePromptSnippetsDrawer();
-        else if ($uiStore.jobsOpen) closeJobsDrawer();
-        else if ($uiStore.settingsOpen) setUi('settingsOpen', false);
         return;
       }
 
@@ -934,6 +933,8 @@
   <title>GPT Image Panel</title>
 </svelte:head>
 
+<a class="skip-link control-focus" href="#main-content">{$t.common.skipToMain}</a>
+
 <AccessGate visible={$accessStore.gateVisible} error={$accessStore.error} loading={$accessStore.loading} onUnlock={(key) => accessStore.unlockAccess(key, loadAuthenticatedData)} />
 <Header
   version={$versionStore.version}
@@ -941,6 +942,9 @@
   hasVersionUpdate={$versionStore.hasUpdate}
   releaseUrl={$versionStore.releaseUrl}
   {activeJobsCount}
+  promptSnippetsOpen={$uiStore.promptSnippetsOpen}
+  jobsOpen={$uiStore.jobsOpen}
+  settingsOpen={$uiStore.settingsOpen}
   onOpenPromptSnippets={openPromptSnippetsDrawer}
   onOpenJobs={openJobsDrawer}
   onOpenSettings={() => setUi('settingsOpen', true)}
@@ -1013,7 +1017,7 @@
   onRetryJob={retryJob}
 />
 
-<main class="mx-auto max-w-5xl space-y-6 px-4 py-6 pb-28 sm:px-6 sm:pb-32">
+<main id="main-content" tabindex="-1" class="mx-auto max-w-5xl space-y-6 px-4 py-6 pb-28 sm:px-6 sm:pb-32">
   <ToastHost toast={$toastStore} />
 
   <PromptForm
