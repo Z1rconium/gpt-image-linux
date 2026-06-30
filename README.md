@@ -249,30 +249,29 @@ Key backend routes:
 
 The public API surface is contract-tested; keep paths, methods, status codes, SSE event names, cookies, and response shapes stable unless a breaking change is intentional.
 
-## Modification Boundaries
+## Contributor Boundaries
 
 - Keep browser calls same-origin through `/api/*`; do not add direct frontend calls to upstream model APIs, R2, webhook targets, or arbitrary image URLs.
-- Keep route handlers in `backend/app/api/routers/`, DTOs in `backend/app/schemas/models.py`, repository/database behavior in `backend/app/repositories/`, and external integrations in `backend/app/integrations/`.
-- Keep frontend API types in sync with backend DTOs in `frontend/src/lib/api/types.ts`, and use the existing API client/stores for access, settings, jobs, gallery, prompt snippets, and version state.
-- Keep image byte validation, safe paths, archive limits, thumbnail generation, queue state, and SQLite coordination centralized in the existing storage/upload/archive helpers.
-- Keep SSRF-sensitive URL handling in validators/safe connectors/integration clients; SOCKS5 proxy mode is a deliberate trust boundary.
-- Keep secrets out of frontend-visible payloads except masked values and env-ref metadata.
+- Keep ownership boundaries intact:
+  - routers/request orchestration in `backend/app/api/routers/`
+  - DTOs in `backend/app/schemas/models.py`
+  - persistence and SQLite coordination in `backend/app/repositories/`
+  - upstream integrations in `backend/app/integrations/`
+  - mirrored frontend API types in `frontend/src/lib/api/types.ts`
+- Keep public contracts stable unless a breaking change is intentional:
+  - API paths, methods, status codes, cookies, SSE event names, and response shapes
+  - generation/edit queue lifecycle, cancellation semantics, and multi-worker SQLite coordination
+- Keep validation and safety centralized:
+  - image byte validation, safe paths, thumbnail/archive helpers
+  - SSRF-sensitive URL handling in validators, safe connector, and integration clients
+  - secrets exposed to the frontend only as masked values or env-ref metadata
+- Preserve current runtime constraints:
+  - edits accept up to 16 raster source images
+  - gallery ZIP import/export keeps existing safety limits
+  - SSE uses SQLite slot leases with global/per-IP caps and TTL
+  - R2 sync is backup-only; local SQLite rows and local image files remain the source of truth
 - When changing environment variables, update `backend/app/core/settings.py`, `backend/app/core/overall_config.py` when user-visible, `.env.example`, `docker-compose.yml` when configurable in Compose, and this README.
-
-## Runtime Notes
-
-- Images, thumbnails, SQLite files, imports/exports, and logs are runtime data; do not commit `images/`, `data/`, `frontend/build/`, `.svelte-kit/`, Playwright reports, test results, dependency folders, local DB files, or logs.
-- API keys, proxy URLs, webhook URLs, and R2 credentials are masked in API/UI responses.
-- Uploaded/imported/downloaded images are byte-validated and decoded server-side; SVG upload is rejected for edits.
-- Edit jobs accept multiple raster source images, with a current limit of 16 sources.
-- Upstream image URL downloads are HTTPS-only and SSRF-aware.
-- Generation/edit tasks share SQLite-backed queue/concurrency limits and work across multiple Granian workers.
-- SSE connections use SQLite slot leases with global/per-IP limits and max connection lifetime.
-- Gallery ZIP import/export uses safety limits from `.env.example`.
-- Gallery thumbnails are generated lazily; missing thumbnail requests can enqueue thumbnail work.
-- R2 endpoints are HTTPS-only, SSRF-checked, and limited to `*.r2.cloudflarestorage.com` unless `R2_ENDPOINT_HOST_ALLOWLIST` names a custom host.
-- R2 sync is backup-only; the app never serves, overwrites, or deletes local gallery images from R2.
-- Backend logs go to stdout and `DATA_DIR/logs` by default, with hourly rotation and 24h retention.
+- Do not commit runtime/generated artifacts such as `images/`, `data/`, `frontend/build/`, `.svelte-kit/`, Playwright reports, test results, dependency folders, local DB files, or logs.
 
 ## Testing
 
@@ -295,14 +294,7 @@ npm --prefix frontend exec playwright install chromium
 
 ## Contributing
 
-- Keep backend API contracts stable.
-- Keep DTOs in `backend/app/schemas/`.
-- Keep persistence in `backend/app/repositories/`.
-- Keep upstream API calls in `backend/app/integrations/`.
-- Keep browser calls same-origin through `/api/*`.
-- Keep secrets masked and image/ZIP/URL validation centralized.
-- Update `.env.example`, `README.md`, and `docker-compose.yml` when adding or changing environment variables.
-- Avoid committing runtime/generated artifacts.
+For implementation boundaries and contributor-facing invariants, follow the `Contributor Boundaries` section above. Run the smallest relevant validation set for your change, and keep README/config updates in the same patch when behavior or environment variables change.
 
 ## License
 
@@ -559,30 +551,29 @@ Overall Config 会把 override 持久化到 SQLite。部分配置可热更新；
 
 公共 API 已有契约测试；除非明确做 breaking change，否则保持路径、方法、状态码、SSE 事件名、cookie 和响应结构稳定。
 
-## 修改边界
+## 贡献者边界
 
 - 浏览器请求保持同源 `/api/*`；不要在前端直接调用上游模型 API、R2、webhook 目标或任意图片 URL。
-- 路由处理放在 `backend/app/api/routers/`，DTO 放在 `backend/app/schemas/models.py`，仓储/数据库行为放在 `backend/app/repositories/`，外部服务集成放在 `backend/app/integrations/`。
-- 后端 DTO 变化要同步 `frontend/src/lib/api/types.ts`，并沿用现有 API client/store 管理 access、settings、jobs、gallery、prompt snippets 和 version 状态。
-- 图片字节校验、安全路径、归档限制、缩略图生成、队列状态和 SQLite 协调逻辑保持在现有 storage/upload/archive helper 中。
-- SSRF 敏感 URL 处理保持在 validators、safe connector 和 integration client 中；SOCKS5 代理模式是明确的信任边界。
-- Secret 不进入前端可见 payload，除非是打码值或 env-ref 元数据。
+- 保持现有代码分层：
+  - 路由与请求编排在 `backend/app/api/routers/`
+  - DTO 在 `backend/app/schemas/models.py`
+  - 持久化与 SQLite 协调在 `backend/app/repositories/`
+  - 上游集成在 `backend/app/integrations/`
+  - 前端镜像 API 类型在 `frontend/src/lib/api/types.ts`
+- 除非明确要做 breaking change，否则保持这些公共契约稳定：
+  - API 路径、方法、状态码、cookie、SSE 事件名、响应结构
+  - 生成/编辑队列生命周期、取消语义、多 worker 下的 SQLite 协调
+- 校验与安全逻辑保持集中：
+  - 图片字节校验、安全路径、缩略图/归档 helper
+  - SSRF 敏感 URL 处理继续放在 validators、safe connector、integration client 中
+  - 前端可见 secret 只能是打码值或 env-ref 元数据
+- 保持现有运行时约束：
+  - 编辑任务最多接受 16 张 raster 源图
+  - Gallery ZIP 导入导出继续沿用现有安全限制
+  - SSE 使用 SQLite slot lease、全局/单 IP 限制和连接 TTL
+  - R2 同步只是备份；本地 SQLite 记录和本地图片文件始终是源数据
 - 新增或修改环境变量时，同步更新 `backend/app/core/settings.py`、用户可见时的 `backend/app/core/overall_config.py`、`.env.example`、可由 Compose 配置时的 `docker-compose.yml`，以及本 README。
-
-## 运行时注意
-
-- 图片、缩略图、SQLite 文件、导入/导出临时文件和日志都属于运行数据；不要提交 `images/`、`data/`、`frontend/build/`、`.svelte-kit/`、Playwright 报告、测试结果、依赖目录、本地 DB 文件或日志。
-- API key、代理 URL、webhook URL 和 R2 凭据会在 API/UI 响应中打码。
-- 上传、导入、下载得到的图片会在服务端做字节校验和完整解码；编辑源不接受 SVG。
-- 编辑任务支持多张 raster 源图，当前上限为 16 张。
-- 上游图片 URL 下载只接受 HTTPS，并做 SSRF 防护。
-- 生成/编辑共享 SQLite 队列和并发限制，可跨多个 Granian worker 工作。
-- SSE 连接通过 SQLite slot lease 做全局/单 IP 限制，并有最大连接生命周期。
-- Gallery ZIP 导入导出受 `.env.example` 中的安全限制约束。
-- Gallery 缩略图按需生成；请求缺失缩略图时可能入队生成任务。
-- R2 endpoint 只接受 HTTPS，带 SSRF 校验，且默认限制为 `*.r2.cloudflarestorage.com`；自定义 host 需配置 `R2_ENDPOINT_HOST_ALLOWLIST`。
-- R2 同步只是备份路径；应用不会从 R2 服务、覆盖或删除本地 Gallery 图片。
-- 后端日志默认输出到 stdout 和 `DATA_DIR/logs`，按小时轮转并保留 24 小时。
+- 不要提交运行时/生成产物，例如 `images/`、`data/`、`frontend/build/`、`.svelte-kit/`、Playwright 报告、测试结果、依赖目录、本地 DB 文件或日志。
 
 ## 测试
 
@@ -605,14 +596,7 @@ npm --prefix frontend exec playwright install chromium
 
 ## 贡献
 
-- 保持后端 API 契约稳定。
-- DTO 放在 `backend/app/schemas/`。
-- 持久化逻辑放在 `backend/app/repositories/`。
-- 上游 API 调用放在 `backend/app/integrations/`。
-- 浏览器请求保持同源 `/api/*`。
-- 保持 secret 打码，并集中管理图片/ZIP/URL 校验。
-- 新增或修改环境变量时同步更新 `.env.example`、`README.md` 和 `docker-compose.yml`。
-- 不提交运行时/生成产物。
+实现边界和贡献者需要遵守的不变量，以上面的 `贡献者边界` 为准。提交改动时只跑与你改动范围匹配的最小验证集合；如果改了行为或环境变量定义，README 和配置文件要一起更新。
 
 ## 许可证
 

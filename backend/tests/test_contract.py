@@ -28,6 +28,7 @@ from backend.app.api.edit_limits import (
 )
 from backend.app.api.routers import access as access_router
 from backend.app.api.routers import gallery as gallery_router
+from backend.app.api.routers import metrics as metrics_router
 from backend.app.api.routers import settings as settings_router
 from backend.app.api.routers import static as static_router
 from backend.app.api.jobs import EditImageSource
@@ -2964,6 +2965,67 @@ def test_job_stage_timings_and_optional_metrics(client):
     assert "gpt_image_panel_image_jobs_generation_failure_ratio" in prometheus_resp.text
 
 
+def test_metrics_snapshot_reads_sqlite_runtime_once(monkeypatch):
+    calls = 0
+    recorded: list[tuple[str, dict]] = []
+
+    def fake_runtime():
+        nonlocal calls
+        calls += 1
+        return {
+            "gauges": {"sse.active_connections": 3},
+            "background_leases": [{"name": "lease"}],
+            "workers": [
+                {
+                    "worker_id": "peer-worker",
+                    "updated_at": "2026-01-01T00:00:00+00:00",
+                    "age_seconds": 1.0,
+                    "snapshot": {},
+                },
+                {
+                    "worker_id": "local-worker",
+                    "updated_at": "2026-01-01T00:00:00+00:00",
+                    "age_seconds": 9.0,
+                    "snapshot": {"stale": True},
+                },
+            ],
+        }
+
+    monkeypatch.setattr(
+        metrics_router.storage,
+        "get_runtime_coordination_metrics",
+        fake_runtime,
+    )
+    monkeypatch.setattr(
+        metrics_router,
+        "snapshot_queue_metrics",
+        lambda: {"image_jobs.active": 0},
+    )
+    monkeypatch.setattr(
+        metrics_router.storage,
+        "record_worker_metrics_snapshot",
+        lambda worker_id, payload: recorded.append((worker_id, payload)),
+    )
+    monkeypatch.setattr(
+        metrics_router.app.state,
+        "worker_id",
+        "local-worker",
+        raising=False,
+    )
+
+    snapshot = metrics_router._metrics_snapshot()
+
+    assert calls == 1
+    assert recorded and recorded[0][0] == "local-worker"
+    assert snapshot["gauges"]["sse.active_connections"] == 3
+    assert snapshot["workers"][0]["worker_id"] == "local-worker"
+    assert snapshot["workers"][0]["snapshot"] == recorded[0][1]
+    assert [worker["worker_id"] for worker in snapshot["workers"]] == [
+        "local-worker",
+        "peer-worker",
+    ]
+
+
 def test_gallery_slow_query_logs_filters_page_and_total(client, caplog):
     _fake_gallery_entry("gallery-slow", "slow query prompt", "1024x1024", "gallery-slow.png")
     config.SLOW_GALLERY_QUERY_MS = 0
@@ -4627,6 +4689,32 @@ def test_gallery_date_filters_are_normalized_to_utc(client, monkeypatch):
     tz_resp = client.get("/api/gallery", params={"date_to": "2026-01-01T03:00:00+02:00"})
     assert tz_resp.status_code == 200
     assert [image["id"] for image in tz_resp.json()["images"]] == ["date-1"]
+
+
+def test_gallery_favorite_filter_normalizes_string_booleans(client):
+    _fake_gallery_entry("favorite-bool-1", "one", "1024x1024", "favorite-bool-1.png")
+    _fake_gallery_entry("favorite-bool-2", "two", "1024x1024", "favorite-bool-2.png")
+    storage.update_gallery_entry("favorite-bool-1", {"favorite": True})
+
+    unfavorited = storage.get_gallery_page(
+        filters={"favorite": "false"},
+        include_filter_options=False,
+    )
+    favorited = storage.get_gallery_page(
+        filters={"favorite": "true"},
+        include_filter_options=False,
+    )
+    ignored = storage.get_gallery_page(
+        filters={"favorite": "maybe"},
+        include_filter_options=False,
+    )
+
+    assert [image.id for image in unfavorited.images] == ["favorite-bool-2"]
+    assert [image.id for image in favorited.images] == ["favorite-bool-1"]
+    assert [image.id for image in ignored.images] == [
+        "favorite-bool-2",
+        "favorite-bool-1",
+    ]
 
 
 def test_gallery_batch_operations_chunk_sqlite_in_clauses(client, monkeypatch):

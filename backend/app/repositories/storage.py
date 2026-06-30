@@ -1327,6 +1327,9 @@ def _ensure_database():
                     updated_at TEXT NOT NULL
                 );
 
+                CREATE INDEX IF NOT EXISTS idx_worker_metric_snapshots_updated_at
+                    ON worker_metric_snapshots(updated_at DESC);
+
                 CREATE TABLE IF NOT EXISTS edit_source_reservations (
                     job_id TEXT PRIMARY KEY,
                     byte_count INTEGER NOT NULL,
@@ -2079,6 +2082,23 @@ def _normalize_gallery_favorite(value: Any) -> int:
     return 1 if text in {"1", "true", "yes", "on", "favorite", "favorited"} else 0
 
 
+def _normalize_gallery_filter_bool(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return 1 if value else 0
+    if isinstance(value, int):
+        return 1 if value else 0
+    normalized = str(value).strip().lower()
+    if not normalized:
+        return None
+    if normalized in {"1", "true", "yes", "y", "on", "favorite", "favorited"}:
+        return 1
+    if normalized in {"0", "false", "no", "n", "off", "unfavorite", "unfavorited"}:
+        return 0
+    return None
+
+
 def _gallery_row_values(entry: dict[str, Any]) -> tuple[Any, ...]:
     return tuple(entry.get(column) for column in GALLERY_COLUMNS)
 
@@ -2176,10 +2196,10 @@ def _build_gallery_filter_where(filters: dict[str, Any] | None) -> tuple[str, li
             clauses.append(f"{column} = ?")
             params.append(value)
 
-    favorite = filters.get("favorite")
+    favorite = _normalize_gallery_filter_bool(filters.get("favorite"))
     if favorite is not None:
         clauses.append("favorite = ?")
-        params.append(1 if favorite else 0)
+        params.append(favorite)
 
     date_from = str(filters.get("date_from") or "").strip()
     if date_from:

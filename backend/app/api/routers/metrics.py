@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, HTTPException, Request, Response
 
 from ..app_state import app
@@ -20,6 +22,25 @@ def _failure_rates(counters: dict) -> dict[str, float]:
     return rates
 
 
+def _current_worker_snapshot(worker_id: str, payload: dict) -> dict:
+    return {
+        "worker_id": worker_id,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "age_seconds": 0.0,
+        "snapshot": payload,
+    }
+
+
+def _merge_current_worker_snapshot(workers: list, worker_snapshot: dict) -> list:
+    worker_id = str(worker_snapshot.get("worker_id") or "")
+    merged = [
+        worker
+        for worker in workers
+        if isinstance(worker, dict) and str(worker.get("worker_id") or "") != worker_id
+    ]
+    return [worker_snapshot, *merged]
+
+
 def _metrics_snapshot() -> dict:
     worker_id = str(getattr(app.state, "worker_id", "unknown"))
     runtime = storage.get_runtime_coordination_metrics()
@@ -29,16 +50,20 @@ def _metrics_snapshot() -> dict:
     snapshot["rates"] = _failure_rates(snapshot["counters"])
     snapshot["worker_id"] = worker_id
     snapshot["background_leases"] = runtime.get("background_leases", [])
+    worker_payload = {
+        "counters": snapshot["counters"],
+        "gauges": snapshot["gauges"],
+        "rates": snapshot["rates"],
+        "timings_ms": snapshot["timings_ms"],
+    }
     storage.record_worker_metrics_snapshot(
         worker_id,
-        {
-            "counters": snapshot["counters"],
-            "gauges": snapshot["gauges"],
-            "rates": snapshot["rates"],
-            "timings_ms": snapshot["timings_ms"],
-        },
+        worker_payload,
     )
-    snapshot["workers"] = storage.get_runtime_coordination_metrics().get("workers", [])
+    snapshot["workers"] = _merge_current_worker_snapshot(
+        runtime.get("workers", []),
+        _current_worker_snapshot(worker_id, worker_payload),
+    )
     return snapshot
 
 
