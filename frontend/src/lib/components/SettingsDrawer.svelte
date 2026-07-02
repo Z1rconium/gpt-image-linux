@@ -1,8 +1,10 @@
 <script lang="ts">
   import { t } from '$lib/i18n';
   import type {
+    AIAssistantSettingsInput,
     ApiPath,
     ApiPreset,
+    AssistantHealthResponse,
     OverallConfigItem,
     OverallConfigResponse,
     OverallConfigUpdateRequest,
@@ -39,6 +41,8 @@
     promptOptimizerModel: string;
     promptOptimizerTimeoutSeconds: number;
     promptOptimizerApiKey: string;
+    aiAssistantEnabled: boolean;
+    aiAssistantVisionModel: string;
     r2BackupEnabled: boolean;
     r2EndpointUrl: string;
     r2BucketName: string;
@@ -58,6 +62,8 @@
   export let r2HealthChecking = false;
   export let promptOptimizerHealth: PromptOptimizerHealthResponse | null = null;
   export let promptOptimizerHealthChecking = false;
+  export let aiAssistantHealth: AssistantHealthResponse | null = null;
+  export let aiAssistantHealthChecking = false;
   export let onClose: () => void = () => {};
   export let onSave: (body: SettingsInput) => Promise<void> | void = () => {};
   export let onCreate: () => Promise<void> | void = () => {};
@@ -68,6 +74,8 @@
   export let onR2HealthCheck: (body: R2BackupSettingsInput) => Promise<void> | void = () => {};
   export let onPromptOptimizerHealthCheck: () => Promise<void> | void = () => {};
   export let onClearPromptOptimizerHealth: () => void = () => {};
+  export let onAiAssistantHealthCheck: (body: AIAssistantSettingsInput) => Promise<void> | void = () => {};
+  export let onClearAiAssistantHealth: () => void = () => {};
   export let onLoadPromptOptimizerSystemPrompt: () => Promise<PromptOptimizerSystemPromptResponse> = async () => ({
     system_prompt: '',
     default_system_prompt: '',
@@ -106,6 +114,8 @@
   let promptOptimizerTimeoutSeconds: number | string = 60;
   let promptOptimizerApiKey = '';
   let promptOptimizerApiKeyInputType = 'password';
+  let aiAssistantEnabled = false;
+  let aiAssistantVisionModel = 'gpt-4o-mini';
   let r2BackupEnabled = false;
   let r2EndpointUrl = '';
   let r2BucketName = '';
@@ -156,6 +166,8 @@
         : settings.prompt_optimizer?.has_api_key
           ? MASKED_API_KEY_VALUE
           : '';
+    aiAssistantEnabled = Boolean(settings.ai_assistant?.enabled);
+    aiAssistantVisionModel = settings.ai_assistant?.vision_model || settings.prompt_optimizer?.model || 'gpt-4o-mini';
     r2BackupEnabled = Boolean(settings.r2_backup?.enabled);
     r2EndpointUrl = settings.r2_backup?.endpoint_url || '';
     r2BucketName = settings.r2_backup?.bucket_name || '';
@@ -213,6 +225,8 @@
       promptOptimizerModel,
       promptOptimizerTimeoutSeconds: promptOptimizerTimeoutValue(promptOptimizerTimeoutSeconds),
       promptOptimizerApiKey,
+      aiAssistantEnabled,
+      aiAssistantVisionModel,
       r2BackupEnabled,
       r2EndpointUrl,
       r2BucketName,
@@ -236,6 +250,13 @@
   function promptOptimizerTimeoutValue(value: number | string = promptOptimizerTimeoutSeconds) {
     const parsed = Number.parseInt(String(value), 10);
     return Number.isFinite(parsed) && parsed > 0 ? parsed : 60;
+  }
+
+  function aiAssistantPayload(): AIAssistantSettingsInput {
+    return {
+      enabled: aiAssistantEnabled,
+      vision_model: aiAssistantVisionModel.trim()
+    };
   }
 
   function normalizeR2SyncIntervalHours() {
@@ -276,6 +297,10 @@
     onClearPromptOptimizerHealth();
   }
 
+  function closeAiAssistantHealth() {
+    onClearAiAssistantHealth();
+  }
+
   function closePresetHealth() {
     onClearPresetHealth();
   }
@@ -311,6 +336,9 @@
           : settings?.prompt_optimizer?.has_api_key
             ? MASKED_API_KEY_VALUE
             : '') ||
+      draft.aiAssistantEnabled !== Boolean(settings?.ai_assistant?.enabled) ||
+      draft.aiAssistantVisionModel !==
+        (settings?.ai_assistant?.vision_model || settings?.prompt_optimizer?.model || 'gpt-4o-mini') ||
       draft.r2BackupEnabled !== Boolean(settings?.r2_backup?.enabled) ||
       draft.r2EndpointUrl !== (settings?.r2_backup?.endpoint_url || '') ||
       draft.r2BucketName !== (settings?.r2_backup?.bucket_name || '') ||
@@ -365,6 +393,7 @@
         timeout_seconds: promptOptimizerTimeoutValue(),
         api_key: promptOptimizerApiKey.trim() === MASKED_API_KEY_VALUE ? null : promptOptimizerApiKey.trim()
       },
+      ai_assistant: aiAssistantPayload(),
       r2_backup: r2BackupPayload()
     });
   }
@@ -397,6 +426,10 @@
 
   async function checkPromptOptimizerHealth() {
     await onPromptOptimizerHealthCheck();
+  }
+
+  async function checkAiAssistantHealth() {
+    await onAiAssistantHealthCheck(aiAssistantPayload());
   }
 
   function healthStatusLabel(status: PresetHealthStatus) {
@@ -803,10 +836,69 @@
               </button>
             </div>
           </section>
+
+          <section class="border-t border-zinc-800 pt-4">
+            <div class="mb-3 flex items-center justify-between gap-3">
+              <div>
+                <h3 class="text-sm font-semibold text-zinc-200">{$t.settings.aiAssistant}</h3>
+                <p class="mt-1 text-xs text-zinc-500">{$t.settings.aiAssistantHint}</p>
+              </div>
+              <label class="flex items-center gap-2 text-xs font-medium text-zinc-300">
+                <input bind:checked={aiAssistantEnabled} type="checkbox" class="control-focus accent-emerald-500" />
+                {$t.settings.aiAssistantEnabled}
+              </label>
+            </div>
+            <div class="space-y-4">
+              <div class="rounded-lg border border-zinc-800 bg-zinc-950/60 p-3 text-xs text-zinc-500">
+                {$t.settings.aiAssistantSharedConfigHint}
+              </div>
+              <label class="block">
+                <span class="mb-1.5 block text-xs font-medium text-zinc-400">{$t.settings.aiAssistantVisionModel}</span>
+                <input bind:value={aiAssistantVisionModel} class="control-focus w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2.5 font-mono text-sm text-zinc-100 focus:border-emerald-500" placeholder="gpt-4o-mini" />
+              </label>
+              <button
+                type="button"
+                disabled={aiAssistantHealthChecking}
+                class="control-focus w-full rounded-lg border border-emerald-500/40 px-3 py-2.5 text-sm font-semibold text-emerald-200 transition-colors hover:bg-emerald-500/10 disabled:cursor-not-allowed disabled:opacity-50"
+                on:click={checkAiAssistantHealth}
+              >
+                {aiAssistantHealthChecking ? $t.settings.aiAssistantHealthChecking : $t.settings.aiAssistantHealthCheck}
+              </button>
+            </div>
+          </section>
         </div>
       </div>
 
       <div class="space-y-3 border-t border-zinc-800 p-5">
+        {#if aiAssistantHealth}
+          <div class={`rounded-lg border p-3 text-xs ${healthPanelClass(aiAssistantHealth.status)}`} data-testid="ai-assistant-health-result">
+            <div class="flex items-center justify-between gap-3">
+              <div class="min-w-0">
+                <span class="font-semibold">{$t.settings.aiAssistantHealth}</span>
+                <div class="mt-1 text-[11px] text-inherit/70">
+                  {aiAssistantHealth.model}
+                  {#if aiAssistantHealth.duration_ms}{' '}- {aiAssistantHealth.duration_ms} ms{/if}
+                </div>
+              </div>
+              <div class="flex items-center gap-2">
+                <span class={`rounded-full border px-2 py-0.5 text-[11px] font-semibold ${healthBadgeClass(aiAssistantHealth.status)}`}>
+                  {healthStatusLabel(aiAssistantHealth.status)}
+                </span>
+                <button
+                  type="button"
+                  class="mobile-touch-target control-focus rounded-lg p-1.5 text-inherit/70 hover:bg-black/10 hover:text-inherit"
+                  aria-label={$t.common.close}
+                  on:click={closeAiAssistantHealth}
+                >
+                  x
+                </button>
+              </div>
+            </div>
+            <div class="mt-2 rounded-md border border-zinc-800 bg-zinc-950/50 p-2 text-zinc-300">
+              {aiAssistantHealth.message}
+            </div>
+          </div>
+        {/if}
         {#if promptOptimizerHealth}
           <div class={`rounded-lg border p-3 text-xs ${healthPanelClass(promptOptimizerHealth.status)}`} data-testid="prompt-optimizer-health-result">
             <div class="flex items-center justify-between gap-3">

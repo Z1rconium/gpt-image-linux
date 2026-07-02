@@ -31,7 +31,7 @@ export type GalleryActivityState = {
 };
 
 export type GalleryOperationStatus = {
-  kind: 'import' | 'export' | 'download' | 'sync';
+  kind: 'import' | 'export' | 'download' | 'sync' | 'ai_analyze';
   label: string;
   detail: string;
   progress: number | null;
@@ -643,6 +643,11 @@ function createGalleryStore() {
     update((current) => ({ ...current, selectedIds: new Set(), selectionToken: null }));
   }
 
+  function selectedBatchRequestBody() {
+    if (state.selectionToken) return { selection_token: state.selectionToken.token };
+    return { ids: [...state.selectedIds] };
+  }
+
   async function toggleFavorite(image: GalleryEntry, onChanged?: (image: GalleryEntry) => void) {
     const nextImage = await apiFetch<GalleryEntry>(
       `/api/gallery/${encodeURIComponent(image.id)}/favorite`,
@@ -765,6 +770,7 @@ function createGalleryStore() {
     selectPage,
     selectFiltered,
     clearSelection,
+    selectedBatchRequestBody,
     ...galleryActions,
     toggleFavorite,
     deleteImage,

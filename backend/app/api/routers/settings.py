@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException
 from ..app_state import app
 from ..presets import (
     apply_api_preset,
+    apply_ai_assistant_settings,
     apply_r2_backup_settings,
     apply_upstream_socks5_proxy,
     apply_webhook_url,
@@ -220,6 +221,12 @@ async def update_settings(req: SettingsRequest):
         updated_optimizer = apply_prompt_optimizer_settings(current_optimizer, req.prompt_optimizer)
         from ...repositories import storage as storage_repo
         await asyncio.to_thread(storage_repo.save_prompt_optimizer_settings, updated_optimizer)
+    if req.ai_assistant is not None:
+        from ..presets import get_ai_assistant_settings
+        from ...repositories import storage as storage_repo
+        current_assistant = get_ai_assistant_settings()
+        updated_assistant = apply_ai_assistant_settings(current_assistant, req.ai_assistant)
+        await asyncio.to_thread(storage_repo.save_ai_assistant_settings, updated_assistant)
     if req.r2_backup is not None:
         from ..presets import get_r2_backup_settings
         from ...repositories import storage as storage_repo

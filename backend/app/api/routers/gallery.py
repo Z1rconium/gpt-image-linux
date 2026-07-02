@@ -90,6 +90,8 @@ TRACKED_EXPORT_STREAMING_BYTES_THRESHOLD = 64 * 1024 * 1024
 EXPORT_FILE_STREAM_CHUNK_SIZE = 1024 * 1024
 GALLERY_SELECTION_TOKEN_KIND = "batch_selection"
 GALLERY_SELECTION_TOKEN_TTL_SECONDS = 15 * 60
+AI_ANALYZE_JOB_KIND = "ai_analyze"
+AI_ANALYZE_JOB_TTL_SECONDS = 1800
 
 
 def _trusted_gallery_job_dir(kind: str) -> Path:
@@ -1796,6 +1798,11 @@ async def gc_gallery_export_jobs(worker_id: str) -> None:
                     "export_direct",
                     EXPORT_JOB_TTL_SECONDS,
                 )
+                stale_ai_analyze_jobs = await asyncio.to_thread(
+                    storage.cleanup_stale_gallery_jobs,
+                    AI_ANALYZE_JOB_KIND,
+                    AI_ANALYZE_JOB_TTL_SECONDS,
+                )
                 expired_direct_slots = await asyncio.to_thread(
                     storage.cleanup_expired_gallery_jobs,
                     "export_direct",
@@ -1816,13 +1823,21 @@ async def gc_gallery_export_jobs(worker_id: str) -> None:
                             kind="import",
                             job_id=str(job.get("job_id") or ""),
                         )
-                if stale_exports or stale_syncs or stale_imports or stale_direct_exports or expired_direct_slots:
+                if (
+                    stale_exports
+                    or stale_syncs
+                    or stale_imports
+                    or stale_direct_exports
+                    or stale_ai_analyze_jobs
+                    or expired_direct_slots
+                ):
                     logger.info(
-                        "GC cleaned up %d gallery export job(s), %d sync job(s), %d import job(s), %d completed direct export job(s), and %d direct export slot(s)",
+                        "GC cleaned up %d gallery export job(s), %d sync job(s), %d import job(s), %d completed direct export job(s), %d AI analyze job(s), and %d direct export slot(s)",
                         len(stale_exports),
                         len(stale_syncs),
                         len(stale_imports),
                         len(stale_direct_exports),
+                        len(stale_ai_analyze_jobs),
                         len(expired_direct_slots),
                     )
                 exports_dir = Path(config.DATA_DIR) / "exports"

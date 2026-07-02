@@ -116,6 +116,7 @@ __all__ = [
     "create_gallery_job",
     "get_gallery_job",
     "get_gallery_jobs_updated_at_edges",
+    "renew_gallery_job_lease",
     "update_gallery_job",
     "update_gallery_job_progress",
     "count_active_gallery_jobs",
@@ -151,6 +152,8 @@ __all__ = [
     "mark_gallery_r2_sync_state",
     "list_generate_jobs",
     "load_prompt_optimizer_settings",
+    "load_ai_assistant_settings",
+    "get_gallery_ai_metadata",
     "list_overall_config_values",
     "load_r2_backup_settings",
     "load_settings",
@@ -170,6 +173,8 @@ __all__ = [
     "safe_image_path",
     "safe_thumbnail_path",
     "save_prompt_optimizer_settings",
+    "save_ai_assistant_settings",
+    "upsert_gallery_ai_metadata",
     "save_overall_config_overrides",
     "save_r2_backup_settings",
     "save_settings",
@@ -334,6 +339,7 @@ SETTINGS_ACTIVE_PRESET_KEY = "active_preset_id"
 UPSTREAM_SOCKS5_PROXY_KEY = "upstream_socks5_proxy"
 WEBHOOK_URL_KEY = "webhook_url"
 PROMPT_OPTIMIZER_SETTINGS_KEY = "prompt_optimizer_settings"
+AI_ASSISTANT_SETTINGS_KEY = "ai_assistant_settings"
 R2_BACKUP_SETTINGS_KEY = "r2_backup_settings"
 SQLITE_TIMEOUT_SECONDS = 30.0
 DATA_DIR_MODE = 0o700
@@ -656,6 +662,7 @@ def _default_settings() -> dict:
             }
         ],
         "prompt_optimizer": _default_prompt_optimizer_settings(),
+        "ai_assistant": _default_ai_assistant_settings(),
         "r2_backup": _default_r2_backup_settings(),
     }
 
@@ -675,6 +682,13 @@ def _default_prompt_optimizer_settings() -> dict:
         "api_key": _normalize_stored_api_key(config.PROMPT_OPTIMIZER_API_KEY),
         "model": config.PROMPT_OPTIMIZER_MODEL,
         "timeout_seconds": config.PROMPT_OPTIMIZER_TIMEOUT_SECONDS,
+    }
+
+
+def _default_ai_assistant_settings() -> dict:
+    return {
+        "enabled": config.AI_ASSISTANT_ENABLED,
+        "vision_model": config.AI_ASSISTANT_VISION_MODEL or config.PROMPT_OPTIMIZER_MODEL,
     }
 
 
@@ -761,6 +775,20 @@ def _normalize_prompt_optimizer_settings(settings: dict | None) -> dict:
             settings.get("timeout_seconds"),
             default["timeout_seconds"],
         ),
+    }
+
+
+def _normalize_ai_assistant_settings(settings: dict | None) -> dict:
+    default = _default_ai_assistant_settings()
+    if not isinstance(settings, dict):
+        return default
+    vision_model = (
+        str(settings.get("vision_model") or default["vision_model"] or config.PROMPT_OPTIMIZER_MODEL).strip()
+        or config.PROMPT_OPTIMIZER_MODEL
+    )
+    return {
+        "enabled": _coerce_bool(settings.get("enabled"), default["enabled"]),
+        "vision_model": vision_model,
     }
 
 
@@ -1355,6 +1383,17 @@ def _ensure_database():
                     override_updated_at TEXT
                 );
 
+                CREATE TABLE IF NOT EXISTS gallery_ai_metadata (
+                    image_id TEXT PRIMARY KEY,
+                    description TEXT NOT NULL DEFAULT '',
+                    prompt TEXT NOT NULL DEFAULT '',
+                    analysis_json TEXT NOT NULL DEFAULT '{}',
+                    model TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(image_id) REFERENCES gallery_entries(id) ON DELETE CASCADE
+                );
+
                 """
             )
             _migrate_api_presets_schema(conn)
@@ -1363,6 +1402,7 @@ def _ensure_database():
             _migrate_gallery_jobs_schema(conn)
             _migrate_r2_sync_state_schema(conn)
             _migrate_prompt_snippets_schema(conn)
+            _migrate_gallery_ai_metadata_schema(conn)
             _run_schema_migrations(conn)
             _ensure_gallery_fts(conn)
             conn.commit()
@@ -1742,6 +1782,23 @@ def _migrate_prompt_snippets_schema(conn: sqlite3.Connection):
     )
 
 
+def _migrate_gallery_ai_metadata_schema(conn: sqlite3.Connection):
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS gallery_ai_metadata (
+            image_id TEXT PRIMARY KEY,
+            description TEXT NOT NULL DEFAULT '',
+            prompt TEXT NOT NULL DEFAULT '',
+            analysis_json TEXT NOT NULL DEFAULT '{}',
+            model TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(image_id) REFERENCES gallery_entries(id) ON DELETE CASCADE
+        )
+        """
+    )
+
+
 def _get_setting_value(conn: sqlite3.Connection, key: str) -> str | None:
     row = conn.execute(
         "SELECT value FROM settings_kv WHERE key = ?",
@@ -1870,12 +1927,18 @@ def _normalize_settings(settings: dict | None) -> dict:
         if "r2_backup" in settings
         else _default_r2_backup_settings()
     )
+    ai_assistant = (
+        _normalize_ai_assistant_settings(settings.get("ai_assistant"))
+        if "ai_assistant" in settings
+        else _default_ai_assistant_settings()
+    )
 
     raw_presets = settings.get("presets")
     if not isinstance(raw_presets, list):
         default_settings = _default_settings()
         default_settings["upstream_socks5_proxy"] = upstream_socks5_proxy
         default_settings["webhook_url"] = webhook_url
+        default_settings["ai_assistant"] = ai_assistant
         default_settings["r2_backup"] = r2_backup
         return default_settings
 
@@ -1899,6 +1962,7 @@ def _normalize_settings(settings: dict | None) -> dict:
         default_settings = _default_settings()
         default_settings["upstream_socks5_proxy"] = upstream_socks5_proxy
         default_settings["webhook_url"] = webhook_url
+        default_settings["ai_assistant"] = ai_assistant
         default_settings["r2_backup"] = r2_backup
         return default_settings
 
@@ -1916,6 +1980,7 @@ def _normalize_settings(settings: dict | None) -> dict:
             if "prompt_optimizer" in settings
             else None
         ),
+        "ai_assistant": ai_assistant,
         "r2_backup": r2_backup,
     }
 
@@ -1974,6 +2039,9 @@ def _replace_settings_on_conn(conn: sqlite3.Connection, settings: dict):
     optimizer = normalized.get("prompt_optimizer")
     if optimizer is not None:
         _set_setting_value(conn, PROMPT_OPTIMIZER_SETTINGS_KEY, json.dumps(optimizer))
+    ai_assistant = normalized.get("ai_assistant")
+    if ai_assistant is not None:
+        _set_setting_value(conn, AI_ASSISTANT_SETTINGS_KEY, json.dumps(ai_assistant))
     r2_backup = normalized.get("r2_backup")
     if r2_backup is not None:
         _set_setting_value(conn, R2_BACKUP_SETTINGS_KEY, json.dumps(r2_backup))
@@ -2020,6 +2088,16 @@ def _load_settings_from_conn(conn: sqlite3.Connection) -> dict | None:
     else:
         optimizer = _default_prompt_optimizer_settings()
 
+    assistant_json = _get_setting_value(conn, AI_ASSISTANT_SETTINGS_KEY)
+    ai_assistant = None
+    if assistant_json:
+        try:
+            ai_assistant = _normalize_ai_assistant_settings(json.loads(assistant_json))
+        except (json.JSONDecodeError, TypeError):
+            ai_assistant = _default_ai_assistant_settings()
+    else:
+        ai_assistant = _default_ai_assistant_settings()
+
     r2_backup = _load_r2_backup_settings_from_conn(conn)
 
     return _normalize_settings(
@@ -2029,6 +2107,7 @@ def _load_settings_from_conn(conn: sqlite3.Connection) -> dict | None:
             "webhook_url": webhook_url,
             "presets": presets,
             "prompt_optimizer": optimizer,
+            "ai_assistant": ai_assistant,
             "r2_backup": r2_backup,
         }
     )
@@ -2722,6 +2801,114 @@ def save_prompt_optimizer_settings(settings: dict):
         _set_setting_value(conn, PROMPT_OPTIMIZER_SETTINGS_KEY, json.dumps(normalized))
         conn.commit()
     _secure_data_storage_permissions()
+
+
+def load_ai_assistant_settings() -> dict:
+    _ensure_database()
+    with _connect() as conn:
+        raw = _get_setting_value(conn, AI_ASSISTANT_SETTINGS_KEY)
+        if raw:
+            try:
+                return _normalize_ai_assistant_settings(json.loads(raw))
+            except (json.JSONDecodeError, TypeError):
+                return _default_ai_assistant_settings()
+        return _default_ai_assistant_settings()
+
+
+def save_ai_assistant_settings(settings: dict):
+    _ensure_database()
+    normalized = _normalize_ai_assistant_settings(settings)
+    with _connect() as conn:
+        _set_setting_value(conn, AI_ASSISTANT_SETTINGS_KEY, json.dumps(normalized))
+        conn.commit()
+    _secure_data_storage_permissions()
+
+
+def _gallery_ai_metadata_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    analysis = _json_loads_dict(row["analysis_json"])
+    return {
+        "image_id": str(row["image_id"]),
+        "description": str(row["description"] or ""),
+        "prompt": str(row["prompt"] or ""),
+        "analysis": analysis,
+        "model": str(row["model"] or ""),
+        "created_at": str(row["created_at"] or ""),
+        "updated_at": str(row["updated_at"] or ""),
+    }
+
+
+def get_gallery_ai_metadata(image_id: str) -> dict[str, Any] | None:
+    _ensure_database()
+    with _connect() as conn:
+        row = conn.execute(
+            """
+            SELECT image_id, description, prompt, analysis_json, model, created_at, updated_at
+            FROM gallery_ai_metadata
+            WHERE image_id = ?
+            """,
+            (image_id,),
+        ).fetchone()
+    return _gallery_ai_metadata_from_row(row) if row else None
+
+
+def upsert_gallery_ai_metadata(
+    *,
+    image_id: str,
+    description: str = "",
+    prompt: str = "",
+    analysis: dict[str, Any] | None = None,
+    model: str = "",
+) -> dict[str, Any]:
+    _ensure_database()
+    now = utc_now()
+    normalized_analysis = analysis if isinstance(analysis, dict) else {}
+    analysis_json = json.dumps(normalized_analysis, ensure_ascii=False, sort_keys=True)
+    with _connect() as conn:
+        with _transaction(conn):
+            exists = conn.execute(
+                "SELECT 1 FROM gallery_entries WHERE id = ? LIMIT 1",
+                (image_id,),
+            ).fetchone()
+            if not exists:
+                raise KeyError("Gallery entry not found")
+            conn.execute(
+                """
+                INSERT INTO gallery_ai_metadata (
+                    image_id,
+                    description,
+                    prompt,
+                    analysis_json,
+                    model,
+                    created_at,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(image_id) DO UPDATE SET
+                    description = excluded.description,
+                    prompt = excluded.prompt,
+                    analysis_json = excluded.analysis_json,
+                    model = excluded.model,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    image_id,
+                    str(description or ""),
+                    str(prompt or ""),
+                    analysis_json,
+                    str(model or ""),
+                    now,
+                    now,
+                ),
+            )
+            row = conn.execute(
+                """
+                SELECT image_id, description, prompt, analysis_json, model, created_at, updated_at
+                FROM gallery_ai_metadata
+                WHERE image_id = ?
+                """,
+                (image_id,),
+            ).fetchone()
+    return _gallery_ai_metadata_from_row(row)
 
 
 def load_r2_backup_settings() -> dict:
@@ -5149,6 +5336,35 @@ def update_gallery_job_progress(job_id: str, updates: dict[str, Any]) -> bool:
             cursor = conn.execute(
                 f"UPDATE gallery_jobs SET {assignments} WHERE job_id = ?",
                 (*normalized.values(), job_id),
+            )
+    return cursor.rowcount > 0
+
+
+def renew_gallery_job_lease(
+    *,
+    job_id: str,
+    lease_owner: str,
+    lease_expires_at: str,
+    now: str | None = None,
+) -> bool:
+    _ensure_database()
+    current_time = now or utc_now()
+    with _connect() as conn:
+        with _transaction(conn):
+            cursor = conn.execute(
+                """
+                UPDATE gallery_jobs
+                SET lease_expires_at = ?,
+                    updated_at = ?
+                WHERE job_id = ?
+                    AND status = 'running'
+                    AND lease_owner = ?
+                    AND (
+                        lease_expires_at IS NULL
+                        OR lease_expires_at > ?
+                    )
+                """,
+                (lease_expires_at, current_time, job_id, lease_owner, current_time),
             )
     return cursor.rowcount > 0
 

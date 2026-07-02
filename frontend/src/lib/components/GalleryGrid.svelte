@@ -35,6 +35,8 @@
   export let onBatchDelete: () => void = () => {};
   export let onBatchFavorite: (favorite: boolean) => void = () => {};
   export let onBatchDownload: () => void = () => {};
+  export let canAiAnalyze = false;
+  export let onBatchAiAnalyze: () => void = () => {};
 
   const skeletonCards = Array.from({ length: 6 });
   const EAGER_THUMB_COUNT = 3;
@@ -335,6 +337,9 @@
         <button type="button" class="control-focus rounded-lg border border-stone-300 px-2.5 py-2 text-xs text-stone-700 hover:bg-stone-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" disabled={!gallery?.total || busy} on:click={onSelectFiltered}>{$t.gallery.selectFiltered}</button>
         <button type="button" class="control-focus rounded-lg border border-stone-300 px-2.5 py-2 text-xs text-stone-700 hover:bg-stone-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" disabled={!hasSelection} on:click={onClearSelection}>{$t.gallery.clearSelection}</button>
         <button type="button" class="control-focus rounded-lg border border-stone-300 px-2.5 py-2 text-xs text-stone-700 hover:bg-stone-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" disabled={!hasSelection || busy} on:click={onBatchDownload}>{operationStatus?.kind === 'download' ? $t.gallery.downloading : $t.gallery.downloadSelected}</button>
+        {#if canAiAnalyze}
+          <button type="button" class="control-focus rounded-lg border border-cyan-500/35 px-2.5 py-2 text-xs text-cyan-700 hover:bg-cyan-500/10 disabled:opacity-40 dark:text-cyan-200" disabled={!hasSelection || busy} on:click={onBatchAiAnalyze}>{operationStatus?.kind === 'ai_analyze' ? $t.gallery.aiAnalyzing : $t.gallery.aiAnalyzeSelected}</button>
+        {/if}
         <button type="button" class="control-focus rounded-lg border border-stone-300 px-2.5 py-2 text-xs text-stone-700 hover:bg-stone-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" disabled={!hasSelection || busy} on:click={() => onBatchFavorite(true)}>{$t.gallery.favoriteSelected}</button>
         <button type="button" class="control-focus rounded-lg border border-stone-300 px-2.5 py-2 text-xs text-stone-700 hover:bg-stone-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" disabled={!hasSelection || busy} on:click={() => onBatchFavorite(false)}>{$t.gallery.unfavoriteSelected}</button>
         <button type="button" class="control-focus rounded-lg border border-red-500/40 px-2.5 py-2 text-xs text-red-300 hover:bg-red-500/10 disabled:opacity-40" disabled={!hasSelection || busy} on:click={onBatchDelete}>{$t.gallery.deleteSelected}</button>
@@ -450,21 +455,21 @@
                 <button
                   type="button"
                   class="gallery-icon-action control-focus border-stone-300 text-stone-700 hover:bg-stone-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
-                  aria-label={$t.common.edit}
-                  title={$t.common.edit}
-                  on:click={(event) => handleGalleryAction(event, () => onEdit(image))}
-                >
-                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4l10.5-10.5a2.1 2.1 0 0 0-3-3L5 17v3Z"/><path d="m14 7 3 3"/></svg>
-                </button>
-                <button
-                  type="button"
-                  class="gallery-icon-action control-focus border-stone-300 text-stone-700 hover:bg-stone-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
                   aria-pressed={image.favorite}
                   aria-label={image.favorite ? $t.common.unfavorite : $t.common.favorite}
                   title={image.favorite ? $t.common.unfavorite : $t.common.favorite}
                   on:click={(event) => handleGalleryAction(event, () => onFavorite(image))}
                 >
                   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9L12 3Z"/></svg>
+                </button>
+                <button
+                  type="button"
+                  class="gallery-icon-action control-focus border-stone-300 text-stone-700 hover:bg-stone-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                  aria-label={$t.common.edit}
+                  title={$t.common.edit}
+                  on:click={(event) => handleGalleryAction(event, () => onEdit(image))}
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4l10.5-10.5a2.1 2.1 0 0 0-3-3L5 17v3Z"/><path d="m14 7 3 3"/></svg>
                 </button>
                 <a
                   href={`/api/download/${encodeURIComponent(image.filename)}`}

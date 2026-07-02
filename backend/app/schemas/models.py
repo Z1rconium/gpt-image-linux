@@ -12,6 +12,7 @@ from ..core.validators import (
 )
 
 ApiPath = Literal["/v1/images/generations", "/v1/responses", "/v1/chat/completions"]
+AssistantApiPath = Literal["/v1/chat/completions", "/v1/responses"]
 ApiKeySource = Literal["empty", "stored", "env"]
 OverallConfigValueType = Literal["string", "secret", "bool", "int", "float"]
 OverallConfigValueSource = Literal["override", "env", "default"]
@@ -128,6 +129,7 @@ class SettingsRequest(StrictRequestModel):
         ),
     )
     prompt_optimizer: Optional["PromptOptimizerSettingsRequest"] = None
+    ai_assistant: Optional["AIAssistantSettingsRequest"] = None
     r2_backup: Optional["R2BackupSettingsRequest"] = None
 
     @field_validator("api_url")
@@ -184,6 +186,7 @@ class SettingsResponse(BaseModel):
     webhook_url_masked: str = ""
     presets: list[ApiPresetResponse]
     prompt_optimizer: "PromptOptimizerSettingsResponse" = Field(default_factory=lambda: PromptOptimizerSettingsResponse())
+    ai_assistant: "AIAssistantSettingsResponse" = Field(default_factory=lambda: AIAssistantSettingsResponse())
     r2_backup: "R2BackupSettingsResponse" = Field(default_factory=lambda: R2BackupSettingsResponse())
 
 
@@ -341,6 +344,69 @@ class PromptOptimizerSettingsRequest(StrictRequestModel):
         )
 
 
+class AIAssistantSettingsResponse(BaseModel):
+    enabled: bool = False
+    api_url: str = ""
+    model: str = "gpt-4o-mini"
+    vision_model: str = "gpt-4o-mini"
+    timeout_seconds: int = 60
+    api_path: AssistantApiPath = "/v1/chat/completions"
+    api_key_masked: str = "***"
+    has_api_key: bool = False
+    api_key_source: ApiKeySource = "empty"
+    api_key_env_var: Optional[str] = None
+
+
+class AIAssistantSettingsRequest(StrictRequestModel):
+    enabled: Optional[bool] = None
+    api_url: Optional[str] = Field(
+        default=None,
+        max_length=2048,
+        description="Deprecated no-op. AI Assistant reuses the Prompt Optimizer API URL.",
+    )
+    model: Optional[str] = Field(
+        default=None,
+        max_length=200,
+        description="Deprecated no-op. AI Assistant reuses the Prompt Optimizer text model.",
+    )
+    vision_model: Optional[str] = Field(default=None, max_length=200)
+    timeout_seconds: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="Deprecated no-op. AI Assistant reuses the Prompt Optimizer timeout.",
+    )
+    api_path: Optional[AssistantApiPath] = Field(
+        default=None,
+        description="Deprecated no-op. AI Assistant derives the route from the Prompt Optimizer API URL.",
+    )
+    api_key: Optional[str] = Field(
+        default=None,
+        max_length=8192,
+        description="Deprecated no-op. AI Assistant reuses the Prompt Optimizer API key.",
+    )
+
+    @field_validator("api_url")
+    @classmethod
+    def validate_optional_api_url(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        if not value.strip():
+            return ""
+        return normalize_upstream_base_url(value)
+
+    @field_validator("api_key")
+    @classmethod
+    def validate_api_key(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        if value.strip() == MASKED_SECRET_VALUE:
+            return MASKED_SECRET_VALUE
+        return normalize_secret_env_ref_or_plaintext(
+            value,
+            field_name="deprecated AI Assistant API key",
+        )
+
+
 class R2BackupSettingsResponse(BaseModel):
     enabled: bool = False
     endpoint_url: str = ""
@@ -449,6 +515,162 @@ class PromptOptimizeResponse(BaseModel):
     optimized_prompt: str
     model: str
     duration_ms: int
+
+
+class AssistantBaseResponse(BaseModel):
+    model: str
+    duration_ms: int
+    warnings: list[str] = Field(default_factory=list)
+
+
+class AssistantHealthResponse(BaseModel):
+    status: Literal["ok", "warning", "error"]
+    message: str
+    model: str = ""
+    duration_ms: int = 0
+    status_code: Optional[int] = None
+
+
+class AssistantPromptRewriteRequest(StrictRequestModel):
+    prompt: str = Field(..., min_length=1, max_length=4000)
+    instruction: Optional[str] = Field(default=None, max_length=1200)
+    target_language: Literal["en", "zh-CN", "same"] = "en"
+    api_path: Optional[ApiPath] = None
+    model: Optional[str] = Field(default=None, max_length=200)
+    size: Optional[str] = Field(default=None, max_length=40)
+    quality: Optional[Literal["auto", "low", "medium", "high"]] = None
+
+    @field_validator("prompt")
+    @classmethod
+    def validate_prompt(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("prompt must not be empty")
+        return normalized
+
+    @field_validator("instruction")
+    @classmethod
+    def validate_instruction(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
+
+
+class AssistantPromptRewriteResponse(AssistantBaseResponse):
+    rewritten_prompt: str
+
+
+class AssistantPromptCheckRequest(StrictRequestModel):
+    prompt: str = Field(..., min_length=1, max_length=4000)
+    api_path: Optional[ApiPath] = None
+    model: Optional[str] = Field(default=None, max_length=200)
+    size: Optional[str] = Field(default=None, max_length=40)
+    quality: Optional[Literal["auto", "low", "medium", "high"]] = None
+
+    @field_validator("prompt")
+    @classmethod
+    def validate_prompt(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("prompt must not be empty")
+        return normalized
+
+
+class AssistantPromptIssue(BaseModel):
+    severity: Literal["info", "warning", "error"] = "info"
+    message: str
+    suggestion: Optional[str] = None
+
+
+class AssistantPromptCheckResponse(AssistantBaseResponse):
+    score: int = Field(ge=0, le=100)
+    summary: str
+    issues: list[AssistantPromptIssue] = Field(default_factory=list)
+
+
+class AssistantPromptVariantsRequest(AssistantPromptRewriteRequest):
+    count: int = Field(default=3, ge=1, le=6)
+
+
+class AssistantPromptVariant(BaseModel):
+    title: str
+    prompt: str
+    angle: Optional[str] = None
+
+
+class AssistantPromptVariantsResponse(AssistantBaseResponse):
+    variants: list[AssistantPromptVariant] = Field(default_factory=list)
+
+
+class AssistantRecommendParamsRequest(StrictRequestModel):
+    prompt: str = Field(..., min_length=1, max_length=4000)
+    api_path: ApiPath
+    current_model: Optional[str] = Field(default=None, max_length=200)
+    current_size: Optional[str] = Field(default=None, max_length=40)
+    current_quality: Optional[Literal["auto", "low", "medium", "high"]] = None
+    current_output_format: Optional[Literal["png", "jpeg", "webp"]] = None
+    current_n: Optional[int] = Field(default=None, ge=1, le=10)
+
+
+class AssistantRecommendParamsResponse(AssistantBaseResponse):
+    model_name: Optional[str] = None
+    size: Optional[str] = None
+    quality: Optional[Literal["auto", "low", "medium", "high"]] = None
+    output_format: Optional[Literal["png", "jpeg", "webp"]] = None
+    n: Optional[int] = Field(default=None, ge=1, le=10)
+    rationale: str = ""
+
+
+class AssistantJobDiagnoseRequest(StrictRequestModel):
+    include_prompt: bool = True
+
+
+class AssistantJobDiagnoseResponse(AssistantBaseResponse):
+    summary: str
+    likely_causes: list[str] = Field(default_factory=list)
+    recommended_actions: list[str] = Field(default_factory=list)
+    safe_job: dict[str, object] = Field(default_factory=dict)
+
+
+class AssistantEditPlanRequest(StrictRequestModel):
+    goal: str = Field(..., min_length=1, max_length=2000)
+    source_count: int = Field(default=0, ge=0, le=16)
+    current_prompt: Optional[str] = Field(default=None, max_length=4000)
+    target_size: Optional[str] = Field(default=None, max_length=40)
+
+    @field_validator("goal")
+    @classmethod
+    def validate_goal(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("goal must not be empty")
+        return normalized
+
+
+class AssistantEditPlanResponse(AssistantBaseResponse):
+    edit_prompt: str
+    source_requirements: list[str] = Field(default_factory=list)
+    suggested_size: Optional[str] = None
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    next_action: Literal["confirm", "revise", "add_sources"] = "confirm"
+
+
+class AssistantGalleryImageResponse(AssistantBaseResponse):
+    image_id: str
+    description: str = ""
+    prompt: str = ""
+    analysis: dict[str, object] = Field(default_factory=dict)
+
+
+class AssistantGalleryMetadataResponse(BaseModel):
+    image_id: str
+    description: str = ""
+    prompt: str = ""
+    analysis: dict[str, object] = Field(default_factory=dict)
+    model: str = ""
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
 
 
 class PromptSnippet(BaseModel):
@@ -607,6 +829,26 @@ class GalleryBatchRequest(StrictRequestModel):
         if bool(self.ids) == bool(self.selection_token):
             raise ValueError("Provide exactly one of ids or selection_token")
         return self
+
+
+class AssistantGalleryBatchRequest(GalleryBatchRequest):
+    pass
+
+
+class AssistantGalleryBatchJobStatus(BaseModel):
+    job_id: str
+    status: GalleryImportJobStatusValue
+    stage: Optional[str] = None
+    message: Optional[str] = None
+    progress: int = 0
+    requested_count: int = 0
+    processed_count: int = 0
+    analyzed_count: int = 0
+    missing_count: int = 0
+    failed_count: int = 0
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    error: Optional[str] = None
 
 
 class GalleryBatchFavoriteRequest(GalleryBatchRequest):

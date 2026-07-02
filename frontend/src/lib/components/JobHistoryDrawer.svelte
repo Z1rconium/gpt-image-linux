@@ -1,6 +1,6 @@
 <script lang="ts">
   import { tick } from 'svelte';
-  import type { GenerateJobStatus } from '$lib/api/types';
+  import type { AssistantJobDiagnoseResponse, GenerateJobStatus } from '$lib/api/types';
   import { t } from '$lib/i18n';
   import { formatBeijingTime, jobFailureMessage, operationLabel, stageLabel, statusLabel } from '$lib/utils/format';
   import { isActiveJobStatus, isFailureJobStatus } from '$lib/utils/jobs';
@@ -31,6 +31,10 @@
   export let onCancelSelected: () => MaybePromise = () => {};
   export let onUseJob: (job: GenerateJobStatus) => void = () => {};
   export let onRetryJob: (job: GenerateJobStatus) => void = () => {};
+  export let aiAssistantEnabled = false;
+  export let diagnosingJobId: string | null = null;
+  export let diagnoses: Record<string, AssistantJobDiagnoseResponse> = {};
+  export let onDiagnoseJob: (job: GenerateJobStatus) => MaybePromise = () => {};
 
   let internalActiveTab: JobsTab = 'running';
   let historyScrollEl: HTMLDivElement | null = null;
@@ -278,7 +282,30 @@
                     </button>
                   </div>
                 {/if}
+                {#if diagnoses[job.job_id]}
+                  {@const diagnosis = diagnoses[job.job_id]}
+                  <div class="mt-3 rounded-lg border border-cyan-500/25 bg-cyan-950/20 px-3 py-2 text-xs leading-5 text-cyan-100">
+                    <div class="font-semibold">{$t.jobs.aiDiagnosis}</div>
+                    <p class="mt-1 text-zinc-300">{diagnosis.summary}</p>
+                    {#if diagnosis.likely_causes.length}
+                      <div class="mt-2 text-zinc-400">{$t.jobs.aiLikelyCauses}: {diagnosis.likely_causes.join('; ')}</div>
+                    {/if}
+                    {#if diagnosis.recommended_actions.length}
+                      <div class="mt-1 text-zinc-400">{$t.jobs.aiRecommendedActions}: {diagnosis.recommended_actions.join('; ')}</div>
+                    {/if}
+                  </div>
+                {/if}
                 <div class="mt-4 flex flex-wrap justify-end gap-2">
+                  {#if aiAssistantEnabled && isFailureJobStatus(job.status)}
+                    <button
+                      type="button"
+                      class="control-focus rounded-lg border border-cyan-500/35 px-3 py-2 text-xs font-medium text-cyan-200 hover:bg-cyan-500/10 disabled:cursor-not-allowed disabled:opacity-40"
+                      disabled={diagnosingJobId === job.job_id}
+                      on:click={() => onDiagnoseJob(job)}
+                    >
+                      {diagnosingJobId === job.job_id ? $t.jobs.diagnosing : $t.jobs.diagnose}
+                    </button>
+                  {/if}
                   <button type="button" class="control-focus rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800" on:click={() => onUseJob(job)}>
                     {$t.jobs.useAsPrompt}
                   </button>

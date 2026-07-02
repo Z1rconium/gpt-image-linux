@@ -1,5 +1,3 @@
-import os
-
 from fastapi import HTTPException
 
 from .app_state import app
@@ -22,6 +20,7 @@ from ..core.validators import (
 )
 from ..repositories import storage
 from ..schemas.models import (
+    AIAssistantSettingsResponse,
     ApiPresetResponse,
     PromptOptimizerSettingsResponse,
     R2BackupSettingsResponse,
@@ -125,6 +124,13 @@ def _default_prompt_optimizer_settings() -> dict:
     }
 
 
+def _default_ai_assistant_settings() -> dict:
+    return {
+        "enabled": config.AI_ASSISTANT_ENABLED,
+        "vision_model": config.AI_ASSISTANT_VISION_MODEL or config.PROMPT_OPTIMIZER_MODEL,
+    }
+
+
 def _coerce_positive_int(value, default: int) -> int:
     try:
         parsed = int(value)
@@ -160,6 +166,33 @@ def normalize_prompt_optimizer_settings(raw: dict | None) -> dict:
     }
 
 
+def _normalize_assistant_api_path(value: object, default: str = "/v1/chat/completions") -> str:
+    normalized = str(value or default).strip()
+    return normalized if normalized in {"/v1/chat/completions", "/v1/responses"} else default
+
+
+def _assistant_endpoint_from_optimizer_url(api_url: str) -> tuple[str, str]:
+    value = str(api_url or "").strip().rstrip("/")
+    for suffix in ("/v1/chat/completions", "/v1/responses"):
+        if value.endswith(suffix):
+            return value[: -len(suffix)].rstrip("/"), suffix
+    return value, "/v1/chat/completions"
+
+
+def normalize_ai_assistant_settings(raw: dict | None) -> dict:
+    defaults = _default_ai_assistant_settings()
+    if not isinstance(raw, dict):
+        return defaults
+    vision_model = (
+        str(raw.get("vision_model") or defaults["vision_model"] or config.PROMPT_OPTIMIZER_MODEL).strip()
+        or config.PROMPT_OPTIMIZER_MODEL
+    )
+    return {
+        "enabled": bool(raw.get("enabled", defaults["enabled"])),
+        "vision_model": vision_model,
+    }
+
+
 def persist_api_settings():
     storage.save_settings(
         {
@@ -168,6 +201,7 @@ def persist_api_settings():
             "webhook_url": get_webhook_url(raw=True),
             "presets": get_api_presets(),
             "prompt_optimizer": get_prompt_optimizer_settings(),
+            "ai_assistant": get_ai_assistant_settings(),
             "r2_backup": get_r2_backup_settings(),
         }
     )
@@ -319,6 +353,7 @@ def build_settings_response() -> SettingsResponse:
     active_preset = get_active_preset()
     key_fields = api_key_response_fields(active_preset.get("api_key", ""))
     optimizer_raw = get_prompt_optimizer_settings()
+    assistant_raw = get_ai_assistant_settings()
     return SettingsResponse(
         active_preset_id=active_preset["id"],
         api_url=active_preset.get("api_url", ""),
@@ -337,6 +372,7 @@ def build_settings_response() -> SettingsResponse:
         **webhook_url_response_fields(),
         presets=[serialize_api_preset(preset) for preset in get_api_presets()],
         prompt_optimizer=build_prompt_optimizer_settings_response(optimizer_raw),
+        ai_assistant=build_ai_assistant_settings_response(assistant_raw),
         r2_backup=build_r2_backup_settings_response(get_r2_backup_settings()),
     )
 
@@ -353,6 +389,25 @@ def build_prompt_optimizer_settings_response(raw: dict | None) -> PromptOptimize
             raw.get("timeout_seconds"),
             config.PROMPT_OPTIMIZER_TIMEOUT_SECONDS,
         ),
+        **key_fields,
+    )
+
+
+def build_ai_assistant_settings_response(raw: dict | None) -> AIAssistantSettingsResponse:
+    raw = effective_ai_assistant_settings(raw)
+    key_fields = api_key_response_fields(raw.get("api_key", ""))
+    return AIAssistantSettingsResponse(
+        enabled=bool(raw.get("enabled", False)),
+        api_url=str(raw.get("api_url", "")).strip(),
+        model=str(raw.get("model") or config.PROMPT_OPTIMIZER_MODEL).strip()
+        or config.PROMPT_OPTIMIZER_MODEL,
+        vision_model=str(raw.get("vision_model") or raw.get("model") or config.PROMPT_OPTIMIZER_MODEL).strip()
+        or config.PROMPT_OPTIMIZER_MODEL,
+        timeout_seconds=_coerce_positive_int(
+            raw.get("timeout_seconds"),
+            config.PROMPT_OPTIMIZER_TIMEOUT_SECONDS,
+        ),
+        api_path=_normalize_assistant_api_path(raw.get("api_path")),
         **key_fields,
     )
 
@@ -407,8 +462,55 @@ def resolve_prompt_optimizer_api_key(raw: dict | None) -> str:
     return api_key
 
 
+def resolve_ai_assistant_api_key(raw: dict | None) -> str:
+    settings = effective_ai_assistant_settings(raw)
+    api_key = str(settings.get("api_key") or "").strip()
+    env_var = get_api_key_env_var(api_key)
+    if is_malformed_api_key_env_ref(api_key):
+        raise HTTPException(
+            status_code=400,
+            detail="Prompt Optimizer API Key env ref for AI Assistant must be formatted as ${ENV_VAR_NAME}.",
+        )
+    resolved_key = resolve_api_key(api_key)
+    if resolved_key:
+        return resolved_key
+    if env_var:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Prompt Optimizer API Key environment variable {env_var} is not set or empty for AI Assistant. "
+                "Set it in the server environment."
+            ),
+        )
+    if not api_key:
+        return ""
+    return api_key
+
+
 def get_prompt_optimizer_settings() -> dict:
     return storage.load_prompt_optimizer_settings()
+
+
+def get_ai_assistant_settings() -> dict:
+    return storage.load_ai_assistant_settings()
+
+
+def effective_ai_assistant_settings(raw: dict | None = None) -> dict:
+    assistant = normalize_ai_assistant_settings(raw if raw is not None else get_ai_assistant_settings())
+    optimizer = normalize_prompt_optimizer_settings(get_prompt_optimizer_settings())
+    api_url, api_path = _assistant_endpoint_from_optimizer_url(str(optimizer.get("api_url") or ""))
+    model = str(optimizer.get("model") or assistant.get("model") or config.PROMPT_OPTIMIZER_MODEL).strip()
+    return {
+        **assistant,
+        "api_url": api_url,
+        "api_key": str(optimizer.get("api_key") or "").strip(),
+        "model": model or config.PROMPT_OPTIMIZER_MODEL,
+        "timeout_seconds": _coerce_positive_int(
+            optimizer.get("timeout_seconds"),
+            config.PROMPT_OPTIMIZER_TIMEOUT_SECONDS,
+        ),
+        "api_path": api_path,
+    }
 
 
 def get_r2_backup_settings() -> dict:
@@ -438,6 +540,17 @@ def apply_prompt_optimizer_settings(
             current["api_key"] = key
         elif key == "":
             current["api_key"] = ""
+    return current
+
+
+def apply_ai_assistant_settings(current: dict | None, req_assistant: object) -> dict:
+    current = normalize_ai_assistant_settings(current)
+    if req_assistant is None:
+        return current
+    if hasattr(req_assistant, "enabled") and req_assistant.enabled is not None:
+        current["enabled"] = req_assistant.enabled
+    if hasattr(req_assistant, "vision_model") and req_assistant.vision_model is not None:
+        current["vision_model"] = req_assistant.vision_model.strip()
     return current
 
 

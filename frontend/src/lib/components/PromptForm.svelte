@@ -9,10 +9,13 @@
   export let loading = false;
   export let optimizing = false;
   export let optimizerEnabled = false;
+  export let editPlannerEnabled = false;
+  export let editPlanning = false;
   export let onGenerate: () => void = () => {};
   export let onEdit: () => void = () => {};
   export let onOpenSize: () => void = () => {};
   export let onOptimize: () => void = () => {};
+  export let onPlanEdit: () => void = () => {};
   export let onAppendPromptTag: (value: string) => void = () => {};
 
   $: promptLen = form.prompt.length;
@@ -165,6 +168,14 @@
     <div class="flex gap-2">
       <button type="button" disabled={loading} class="control-focus rounded-xl bg-stone-900 px-4 py-3 text-sm font-semibold text-white hover:bg-stone-700 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600" on:click={onEdit}>
         {$t.promptForm.edits}
+      </button>
+      <button
+        type="button"
+        disabled={loading || editPlanning || !editPlannerEnabled || !form.prompt.trim()}
+        class="control-focus rounded-xl border border-cyan-500/35 px-4 py-3 text-sm font-semibold text-cyan-700 hover:bg-cyan-500/10 disabled:cursor-not-allowed disabled:border-stone-300 disabled:text-stone-400 disabled:opacity-60 dark:text-cyan-200 dark:disabled:border-zinc-700 dark:disabled:text-zinc-500"
+        on:click={onPlanEdit}
+      >
+        {editPlanning ? $t.promptForm.planningEdit : $t.promptForm.planEdit}
       </button>
       <button type="button" disabled={loading} class="control-focus rounded-xl bg-emerald-600 px-4 py-3 text-sm font-semibold text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50" on:click={onGenerate}>
         {$t.promptForm.generate}

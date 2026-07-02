@@ -1,4 +1,5 @@
 export type ApiPath = '/v1/images/generations' | '/v1/responses' | '/v1/chat/completions';
+export type AssistantApiPath = '/v1/chat/completions' | '/v1/responses';
 export type ApiKeySource = 'empty' | 'stored' | 'env';
 export type OverallConfigValueType = 'string' | 'secret' | 'bool' | 'int' | 'float';
 export type OverallConfigValueSource = 'override' | 'env' | 'default';
@@ -8,6 +9,7 @@ export type GenerateJobStatusValue = 'queued' | 'running' | 'success' | 'error' 
 export type GalleryExportJobStatusValue = 'queued' | 'running' | 'success' | 'error';
 export type GallerySyncJobStatusValue = 'queued' | 'running' | 'success' | 'error';
 export type GalleryImportJobStatusValue = 'queued' | 'running' | 'success' | 'error';
+export type AssistantGalleryBatchJobStatusValue = GalleryImportJobStatusValue;
 
 export type ApiPreset = {
   id: string;
@@ -38,6 +40,7 @@ export type SettingsResponse = {
   webhook_url_masked: string;
   presets: ApiPreset[];
   prompt_optimizer: PromptOptimizerSettings;
+  ai_assistant: AIAssistantSettings;
   r2_backup: R2BackupSettings;
 };
 
@@ -60,12 +63,38 @@ export type PromptOptimizerHealthResponse = {
   status_code?: number | null;
 };
 
+export type AssistantHealthResponse = {
+  status: 'ok' | 'warning' | 'error';
+  message: string;
+  model: string;
+  duration_ms: number;
+  status_code?: number | null;
+};
+
 export type PromptOptimizerSettingsInput = {
   enabled?: boolean | null;
   api_url?: string | null;
   model?: string | null;
   timeout_seconds?: number | null;
   api_key?: string | null;
+};
+
+export type AIAssistantSettings = {
+  enabled: boolean;
+  api_url: string;
+  model: string;
+  vision_model: string;
+  timeout_seconds: number;
+  api_path: AssistantApiPath;
+  api_key_masked: string;
+  has_api_key: boolean;
+  api_key_source: ApiKeySource;
+  api_key_env_var?: string | null;
+};
+
+export type AIAssistantSettingsInput = {
+  enabled?: boolean | null;
+  vision_model?: string | null;
 };
 
 export type R2BackupSettings = {
@@ -113,6 +142,7 @@ export type SettingsInput = {
   upstream_socks5_proxy?: string | null;
   webhook_url?: string | null;
   prompt_optimizer?: PromptOptimizerSettingsInput | null;
+  ai_assistant?: AIAssistantSettingsInput | null;
   r2_backup?: R2BackupSettingsInput | null;
 };
 
@@ -195,6 +225,143 @@ export type PromptOptimizeResponse = {
   optimized_prompt: string;
   model: string;
   duration_ms: number;
+};
+
+export type AssistantBaseResponse = {
+  model: string;
+  duration_ms: number;
+  warnings: string[];
+};
+
+export type AssistantPromptRewriteRequest = {
+  prompt: string;
+  instruction?: string | null;
+  target_language?: 'en' | 'zh-CN' | 'same';
+  api_path?: ApiPath | null;
+  model?: string | null;
+  size?: string | null;
+  quality?: 'auto' | 'low' | 'medium' | 'high' | null;
+};
+
+export type AssistantPromptRewriteResponse = AssistantBaseResponse & {
+  rewritten_prompt: string;
+};
+
+export type AssistantPromptCheckRequest = {
+  prompt: string;
+  api_path?: ApiPath | null;
+  model?: string | null;
+  size?: string | null;
+  quality?: 'auto' | 'low' | 'medium' | 'high' | null;
+};
+
+export type AssistantPromptIssue = {
+  severity: 'info' | 'warning' | 'error';
+  message: string;
+  suggestion?: string | null;
+};
+
+export type AssistantPromptCheckResponse = AssistantBaseResponse & {
+  score: number;
+  summary: string;
+  issues: AssistantPromptIssue[];
+};
+
+export type AssistantPromptVariantsRequest = AssistantPromptRewriteRequest & {
+  count?: number;
+};
+
+export type AssistantPromptVariant = {
+  title: string;
+  prompt: string;
+  angle?: string | null;
+};
+
+export type AssistantPromptVariantsResponse = AssistantBaseResponse & {
+  variants: AssistantPromptVariant[];
+};
+
+export type AssistantRecommendParamsRequest = {
+  prompt: string;
+  api_path: ApiPath;
+  current_model?: string | null;
+  current_size?: string | null;
+  current_quality?: 'auto' | 'low' | 'medium' | 'high' | null;
+  current_output_format?: 'png' | 'jpeg' | 'webp' | null;
+  current_n?: number | null;
+};
+
+export type AssistantRecommendParamsResponse = AssistantBaseResponse & {
+  model_name?: string | null;
+  size?: string | null;
+  quality?: 'auto' | 'low' | 'medium' | 'high' | null;
+  output_format?: 'png' | 'jpeg' | 'webp' | null;
+  n?: number | null;
+  rationale: string;
+};
+
+export type AssistantJobDiagnoseRequest = {
+  include_prompt?: boolean;
+};
+
+export type AssistantJobDiagnoseResponse = AssistantBaseResponse & {
+  summary: string;
+  likely_causes: string[];
+  recommended_actions: string[];
+  safe_job: Record<string, unknown>;
+};
+
+export type AssistantEditPlanRequest = {
+  goal: string;
+  source_count?: number;
+  current_prompt?: string | null;
+  target_size?: string | null;
+};
+
+export type AssistantEditPlanResponse = AssistantBaseResponse & {
+  edit_prompt: string;
+  source_requirements: string[];
+  suggested_size?: string | null;
+  confidence: number;
+  next_action: 'confirm' | 'revise' | 'add_sources';
+};
+
+export type AssistantGalleryImageResponse = AssistantBaseResponse & {
+  image_id: string;
+  description: string;
+  prompt: string;
+  analysis: Record<string, unknown>;
+};
+
+export type AssistantGalleryMetadataResponse = {
+  image_id: string;
+  description: string;
+  prompt: string;
+  analysis: Record<string, unknown>;
+  model: string;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
+export type AssistantGalleryBatchRequest = {
+  ids?: string[] | null;
+  selection_token?: string | null;
+};
+
+export type AssistantGalleryBatchJobStatus = {
+  job_id: string;
+  status: AssistantGalleryBatchJobStatusValue;
+  stage?: string | null;
+  message?: string | null;
+  progress: number;
+  requested_count: number;
+  processed_count: number;
+  analyzed_count: number;
+  missing_count: number;
+  failed_count: number;
+  created_at?: string | null;
+  updated_at?: string | null;
+  error?: string | null;
 };
 
 export type PromptSnippet = {

@@ -28,7 +28,7 @@
 {#if visible}
   <div
     class="mobile-dialog-root fixed inset-0 z-[100] flex items-center justify-center bg-stone-100 px-4 dark:bg-zinc-950"
-    aria-labelledby="access-gate-title"
+    aria-label={$t.access.dialogLabel}
     use:dialog={{ open: visible }}
   >
     <button

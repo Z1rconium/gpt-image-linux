@@ -22,6 +22,7 @@ from backend.app import main as backend_main
 from backend.app.api import app_state
 from backend.app.api import body_limit
 from backend.app.api import jobs
+from backend.app.api.routers import assistant as assistant_router
 from backend.app.api.edit_limits import (
     EDIT_MULTIPART_METADATA_OVERHEAD_BYTES,
     MAX_EDIT_SOURCE_IMAGES,
@@ -177,6 +178,11 @@ def _configure_runtime(tmp_path: Path, *, access_key: str = "", allow_unauthenti
     config.PROMPT_OPTIMIZER_MAX_OUTPUT_CHARS = 4000
     config.PROMPT_OPTIMIZER_MAX_RESPONSE_MB = 8
     config.PROMPT_OPTIMIZER_HOST_ALLOWLIST = ""
+    config.AI_ASSISTANT_ENABLED = True
+    config.AI_ASSISTANT_VISION_MODEL = "gpt-4o-mini"
+    config.AI_ASSISTANT_MAX_RESPONSE_MB = 8
+    config.AI_ASSISTANT_IMAGE_MAX_SIDE = 1024
+    config.AI_ASSISTANT_IMAGE_MAX_BYTES = 1048576
     config.R2_BACKUP_ENABLED = False
     config.R2_ENDPOINT_URL = ""
     config.R2_ENDPOINT_HOST_ALLOWLIST = ""
@@ -276,6 +282,19 @@ def _wait_for_gallery_import_job(client: TestClient, job_id: str, timeout: float
             return last
         time.sleep(0.05)
     raise AssertionError(f"gallery import job {job_id} did not finish: {last}")
+
+
+def _wait_for_gallery_batch_analyze_job(client: TestClient, job_id: str, timeout: float = 5.0):
+    deadline = time.time() + timeout
+    last = None
+    while time.time() < deadline:
+        resp = client.get(f"/api/assistant/gallery/batch/analyze/{job_id}")
+        assert resp.status_code == 200
+        last = resp.json()
+        if last["status"] in {"success", "error"}:
+            return last
+        time.sleep(0.05)
+    raise AssertionError(f"assistant gallery batch job {job_id} did not finish: {last}")
 
 
 def _fake_gallery_entry(image_id: str, prompt: str, size: str, filename: str):
@@ -1425,6 +1444,42 @@ def _settings_payload(settings: dict, **overrides):
     return payload
 
 
+def _assistant_payload(settings: dict, **overrides):
+    payload = _settings_payload(settings)
+    payload["ai_assistant"] = {
+        "enabled": False,
+        "vision_model": "gpt-4o-mini",
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _assistant_runtime_payload(
+    settings: dict,
+    *,
+    assistant_enabled: bool = True,
+    vision_model: str = "assistant-vision-model",
+    optimizer_api_url: str = "https://example.com/v1/chat/completions",
+    optimizer_model: str = "assistant-model",
+    optimizer_timeout_seconds: int = 45,
+    optimizer_api_key: str = "${TEST_PROMPT_OPTIMIZER_API_KEY}",
+):
+    return _settings_payload(
+        settings,
+        prompt_optimizer={
+            "enabled": True,
+            "api_url": optimizer_api_url,
+            "model": optimizer_model,
+            "timeout_seconds": optimizer_timeout_seconds,
+            "api_key": optimizer_api_key,
+        },
+        ai_assistant={
+            "enabled": assistant_enabled,
+            "vision_model": vision_model,
+        },
+    )
+
+
 def test_prompt_optimizer_settings_mask_preserve_and_clear(client):
     settings = client.get("/api/settings").json()
     assert settings["prompt_optimizer"]["enabled"] is False
@@ -1509,6 +1564,101 @@ def test_prompt_optimizer_settings_mask_preserve_and_clear(client):
     assert invalid_timeout.status_code == 422
 
 
+def test_ai_assistant_settings_mask_preserve_and_clear(client):
+    settings = client.get("/api/settings").json()
+    configured_optimizer = client.post(
+        "/api/settings",
+        json=_settings_payload(
+            settings,
+            prompt_optimizer={
+                "enabled": True,
+                "api_url": "https://example.com/v1/chat/completions",
+                "model": "shared-model",
+                "timeout_seconds": 75,
+                "api_key": "${TEST_PROMPT_OPTIMIZER_API_KEY}",
+            },
+        ),
+    )
+    assert configured_optimizer.status_code == 200
+    settings = configured_optimizer.json()
+    assistant = settings["ai_assistant"]
+    assert assistant["enabled"] is True
+    assert assistant["has_api_key"] is True
+    assert assistant["api_key_source"] == "env"
+    assert assistant["api_key_env_var"] == "TEST_PROMPT_OPTIMIZER_API_KEY"
+    assert assistant["api_url"] == "https://example.com"
+    assert assistant["model"] == "shared-model"
+    assert assistant["vision_model"] == "gpt-4o-mini"
+    assert assistant["timeout_seconds"] == 75
+    assert assistant["api_path"] == "/v1/chat/completions"
+
+    updated = client.post(
+        "/api/settings",
+        json=_assistant_payload(
+            settings,
+            ai_assistant={
+                "enabled": True,
+                "vision_model": "assistant-vision-model",
+            },
+        ),
+    )
+
+    assert updated.status_code == 200
+    body = updated.json()
+    assistant = body["ai_assistant"]
+    assert assistant["enabled"] is True
+    assert assistant["api_url"] == "https://example.com"
+    assert assistant["model"] == "shared-model"
+    assert assistant["vision_model"] == "assistant-vision-model"
+    assert assistant["timeout_seconds"] == 75
+    assert assistant["api_path"] == "/v1/chat/completions"
+    assert assistant["has_api_key"] is True
+    assert assistant["api_key_source"] == "env"
+    assert assistant["api_key_env_var"] == "TEST_PROMPT_OPTIMIZER_API_KEY"
+    assert "optimizer-secret" not in json.dumps(body)
+    assert storage.load_ai_assistant_settings()["vision_model"] == "assistant-vision-model"
+    assert "api_key" not in storage.load_ai_assistant_settings()
+
+    preserved = client.post(
+        "/api/settings",
+        json=_assistant_payload(
+            body,
+            ai_assistant={
+                "enabled": True,
+                "vision_model": "assistant-vision-model",
+            },
+        ),
+    )
+    assert preserved.status_code == 200
+    assert storage.load_ai_assistant_settings()["vision_model"] == "assistant-vision-model"
+
+    cleared = client.post(
+        "/api/settings",
+        json=_assistant_payload(
+            preserved.json(),
+            ai_assistant={
+                "enabled": False,
+                "vision_model": "gpt-4o-mini",
+            },
+        ),
+    )
+    assert cleared.status_code == 200
+    assert cleared.json()["ai_assistant"]["has_api_key"] is True
+    assert "api_key" not in storage.load_ai_assistant_settings()
+
+    invalid_timeout = client.post(
+        "/api/settings",
+        json=_assistant_payload(
+            cleared.json(),
+            ai_assistant={
+                "enabled": False,
+                "vision_model": "gpt-4o-mini",
+            },
+        ),
+    )
+    assert invalid_timeout.status_code == 200
+
+
 def test_prompt_optimizer_rejects_plaintext_api_key_by_default(client):
     settings = client.get("/api/settings").json()
     resp = client.post(
@@ -1527,6 +1677,557 @@ def test_prompt_optimizer_rejects_plaintext_api_key_by_default(client):
 
     assert resp.status_code == 422
     assert "Prompt optimizer API key must use ${ENV_VAR_NAME} unless ALLOW_PLAINTEXT_SECRETS=true." in resp.text
+
+
+def test_ai_assistant_health_reports_success_and_config_errors(client, monkeypatch):
+    settings = client.get("/api/settings").json()
+
+    missing_initial_config = client.post("/api/assistant/health")
+    assert missing_initial_config.status_code == 200
+    assert missing_initial_config.json()["status"] == "error"
+    assert "Prompt Optimizer endpoint URL is not configured" in missing_initial_config.json()["message"]
+
+    configured = client.post(
+        "/api/settings",
+        json=_settings_payload(
+            settings,
+            prompt_optimizer={
+                "enabled": True,
+                "api_url": "https://example.com/v1/chat/completions",
+                "model": "shared-model",
+                "timeout_seconds": 45,
+                "api_key": "${TEST_PROMPT_OPTIMIZER_API_KEY}",
+            },
+        ),
+    )
+    assert configured.status_code == 200
+    enabled = client.post(
+        "/api/settings",
+        json=_assistant_payload(
+            configured.json(),
+            ai_assistant={
+                "enabled": True,
+                "vision_model": "assistant-vision-model",
+            },
+        ),
+    )
+    assert enabled.status_code == 200
+
+    probe_calls: list[dict[str, object]] = []
+
+    async def fake_probe(*, api_url, api_key, api_path, model, timeout_seconds):
+        probe_calls.append(
+            {
+                "api_url": api_url,
+                "api_key": api_key,
+                "api_path": api_path,
+                "model": model,
+                "timeout_seconds": timeout_seconds,
+            }
+        )
+        return {
+            "status": "ok",
+            "message": f"AI Assistant responded successfully with model {model}",
+            "model": model,
+            "duration_ms": 12,
+            "status_code": 200,
+        }
+
+    monkeypatch.setattr(assistant_router.assistant_client, "probe_assistant_endpoint", fake_probe)
+    healthy = client.post("/api/assistant/health")
+    assert healthy.status_code == 200
+    assert healthy.json() == {
+        "status": "ok",
+        "message": "AI Assistant responded successfully with model shared-model",
+        "model": "shared-model",
+        "duration_ms": 12,
+        "status_code": 200,
+    }
+    assert probe_calls[-1]["api_url"] == "https://example.com"
+    assert probe_calls[-1]["api_key"] == "optimizer-key"
+    assert probe_calls[-1]["api_path"] == "/v1/chat/completions"
+    assert probe_calls[-1]["timeout_seconds"] == 45
+
+    draft_healthy = client.post(
+        "/api/assistant/health",
+        json={
+            "enabled": True,
+            "vision_model": "draft-assistant-vision-model",
+            "api_path": "/v1/responses",
+        },
+    )
+    assert draft_healthy.status_code == 200
+    assert draft_healthy.json()["status"] == "ok"
+    assert draft_healthy.json()["model"] == "shared-model"
+    assert probe_calls[-1]["api_path"] == "/v1/chat/completions"
+    assert "model" not in storage.load_ai_assistant_settings()
+
+    missing_url_settings = client.post(
+        "/api/settings",
+        json=_settings_payload(
+            enabled.json(),
+            prompt_optimizer={
+                "enabled": True,
+                "api_url": "",
+                "model": "shared-model",
+                "timeout_seconds": 45,
+                "api_key": "${TEST_PROMPT_OPTIMIZER_API_KEY}",
+            },
+        ),
+    )
+    assert missing_url_settings.status_code == 200
+    missing_url = client.post("/api/assistant/health")
+    assert missing_url.status_code == 200
+    assert missing_url.json()["status"] == "error"
+    assert "not configured" in missing_url.json()["message"]
+
+
+def test_ai_assistant_prompt_tools_and_param_recommendations(client, monkeypatch):
+    settings = client.get("/api/settings").json()
+    configured = client.post(
+        "/api/settings",
+        json=_assistant_runtime_payload(settings, optimizer_api_url="https://example.com/v1/responses"),
+    )
+    assert configured.status_code == 200
+
+    seen: dict[str, object] = {}
+
+    async def fake_request_assistant_json(**kwargs):
+        seen["kwargs"] = kwargs
+        schema = kwargs["schema"]
+        if "rewritten_prompt" in schema:
+            return ({"rewritten_prompt": "expanded prompt", "warnings": ["warn"]}, "assistant-model", 11)
+        if "score" in schema:
+            return (
+                {
+                    "score": 83,
+                    "summary": "Clear enough",
+                    "issues": [
+                        {"severity": "warning", "message": "Too vague", "suggestion": "Add lighting"}
+                    ],
+                    "warnings": [],
+                },
+                "assistant-model",
+                12,
+            )
+        if "variants" in schema:
+            return (
+                {
+                    "variants": [
+                        {"title": "Variant 1", "prompt": "one", "angle": "alt"},
+                        {"title": "Variant 2", "prompt": "two"},
+                    ],
+                    "warnings": ["useful"],
+                },
+                "assistant-model",
+                13,
+            )
+        if "model_name" in schema:
+            return (
+                {
+                    "model_name": "assistant-model",
+                    "size": "1024x1024",
+                    "quality": "high",
+                    "output_format": "png",
+                    "n": 8,
+                    "rationale": "good fit",
+                    "warnings": ["responses path"],
+                },
+                "assistant-model",
+                14,
+            )
+        raise AssertionError(f"Unexpected schema {schema}")
+
+    monkeypatch.setattr(assistant_router.assistant_client, "request_assistant_json", fake_request_assistant_json)
+
+    rewrite = client.post(
+        "/api/assistant/prompt/rewrite",
+        json={
+            "prompt": "tiny robot",
+            "instruction": "make it cinematic",
+            "target_language": "en",
+            "api_path": "/v1/images/generations",
+            "model": "gpt-image-2",
+            "size": "1024x1024",
+            "quality": "high",
+        },
+    )
+    assert rewrite.status_code == 200
+    assert rewrite.json()["rewritten_prompt"] == "expanded prompt"
+    assert rewrite.json()["warnings"] == ["warn"]
+
+    check = client.post(
+        "/api/assistant/prompt/check",
+        json={
+            "prompt": "tiny robot",
+            "api_path": "/v1/responses",
+            "model": "gpt-image-2",
+            "size": "1024x1024",
+            "quality": "high",
+        },
+    )
+    assert check.status_code == 200
+    assert check.json()["score"] == 83
+    assert check.json()["issues"][0]["severity"] == "warning"
+
+    variants = client.post(
+        "/api/assistant/prompt/variants",
+        json={
+            "prompt": "tiny robot",
+            "instruction": "make it cinematic",
+            "count": 3,
+            "target_language": "same",
+            "api_path": "/v1/chat/completions",
+            "model": "gpt-image-2",
+            "size": "1024x1024",
+            "quality": "high",
+        },
+    )
+    assert variants.status_code == 200
+    assert [item["title"] for item in variants.json()["variants"]] == ["Variant 1", "Variant 2"]
+
+    recommend_chat = client.post(
+        "/api/assistant/generate/recommend-params",
+        json={
+            "prompt": "tiny robot",
+            "api_path": "/v1/chat/completions",
+            "current_model": "gpt-image-2",
+            "current_size": "1024x1024",
+            "current_quality": "high",
+            "current_output_format": "png",
+            "current_n": 1,
+        },
+    )
+    assert recommend_chat.status_code == 200
+    assert recommend_chat.json()["size"] is None
+    assert any("does not support" in warning for warning in recommend_chat.json()["warnings"])
+
+    recommend_images = client.post(
+        "/api/assistant/generate/recommend-params",
+        json={
+            "prompt": "tiny robot",
+            "api_path": "/v1/images/generations",
+            "current_model": "gpt-image-2",
+            "current_size": "1024x1024",
+            "current_quality": "high",
+            "current_output_format": "png",
+            "current_n": 1,
+        },
+    )
+    assert recommend_images.status_code == 200
+    assert recommend_images.json()["size"] == "1024x1024"
+    assert recommend_images.json()["n"] == 8
+    assert recommend_images.json()["model_name"] == "assistant-model"
+
+    assert seen["kwargs"]["api_url"] == "https://example.com"
+    assert seen["kwargs"]["api_key"] == "optimizer-key"
+    assert seen["kwargs"]["api_path"] == "/v1/responses"
+
+
+def test_ai_assistant_job_diagnose_does_not_expose_secrets(client, monkeypatch):
+    settings = client.get("/api/settings").json()
+    configured = client.post(
+        "/api/settings",
+        json=_assistant_runtime_payload(settings),
+    )
+    assert configured.status_code == 200
+
+    storage.upsert_generate_job(
+        {
+            "job_id": "diagnose-job",
+            "status": "error",
+            "stage": "generation_failed",
+            "message": "Failed upstream",
+            "operation": "generation",
+            "prompt": "secret prompt",
+            "size": "1024x1024",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "updated_at": "2026-01-01T00:00:00+00:00",
+            "completed_at": "2026-01-01T00:00:00+00:00",
+            "api_path": "/v1/images/generations",
+            "api_preset_name": "Default",
+            "error": "upstream failed",
+        }
+    )
+
+    async def fake_request_assistant_json(**kwargs):
+        assert "secret prompt" in kwargs["user_prompt"]
+        assert "env-secret" not in kwargs["user_prompt"]
+        return (
+            {
+                "summary": "Upstream failure",
+                "likely_causes": ["invalid prompt"],
+                "recommended_actions": ["retry"],
+                "warnings": ["no secrets"],
+            },
+            "assistant-model",
+            15,
+        )
+
+    monkeypatch.setattr(assistant_router.assistant_client, "request_assistant_json", fake_request_assistant_json)
+    resp = client.post("/api/assistant/jobs/diagnose-job/diagnose", json={"include_prompt": True})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["summary"] == "Upstream failure"
+    assert body["safe_job"]["job_id"] == "diagnose-job"
+    assert "env-secret" not in json.dumps(body)
+
+
+def test_ai_assistant_gallery_metadata_and_analysis_flow(client, monkeypatch):
+    settings = client.get("/api/settings").json()
+    configured = client.post(
+        "/api/settings",
+        json=_assistant_runtime_payload(settings),
+    )
+    assert configured.status_code == 200
+
+    seeded = _fake_gallery_entry("assistant-gallery", "gallery prompt", "1024x1024", "assistant-gallery.png")
+    assert seeded is not None
+
+    async def fake_request_assistant_json(**kwargs):
+        if "preview" in kwargs["user_prompt"]:
+            assert kwargs["image"]["mime_type"] == "image/jpeg"
+            assert kwargs["image"]["bytes"] <= config.AI_ASSISTANT_IMAGE_MAX_BYTES
+            return (
+                {
+                    "description": "A small red square",
+                    "prompt": "red square on white background",
+                    "analysis": {
+                        "subjects": ["square"],
+                        "style": "minimal",
+                        "composition": "centered",
+                        "lighting": "flat",
+                        "colors": ["red", "white"],
+                    },
+                    "warnings": [],
+                },
+                "assistant-vision-model",
+                17,
+            )
+        raise AssertionError("unexpected assistant request")
+
+    monkeypatch.setattr(assistant_router.assistant_client, "request_assistant_json", fake_request_assistant_json)
+
+    describe = client.post("/api/assistant/gallery/assistant-gallery/describe")
+    assert describe.status_code == 200
+    assert describe.json()["description"] == "A small red square"
+    assert describe.json()["prompt"] == ""
+    assert describe.json()["analysis"] == {}
+
+    prompt = client.post("/api/assistant/gallery/assistant-gallery/prompt")
+    assert prompt.status_code == 200
+    assert prompt.json()["description"] == ""
+    assert prompt.json()["prompt"] == "red square on white background"
+
+    analyze = client.post("/api/assistant/gallery/assistant-gallery/analyze")
+    assert analyze.status_code == 200
+    assert analyze.json()["description"] == "A small red square"
+    metadata = client.get("/api/assistant/gallery/assistant-gallery/metadata")
+    assert metadata.status_code == 200
+    assert metadata.json()["prompt"] == "red square on white background"
+    assert metadata.json()["model"] == "assistant-vision-model"
+
+
+def test_ai_assistant_gallery_batch_analysis_jobs_and_limits(client, monkeypatch):
+    settings = client.get("/api/settings").json()
+    configured = client.post(
+        "/api/settings",
+        json=_assistant_runtime_payload(settings),
+    )
+    assert configured.status_code == 200
+
+    first = _fake_gallery_entry("assistant-batch-1", "prompt 1", "1024x1024", "assistant-batch-1.png")
+    second = _fake_gallery_entry("assistant-batch-2", "prompt 2", "1024x1024", "assistant-batch-2.png")
+    assert first is not None and second is not None
+
+    seen: list[str] = []
+
+    async def fake_request_assistant_json(**kwargs):
+        seen.append(kwargs["user_prompt"])
+        return (
+            {
+                "description": "batch",
+                "prompt": "batch prompt",
+                "analysis": {"subjects": ["batch"]},
+                "warnings": [],
+            },
+            "assistant-vision-model",
+            9,
+        )
+
+    monkeypatch.setattr(assistant_router.assistant_client, "request_assistant_json", fake_request_assistant_json)
+
+    submitted = client.post(
+        "/api/assistant/gallery/batch/analyze",
+        json={"ids": ["assistant-batch-1", "assistant-batch-2"]},
+    )
+    assert submitted.status_code == 202
+    job_id = submitted.json()["job_id"]
+
+    job = _wait_for_gallery_batch_analyze_job(client, job_id)
+    assert job["status"] == "success"
+    assert job["requested_count"] == 2
+    assert job["analyzed_count"] == 2
+    assert storage.get_gallery_ai_metadata("assistant-batch-1") is not None
+    assert storage.get_gallery_ai_metadata("assistant-batch-2") is not None
+    assert len(seen) == 2
+
+    storage.create_gallery_job(
+        job_id="assistant-batch-running",
+        kind="ai_analyze",
+        status="running",
+        stage="analyzing",
+        message="busy",
+        progress=5,
+        created_at="2026-01-01T00:00:00+00:00",
+        updated_at="2026-01-01T00:00:00+00:00",
+        lease_expires_at="2999-01-01T00:00:00+00:00",
+        requested_count=1,
+        payload={"ids": ["assistant-batch-1"]},
+    )
+    limited = client.post(
+        "/api/assistant/gallery/batch/analyze",
+        json={"ids": ["assistant-batch-1"]},
+    )
+    assert limited.status_code == 429
+    assert "already queued or running" in limited.json()["detail"]
+
+
+def test_ai_assistant_gallery_batch_analysis_validates_runtime_before_queueing(client, monkeypatch):
+    settings = client.get("/api/settings").json()
+    configured = client.post(
+        "/api/settings",
+        json=_assistant_runtime_payload(
+            settings,
+            optimizer_api_key="${MISSING_ASSISTANT_API_KEY}",
+        ),
+    )
+    assert configured.status_code == 200
+    monkeypatch.delenv("MISSING_ASSISTANT_API_KEY", raising=False)
+
+    entry = _fake_gallery_entry("assistant-batch-config-error", "prompt", "1024x1024", "assistant-batch-config.png")
+    assert entry is not None
+
+    submitted = client.post(
+        "/api/assistant/gallery/batch/analyze",
+        json={"ids": ["assistant-batch-config-error"]},
+    )
+
+    assert submitted.status_code == 400
+    assert "MISSING_ASSISTANT_API_KEY is not set or empty" in submitted.json()["detail"]
+    assert storage.count_active_gallery_jobs("ai_analyze") == 0
+
+
+def test_ai_assistant_gallery_batch_analysis_renews_lease_during_image_calls(client, monkeypatch):
+    settings = client.get("/api/settings").json()
+    configured = client.post(
+        "/api/settings",
+        json=_assistant_runtime_payload(settings),
+    )
+    assert configured.status_code == 200
+    entry = _fake_gallery_entry("assistant-batch-renew", "prompt", "1024x1024", "assistant-batch-renew.png")
+    assert entry is not None
+
+    original_interval = assistant_router.AI_ANALYZE_JOB_LEASE_RENEW_SECONDS
+    assistant_router.AI_ANALYZE_JOB_LEASE_RENEW_SECONDS = 0.01
+    renewals: list[tuple[str, str]] = []
+    original_renew = storage.renew_gallery_job_lease
+
+    def fake_renew_gallery_job_lease(**kwargs):
+        renewals.append((kwargs["job_id"], kwargs["lease_owner"]))
+        return original_renew(**kwargs)
+
+    async def fake_request_assistant_json(**kwargs):
+        await asyncio.sleep(0.05)
+        return (
+            {
+                "description": "renewed",
+                "prompt": "renewed prompt",
+                "analysis": {"subjects": ["renewed"]},
+                "warnings": [],
+            },
+            "assistant-vision-model",
+            9,
+        )
+
+    monkeypatch.setattr(storage, "renew_gallery_job_lease", fake_renew_gallery_job_lease)
+    monkeypatch.setattr(assistant_router.assistant_client, "request_assistant_json", fake_request_assistant_json)
+    try:
+        submitted = client.post(
+            "/api/assistant/gallery/batch/analyze",
+            json={"ids": ["assistant-batch-renew"]},
+        )
+        assert submitted.status_code == 202
+        job_id = submitted.json()["job_id"]
+        job = _wait_for_gallery_batch_analyze_job(client, job_id)
+    finally:
+        assistant_router.AI_ANALYZE_JOB_LEASE_RENEW_SECONDS = original_interval
+
+    assert job["status"] == "success"
+    assert renewals
+    assert all(item[0] == job_id for item in renewals)
+    assert all(item[1] for item in renewals)
+
+
+def test_ai_assistant_gallery_batch_analysis_treats_missing_images_as_error(client, monkeypatch):
+    settings = client.get("/api/settings").json()
+    configured = client.post(
+        "/api/settings",
+        json=_assistant_runtime_payload(settings),
+    )
+    assert configured.status_code == 200
+
+    entry = _fake_gallery_entry("assistant-batch-missing", "prompt", "1024x1024", "assistant-batch-missing.png")
+    assert entry is not None
+    image_path = storage.safe_image_path(entry.filename)
+    assert image_path is not None
+    image_path.unlink()
+
+    async def fake_request_assistant_json(**kwargs):
+        raise AssertionError("missing image should not call assistant")
+
+    monkeypatch.setattr(assistant_router.assistant_client, "request_assistant_json", fake_request_assistant_json)
+
+    submitted = client.post(
+        "/api/assistant/gallery/batch/analyze",
+        json={"ids": ["assistant-batch-missing"]},
+    )
+    assert submitted.status_code == 202
+
+    job = _wait_for_gallery_batch_analyze_job(client, submitted.json()["job_id"])
+    assert job["status"] == "error"
+    assert job["stage"] == "error"
+    assert job["requested_count"] == 1
+    assert job["processed_count"] == 1
+    assert job["analyzed_count"] == 0
+    assert job["missing_count"] == 1
+    assert job["failed_count"] == 0
+    assert "missing" in job["error"]
+
+
+def test_ai_assistant_gallery_batch_jobs_are_cleaned_by_gallery_job_gc(client):
+    storage.create_gallery_job(
+        job_id="assistant-batch-stale-success",
+        kind="ai_analyze",
+        status="success",
+        stage="completed",
+        message="done",
+        progress=100,
+        created_at="2026-01-01T00:00:00+00:00",
+        updated_at="2026-01-01T00:00:00+00:00",
+        completed_at="2026-01-01T00:00:00+00:00",
+        requested_count=1,
+        exported_count=1,
+        payload={"ids": ["assistant-batch-1"]},
+    )
+
+    stale = storage.cleanup_stale_gallery_jobs(
+        gallery_router.AI_ANALYZE_JOB_KIND,
+        gallery_router.AI_ANALYZE_JOB_TTL_SECONDS,
+    )
+
+    assert [job["job_id"] for job in stale] == ["assistant-batch-stale-success"]
+    assert storage.get_gallery_job("ai_analyze", "assistant-batch-stale-success") is None
 
 
 def test_r2_backup_settings_mask_preserve_and_clear(client):

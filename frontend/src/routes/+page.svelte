@@ -9,6 +9,7 @@
   import JobHistoryDrawer from '$lib/components/JobHistoryDrawer.svelte';
   import Lightbox from '$lib/components/Lightbox.svelte';
   import PreviewPanel from '$lib/components/PreviewPanel.svelte';
+  import AiAssistantPanel from '$lib/components/AiAssistantPanel.svelte';
   import PromptForm from '$lib/components/PromptForm.svelte';
   import PromptOptimizerAssistant from '$lib/components/PromptOptimizerAssistant.svelte';
   import PromptSnippetsDrawer from '$lib/components/PromptSnippetsDrawer.svelte';
@@ -19,6 +20,10 @@
   import { language, t } from '$lib/i18n';
   import type {
     ApiPath,
+    AIAssistantSettingsInput,
+    AssistantGalleryMetadataResponse,
+    AssistantJobDiagnoseResponse,
+    AssistantRecommendParamsResponse,
     GalleryEntry,
     GenerateJobStatus,
     OverallConfigUpdateRequest,
@@ -31,6 +36,7 @@
     SettingsResponse
   } from '$lib/api/types';
   import { accessStore } from '$lib/stores/access';
+  import { assistantStore } from '$lib/stores/assistant';
   import { confirmStore } from '$lib/stores/confirm';
   import { editSourceStore, MAX_EDIT_SOURCE_IMAGES } from '$lib/stores/editSource';
   import { galleryActivityStore, galleryStore } from '$lib/stores/gallery';
@@ -70,7 +76,10 @@
   let urlSyncTimer: ReturnType<typeof setTimeout> | null = null;
   let requestedUrlSyncMode: 'replace' | 'push' | null = null;
   let lightboxLookupSeq = 0;
+  let lightboxAiMetadataSeq = 0;
   let lightboxNavigating = false;
+  let lightboxAiMetadata: AssistantGalleryMetadataResponse | null = null;
+  let jobDiagnoses: Record<string, AssistantJobDiagnoseResponse> = {};
   let lastActivePresetApiPath: ApiPath = initialPromptFormState.apiPath;
   let optimizingPrompt = false;
 
@@ -87,11 +96,13 @@
       (lightboxImageIndex < lightboxImages.length - 1 || $galleryStore.gallery?.has_next)
   );
   $: optimizerSettings = $settingsStore.settings?.prompt_optimizer || null;
-  $: optimizerAvailable = Boolean(
-    optimizerSettings?.enabled &&
-      optimizerSettings.api_url.trim() &&
+  $: promptOptimizerConfigAvailable = Boolean(
+    optimizerSettings?.api_url.trim() &&
       optimizerSettings.model.trim() &&
       optimizerSettings.has_api_key
+  );
+  $: optimizerAvailable = Boolean(
+    optimizerSettings?.enabled && promptOptimizerConfigAvailable
   );
   $: optimizerAssistantEnabled =
     optimizerAvailable &&
@@ -102,6 +113,12 @@
     !$uiStore.sizeDialogOpen &&
     !$confirmStore.request &&
     !Boolean($lightboxStore.image);
+  $: aiAssistantSettings = $settingsStore.settings?.ai_assistant || null;
+  $: aiAssistantAvailable = Boolean(
+    aiAssistantSettings?.enabled &&
+      promptOptimizerConfigAvailable &&
+      (aiAssistantSettings.vision_model.trim() || optimizerSettings?.model.trim())
+  );
   $: r2BackupSettings = $settingsStore.settings?.r2_backup || null;
   $: r2BackupAvailable = Boolean(
     r2BackupSettings?.enabled &&
@@ -204,13 +221,17 @@
     const existing = $galleryStore.gallery?.images.find((image) => image.id === nextImageId);
     if (existing) {
       lightboxStore.open(existing);
+      void loadLightboxAiMetadata(existing.id);
       return;
     }
 
     const seq = ++lightboxLookupSeq;
     try {
       const image = await apiFetch<GalleryEntry>(`/api/gallery/${encodeURIComponent(nextImageId)}`, {}, 'loading gallery image');
-      if (seq === lightboxLookupSeq) lightboxStore.open(image);
+      if (seq === lightboxLookupSeq) {
+        lightboxStore.open(image);
+        void loadLightboxAiMetadata(image.id);
+      }
     } catch {
       if (seq !== lightboxLookupSeq) return;
       lightboxStore.close();
@@ -220,12 +241,29 @@
 
   function openLightbox(image: GalleryEntry) {
     lightboxStore.open(image);
+    void loadLightboxAiMetadata(image.id);
     queueUrlSync('push');
   }
 
   function closeLightbox() {
     lightboxStore.close();
+    lightboxAiMetadataSeq += 1;
+    lightboxAiMetadata = null;
     queueUrlSync('replace');
+  }
+
+  async function loadLightboxAiMetadata(imageId: string) {
+    const seq = ++lightboxAiMetadataSeq;
+    if (!aiAssistantAvailable) {
+      if (seq === lightboxAiMetadataSeq && $lightboxStore.image?.id === imageId) lightboxAiMetadata = null;
+      return;
+    }
+    try {
+      const metadata = await assistantStore.loadGalleryMetadata(imageId);
+      if (seq === lightboxAiMetadataSeq && $lightboxStore.image?.id === imageId) lightboxAiMetadata = metadata;
+    } catch {
+      if (seq === lightboxAiMetadataSeq && $lightboxStore.image?.id === imageId) lightboxAiMetadata = null;
+    }
   }
 
   const prefetchedImageUrls = new Set<string>();
@@ -303,6 +341,7 @@
     const nextIndex = currentIndex + direction;
     if (nextIndex >= 0 && nextIndex < images.length) {
       lightboxStore.open(images[nextIndex]);
+      void loadLightboxAiMetadata(images[nextIndex].id);
       queueUrlSync('replace');
       return;
     }
@@ -317,6 +356,7 @@
       const nextImage = direction < 0 ? nextImages[nextImages.length - 1] : nextImages[0];
       if (nextImage) {
         lightboxStore.open(nextImage);
+        void loadLightboxAiMetadata(nextImage.id);
         queueUrlSync('replace');
       }
     } catch (error) {
@@ -482,6 +522,14 @@
     settingsStore.clearPromptOptimizerHealth();
   }
 
+  function checkAiAssistantHealth(body: AIAssistantSettingsInput) {
+    void settingsStore.checkAiAssistantHealth(body);
+  }
+
+  function clearAiAssistantHealth() {
+    settingsStore.clearAiAssistantHealth();
+  }
+
   function clearPresetHealth() {
     settingsStore.clearPresetHealth();
   }
@@ -541,6 +589,35 @@
       trackJob,
       jobsStore.shouldRefreshJobsAfterSubmit() ? jobsStore.loadJobs : undefined
     );
+  }
+
+  async function planEdit() {
+    const goal = form.prompt.trim();
+    if (!goal) {
+      previewStore.setError($t.messages.promptRequired);
+      return;
+    }
+    try {
+      const previousForm = { ...form };
+      const plan = await assistantStore.planEdit({
+        goal,
+        source_count: $editSourceStore.files.length + ($editSourceStore.selectedGalleryImageId ? 1 : 0),
+        current_prompt: form.prompt,
+        target_size: form.size
+      });
+      if (plan.edit_prompt) {
+        form = { ...form, prompt: plan.edit_prompt, size: plan.suggested_size || form.size };
+      }
+      showToast($t.messages.aiAssistantEditPlanReady, 'status', {
+        actionLabel: $t.common.undo,
+        onAction: () => {
+          form = { ...form, prompt: previousForm.prompt, size: previousForm.size };
+        },
+        durationMs: 8000
+      });
+    } catch (error) {
+      showError(error);
+    }
   }
 
   function setGalleryFilter(key: Parameters<typeof galleryStore.updateFilter>[0], value: Parameters<typeof galleryStore.updateFilter>[1]) {
@@ -687,6 +764,44 @@
     showToast($t.messages.promptOptimized);
   }
 
+  async function applyAssistantPrompt(prompt: string) {
+    form = { ...form, prompt };
+    showToast($t.messages.aiAssistantPromptApplied);
+  }
+
+  async function insertAssistantPrompt(prompt: string) {
+    const currentPrompt = form.prompt.trimEnd();
+    form = { ...form, prompt: currentPrompt ? `${currentPrompt}\n${prompt}` : prompt };
+    showToast($t.messages.aiAssistantPromptInserted);
+  }
+
+  async function saveAssistantSnippet(prompt: string) {
+    try {
+      await promptSnippetsStore.createSnippet({
+        title: $t.aiAssistant.snippetTitle,
+        prompt,
+        favorite: true
+      });
+      showToast($t.messages.promptSnippetSaved);
+    } catch (error) {
+      showError(error);
+    }
+  }
+
+  function applyAssistantParams(recommendation: AssistantRecommendParamsResponse) {
+    const updates: Partial<PromptFormState> = {};
+    if (recommendation.model_name?.trim()) updates.model = recommendation.model_name.trim();
+    if (form.apiPath === '/v1/images/generations') {
+      if (recommendation.size?.trim()) updates.size = recommendation.size.trim();
+      if (recommendation.quality) updates.quality = recommendation.quality;
+      if (recommendation.output_format) updates.outputFormat = recommendation.output_format;
+      if (recommendation.n) updates.quantity = recommendation.n;
+    }
+    if (!Object.keys(updates).length) return;
+    form = { ...form, ...updates };
+    showToast($t.messages.aiAssistantParamsApplied);
+  }
+
   function regenerate() {
     previewStore.regenerate(
       (next) => (form = { ...next, model: next.model.trim() || lastActivePresetDefaultModel || initialPromptFormState.model }),
@@ -708,6 +823,68 @@
     form = { ...form, size: displayImageSize(image) };
     closeLightbox();
     showToast($t.messages.galleryImageReady);
+  }
+
+  async function describeLightboxImage(image: GalleryEntry) {
+    const seq = ++lightboxAiMetadataSeq;
+    try {
+      const result = await assistantStore.describeGalleryImage(image.id);
+      if (seq !== lightboxAiMetadataSeq || $lightboxStore.image?.id !== image.id) return;
+      lightboxAiMetadata = {
+        image_id: image.id,
+        description: result.description,
+        prompt: lightboxAiMetadata?.image_id === image.id ? lightboxAiMetadata.prompt : '',
+        analysis: lightboxAiMetadata?.image_id === image.id ? lightboxAiMetadata.analysis : {},
+        model: result.model,
+        created_at: lightboxAiMetadata?.image_id === image.id ? lightboxAiMetadata.created_at : null,
+        updated_at: null
+      };
+    } catch (error) {
+      if (seq === lightboxAiMetadataSeq && $lightboxStore.image?.id === image.id) showError(error);
+    }
+  }
+
+  async function promptLightboxImage(image: GalleryEntry) {
+    const seq = ++lightboxAiMetadataSeq;
+    try {
+      const result = await assistantStore.promptFromGalleryImage(image.id);
+      if (seq !== lightboxAiMetadataSeq || $lightboxStore.image?.id !== image.id) return;
+      lightboxAiMetadata = {
+        image_id: image.id,
+        description: lightboxAiMetadata?.image_id === image.id ? lightboxAiMetadata.description : '',
+        prompt: result.prompt,
+        analysis: lightboxAiMetadata?.image_id === image.id ? lightboxAiMetadata.analysis : {},
+        model: result.model,
+        created_at: lightboxAiMetadata?.image_id === image.id ? lightboxAiMetadata.created_at : null,
+        updated_at: null
+      };
+      if (result.prompt) {
+        form = { ...form, prompt: result.prompt };
+        showToast($t.messages.aiAssistantPromptApplied);
+      }
+    } catch (error) {
+      if (seq === lightboxAiMetadataSeq && $lightboxStore.image?.id === image.id) showError(error);
+    }
+  }
+
+  async function analyzeLightboxImage(image: GalleryEntry) {
+    const seq = ++lightboxAiMetadataSeq;
+    try {
+      const result = await assistantStore.analyzeGalleryImage(image.id);
+      if (seq !== lightboxAiMetadataSeq || $lightboxStore.image?.id !== image.id) return;
+      lightboxAiMetadata = {
+        image_id: image.id,
+        description: result.description,
+        prompt: result.prompt,
+        analysis: result.analysis,
+        model: result.model,
+        created_at: lightboxAiMetadata?.image_id === image.id ? lightboxAiMetadata.created_at : null,
+        updated_at: null
+      };
+      showToast($t.messages.aiAssistantGalleryAnalyzed);
+    } catch (error) {
+      if (seq === lightboxAiMetadataSeq && $lightboxStore.image?.id === image.id) showError(error);
+    }
   }
 
   function handleEditFile(event: Event) {
@@ -753,6 +930,52 @@
         editPreviewLabel = '';
       }
     });
+  }
+
+  async function batchAnalyzeGallery() {
+    const batchBody = galleryStore.selectedBatchRequestBody();
+    const selectedCount = $galleryStore.selectionToken?.count || $galleryStore.selectedIds.size;
+    if (!selectedCount) return;
+    galleryActivityStore.setOperationStatus({
+      kind: 'ai_analyze',
+      label: $t.gallery.aiAnalyzing,
+      detail: $t.gallery.aiAnalyzePreparing(selectedCount),
+      progress: 0
+    });
+    try {
+      const job = await assistantStore.batchAnalyzeGallery(batchBody);
+      let currentJob = job;
+      while (currentJob.status === 'queued' || currentJob.status === 'running') {
+        galleryActivityStore.setOperationStatus({
+          kind: 'ai_analyze',
+          label: $t.gallery.aiAnalyzing,
+          detail: $t.gallery.aiAnalyzeProgress(
+            currentJob.analyzed_count,
+            currentJob.requested_count,
+            currentJob.failed_count,
+            currentJob.missing_count
+          ),
+          progress: currentJob.progress
+        });
+        await new Promise((resolve) => setTimeout(resolve, 1200));
+        currentJob = await assistantStore.loadBatchAnalyzeJob(job.job_id);
+      }
+      galleryActivityStore.setOperationStatus({
+        kind: 'ai_analyze',
+        label: $t.gallery.aiAnalyzing,
+        detail: $t.gallery.aiAnalyzeComplete(currentJob.analyzed_count, currentJob.failed_count, currentJob.missing_count),
+        progress: 100
+      });
+      galleryStore.clearSelection();
+      showToast(
+        $t.gallery.aiAnalyzeComplete(currentJob.analyzed_count, currentJob.failed_count, currentJob.missing_count),
+        currentJob.failed_count || currentJob.missing_count ? 'error' : 'status'
+      );
+    } catch (error) {
+      showError(error);
+    } finally {
+      galleryActivityStore.setOperationStatus(null);
+    }
   }
 
   async function toggleFavorite(image: GalleryEntry) {
@@ -881,6 +1104,15 @@
     generateImage();
   }
 
+  async function diagnoseJob(job: GenerateJobStatus) {
+    try {
+      const diagnosis = await assistantStore.diagnoseJob(job.job_id, { include_prompt: true });
+      jobDiagnoses = { ...jobDiagnoses, [job.job_id]: diagnosis };
+    } catch (error) {
+      showError(error);
+    }
+  }
+
   $: if ($lightboxStore.image && $galleryStore.gallery) {
     $lightboxStore.image.id;
     $galleryStore.gallery.page;
@@ -962,6 +1194,8 @@
   r2HealthChecking={$settingsActivityStore.r2HealthChecking}
   promptOptimizerHealth={$settingsActivityStore.promptOptimizerHealth}
   promptOptimizerHealthChecking={$settingsActivityStore.promptOptimizerHealthChecking}
+  aiAssistantHealth={$settingsActivityStore.aiAssistantHealth}
+  aiAssistantHealthChecking={$settingsActivityStore.aiAssistantHealthChecking}
   onClose={() => setUi('settingsOpen', false)}
   onSave={saveSettings}
   onCreate={createPreset}
@@ -972,6 +1206,8 @@
   onR2HealthCheck={checkR2Health}
   onPromptOptimizerHealthCheck={checkPromptOptimizerHealth}
   onClearPromptOptimizerHealth={clearPromptOptimizerHealth}
+  onAiAssistantHealthCheck={checkAiAssistantHealth}
+  onClearAiAssistantHealth={clearAiAssistantHealth}
   onLoadPromptOptimizerSystemPrompt={loadPromptOptimizerSystemPrompt}
   onSavePromptOptimizerSystemPrompt={savePromptOptimizerSystemPrompt}
   onLoadOverallConfig={loadOverallConfig}
@@ -1015,6 +1251,10 @@
   onCancelSelected={jobsStore.cancelSelected}
   onUseJob={useJobAsPrompt}
   onRetryJob={retryJob}
+  aiAssistantEnabled={aiAssistantAvailable}
+  diagnosingJobId={$assistantStore.diagnoseLoadingJobId}
+  diagnoses={jobDiagnoses}
+  onDiagnoseJob={diagnoseJob}
 />
 
 <main id="main-content" tabindex="-1" class="mx-auto max-w-5xl space-y-6 px-4 py-6 pb-28 sm:px-6 sm:pb-32">
@@ -1025,8 +1265,11 @@
     loading={$previewStore.loading}
     optimizing={optimizingPrompt}
     optimizerEnabled={optimizerAvailable}
+    editPlannerEnabled={aiAssistantAvailable}
+    editPlanning={$assistantStore.editPlanLoading}
     onGenerate={generateImage}
     onEdit={editImage}
+    onPlanEdit={planEdit}
     onOptimize={optimizePrompt}
     onAppendPromptTag={appendPromptTag}
     onOpenSize={() => setUi('sizeDialogOpen', true)}
@@ -1064,6 +1307,23 @@
     size={form.size}
     quality={form.quality}
     onApplyPrompt={applyOptimizedPrompt}
+  />
+
+  <AiAssistantPanel
+    enabled={aiAssistantAvailable}
+    optimizerEnabled={optimizerAvailable}
+    currentPrompt={form.prompt}
+    apiPath={form.apiPath}
+    model={form.model}
+    size={form.size}
+    quality={form.quality}
+    outputFormat={form.outputFormat}
+    quantity={normalizeSubmissionQuantity(form.quantity)}
+    loading={$assistantStore.promptLoading || $assistantStore.paramsLoading}
+    onApplyPrompt={applyAssistantPrompt}
+    onInsertPrompt={insertAssistantPrompt}
+    onSaveSnippet={saveAssistantSnippet}
+    onApplyParams={applyAssistantParams}
   />
 
   <PreviewPanel
@@ -1108,6 +1368,8 @@
     onBatchDelete={batchDeleteGallery}
     onBatchFavorite={batchFavoriteGallery}
     onBatchDownload={() => galleryStore.batchDownload(showToast)}
+    canAiAnalyze={aiAssistantAvailable}
+    onBatchAiAnalyze={batchAnalyzeGallery}
   />
 </main>
 
@@ -1125,6 +1387,12 @@
   canNavigatePrevious={canNavigatePrevious}
   canNavigateNext={canNavigateNext}
   navigating={lightboxNavigating}
+  aiAssistantEnabled={aiAssistantAvailable}
+  aiMetadata={lightboxAiMetadata}
+  aiLoadingImageId={$assistantStore.galleryLoadingImageId}
+  onAiDescribe={describeLightboxImage}
+  onAiPrompt={promptLightboxImage}
+  onAiAnalyze={analyzeLightboxImage}
   onNavigatePrevious={() => navigateLightbox(-1)}
   onNavigateNext={() => navigateLightbox(1)}
 />

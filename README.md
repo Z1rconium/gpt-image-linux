@@ -22,7 +22,7 @@ This project is only a self-hosted control panel. It does not provide, proxy, re
 - Image editing through `/v1/images/edits`, including uploaded references and gallery-source edits.
 - API presets with base URL/path/key, default model, response format, health checks, SOCKS5 proxy, webhook, and env-ref secret support.
 - Web-managed Overall Config for selected runtime settings, with env/default/override sources and restart/build-only badges.
-- Prompt helper tags, reusable prompt snippets, and optional server-side prompt optimizer with editable system prompt, structured `prompt + intent` inputs, and locale-aware output.
+- Prompt helper tags, reusable prompt snippets, optional server-side prompt optimizer, and an AI Assistant subsystem for prompt rewrites/checks/variants, parameter recommendations, job diagnosis, edit planning, and gallery image analysis.
 - SQLite-backed job queue with SSE progress, cancellation, retry/reuse, persisted history, stage timing metadata, and shared generation/edit concurrency limits.
 - Local gallery with cursor pagination, search/filtering, favorites, lightbox navigation, selection-token batch actions, ZIP import/export, thumbnails, byte-size metadata, and async export/import jobs.
 - Optional Cloudflare R2 gallery backup sync; local SQLite/images remain the source of truth.
@@ -165,6 +165,7 @@ Most runtime options live in `.env.example`. API presets, prompt optimizer, R2 b
 | `THUMBNAILS_DIR` / `THUMBNAIL_*` | Gallery thumbnail storage and generation controls. |
 | `DATA_DIR` / `DATABASE_FILE` | SQLite runtime storage. |
 | `PROMPT_OPTIMIZER_*` | Optional server-side prompt optimizer settings. |
+| `AI_ASSISTANT_*` | AI Assistant is enabled by default; set `AI_ASSISTANT_ENABLED=false` to disable it. API URL, key, text model, timeout, route, and host allowlist reuse `PROMPT_OPTIMIZER_*`. |
 | `R2_*` | Optional Cloudflare R2 gallery backup sync settings; custom endpoint hosts require `R2_ENDPOINT_HOST_ALLOWLIST`. |
 | `PUBLIC_ORIGIN` / `ALLOWED_HOSTS` | Reverse-proxy Host/CSRF hardening. |
 | `ENABLE_NGINX_ACCEL_REDIRECT` / `PUBLIC_IMAGE_BASE_URL` / `PUBLIC_THUMBNAIL_BASE_URL` | Optional nginx/CDN image byte serving behavior. |
@@ -183,7 +184,7 @@ Overall Config persists overrides in SQLite. Some settings are hot-reloaded; res
 3. Open Settings.
 4. Create or select an API preset.
 5. Set API base URL, API path, model, response format, and API key/env ref.
-6. Optionally configure SOCKS5 proxy, webhook, prompt optimizer, R2 backup, or Overall Config overrides.
+6. Optionally configure SOCKS5 proxy, webhook, prompt optimizer, AI Assistant, R2 backup, or Overall Config overrides.
 7. Save the preset and run its health check if needed.
 8. Generate images from a prompt, or upload/select source images and run edits.
 9. Use Gallery for reuse, filtering, favorites, batch actions, import/export, and R2 sync.
@@ -220,6 +221,11 @@ Key backend routes:
 | `PATCH/DELETE` | `/api/prompt-snippets/{snippet_id}` | Update/delete a prompt snippet. |
 | `GET/POST` | `/api/prompt/optimizer-system-prompt` | Read/save the prompt optimizer system prompt. |
 | `POST` | `/api/prompt/optimize`, `/api/prompt/optimizer-health` | Optimize a prompt or probe optimizer connectivity. |
+| `POST` | `/api/assistant/health` | Probe AI Assistant connectivity. |
+| `POST` | `/api/assistant/prompt/rewrite`, `/api/assistant/prompt/check`, `/api/assistant/prompt/variants` | Prompt Copilot rewrite, review, and variant tools. |
+| `POST` | `/api/assistant/generate/recommend-params` | Recommend only generation parameters supported by the selected API path. |
+| `POST` | `/api/assistant/jobs/{job_id}/diagnose`, `/api/assistant/edit/plan` | Diagnose a job or plan an edit without submitting it. |
+| `POST/GET` | `/api/assistant/gallery/*` | Describe, reverse-prompt, analyze, batch-analyze, and read AI metadata for local gallery images. |
 | `POST` | `/api/generate` | Start generation job. |
 | `POST` | `/api/edits` | Start edit job with uploaded source images. |
 | `POST` | `/api/edits/from-gallery/{image_id}` | Start edit job from an existing gallery image. |
@@ -324,7 +330,7 @@ GPT Image Panel 是一个轻量级 Web UI，用于图像生成、图像编辑、
 - 支持 `/v1/images/edits` 图像编辑，可用上传参考图或 Gallery 图片作为源图。
 - API 预设管理：base URL/path/key、默认模型、response format、健康检查、SOCKS5 代理、webhook、环境变量引用式密钥。
 - Web 管理的 Overall Config，显示 env/default/override 来源，以及需要重启或只影响构建的配置标记。
-- 提示词助手、提示词片段、可选服务端提示词优化器，支持自定义 system prompt、结构化 `prompt + intent` 输入和本地化输出。
+- 提示词助手、提示词片段、可选服务端提示词优化器，以及用于提示词改写/检查/变体、参数推荐、任务诊断、编辑规划和 Gallery 图片分析的 AI Assistant 子系统。
 - SQLite 任务队列：SSE 进度、取消、重试/复用、历史记录、阶段耗时、生成/编辑共享并发限制。
 - 本地 Gallery：游标分页、搜索/筛选、收藏、Lightbox、selection token 批量操作、ZIP 导入导出、缩略图、大小统计、异步导出/导入任务。
 - 可选 Cloudflare R2 Gallery 备份同步；本地 SQLite 和图片文件仍是唯一源数据。
@@ -467,6 +473,7 @@ ALLOW_UNAUTHENTICATED=true granian --interface asgi backend.app.main:app --host 
 | `THUMBNAILS_DIR` / `THUMBNAIL_*` | Gallery 缩略图存储和生成控制。 |
 | `DATA_DIR` / `DATABASE_FILE` | SQLite 运行时数据。 |
 | `PROMPT_OPTIMIZER_*` | 可选提示词优化器配置。 |
+| `AI_ASSISTANT_*` | AI Assistant 默认启用；如需关闭，设置 `AI_ASSISTANT_ENABLED=false`。API URL、密钥、文本模型、超时、路径和 host allowlist 复用 `PROMPT_OPTIMIZER_*`。 |
 | `R2_*` | 可选 Cloudflare R2 Gallery 备份配置；自定义 endpoint host 需要配置 `R2_ENDPOINT_HOST_ALLOWLIST`。 |
 | `PUBLIC_ORIGIN` / `ALLOWED_HOSTS` | 反向代理 Host/CSRF 加固。 |
 | `ENABLE_NGINX_ACCEL_REDIRECT` / `PUBLIC_IMAGE_BASE_URL` / `PUBLIC_THUMBNAIL_BASE_URL` | 可选 nginx/CDN 图片字节服务行为。 |
@@ -485,7 +492,7 @@ Overall Config 会把 override 持久化到 SQLite。部分配置可热更新；
 3. 打开 Settings。
 4. 创建或选择 API 预设。
 5. 设置 API base URL、API path、模型、response format 和 API key/env ref。
-6. 按需配置 SOCKS5 代理、webhook、提示词优化器、R2 备份或 Overall Config override。
+6. 按需配置 SOCKS5 代理、webhook、提示词优化器、AI Assistant、R2 备份或 Overall Config override。
 7. 保存预设，必要时执行健康检查。
 8. 输入 prompt 生成图片，或上传/选择源图执行编辑。
 9. 在 Gallery 中复用参数、筛选、收藏、批量操作、导入导出或执行 R2 同步。
@@ -522,6 +529,11 @@ Overall Config 会把 override 持久化到 SQLite。部分配置可热更新；
 | `PATCH/DELETE` | `/api/prompt-snippets/{snippet_id}` | 更新/删除提示词片段。 |
 | `GET/POST` | `/api/prompt/optimizer-system-prompt` | 读取/保存提示词优化器 system prompt。 |
 | `POST` | `/api/prompt/optimize`, `/api/prompt/optimizer-health` | 优化提示词或探测优化器连通性。 |
+| `POST` | `/api/assistant/health` | 探测 AI Assistant 连通性。 |
+| `POST` | `/api/assistant/prompt/rewrite`, `/api/assistant/prompt/check`, `/api/assistant/prompt/variants` | Prompt Copilot 改写、检查和变体工具。 |
+| `POST` | `/api/assistant/generate/recommend-params` | 仅推荐当前 API path 支持的生成参数。 |
+| `POST` | `/api/assistant/jobs/{job_id}/diagnose`, `/api/assistant/edit/plan` | 诊断任务或生成编辑规划，不会自动提交。 |
+| `POST/GET` | `/api/assistant/gallery/*` | 描述、反推 prompt、分析、批量分析和读取本地 Gallery AI metadata。 |
 | `POST` | `/api/generate` | 创建生成任务。 |
 | `POST` | `/api/edits` | 用上传源图创建编辑任务。 |
 | `POST` | `/api/edits/from-gallery/{image_id}` | 用 Gallery 图片创建编辑任务。 |

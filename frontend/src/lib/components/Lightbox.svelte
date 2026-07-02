@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { GalleryEntry } from '$lib/api/types';
+  import type { AssistantGalleryMetadataResponse, GalleryEntry } from '$lib/api/types';
   import { t } from '$lib/i18n';
   import { displayImageSize, downloadUrl, formatBeijingTime, imageUrl } from '$lib/utils/format';
   import { dialog } from '$lib/actions/dialog';
@@ -14,6 +14,12 @@
   export let onCopyUrl: (image: GalleryEntry) => void = () => {};
   export let onUsePrompt: (image: GalleryEntry) => void = () => {};
   export let onUseAll: (image: GalleryEntry) => void = () => {};
+  export let aiAssistantEnabled = false;
+  export let aiMetadata: AssistantGalleryMetadataResponse | null = null;
+  export let aiLoadingImageId: string | null = null;
+  export let onAiDescribe: (image: GalleryEntry) => void = () => {};
+  export let onAiPrompt: (image: GalleryEntry) => void = () => {};
+  export let onAiAnalyze: (image: GalleryEntry) => void = () => {};
   export let canNavigatePrevious = false;
   export let canNavigateNext = false;
   export let navigating = false;
@@ -29,6 +35,8 @@
   let swipeStartX = 0;
   let swipeStartY = 0;
   let swipeStartTime = 0;
+
+  $: aiLoading = Boolean(image && aiLoadingImageId === image.id);
 
   function resetSwipe() {
     swipePointerId = null;
@@ -147,6 +155,43 @@
             <div class="mb-1 text-xs font-medium text-stone-500 dark:text-zinc-500">{$t.common.prompt}</div>
             <p class="whitespace-pre-wrap text-sm text-stone-800 dark:text-zinc-200">{image.prompt}</p>
           </div>
+          {#if aiAssistantEnabled}
+            <section class="rounded-lg border border-stone-200 bg-stone-50/80 p-3 dark:border-zinc-800 dark:bg-zinc-950/50">
+              <div class="mb-3 flex items-center justify-between gap-3">
+                <h3 class="text-xs font-semibold text-stone-700 dark:text-zinc-300">{$t.aiAssistant.title}</h3>
+                {#if aiLoading}
+                  <span class="text-[11px] text-zinc-500">{$t.aiAssistant.working}</span>
+                {/if}
+              </div>
+              <div class="grid grid-cols-3 gap-2">
+                <button type="button" disabled={aiLoading} class="control-focus rounded-lg border border-zinc-700 px-2 py-2 text-xs text-zinc-300 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50" on:click={() => onAiDescribe(image)}>
+                  {$t.lightbox.aiDescribe}
+                </button>
+                <button type="button" disabled={aiLoading} class="control-focus rounded-lg border border-emerald-500/40 px-2 py-2 text-xs text-emerald-700 hover:bg-emerald-500/10 disabled:cursor-not-allowed disabled:opacity-50 dark:text-emerald-200" on:click={() => onAiPrompt(image)}>
+                  {$t.lightbox.aiPrompt}
+                </button>
+                <button type="button" disabled={aiLoading} class="control-focus rounded-lg border border-cyan-500/35 px-2 py-2 text-xs text-cyan-700 hover:bg-cyan-500/10 disabled:cursor-not-allowed disabled:opacity-50 dark:text-cyan-200" on:click={() => onAiAnalyze(image)}>
+                  {$t.lightbox.aiAnalyze}
+                </button>
+              </div>
+              {#if aiMetadata && aiMetadata.image_id === image.id && (aiMetadata.description || aiMetadata.prompt)}
+                <div class="mt-3 space-y-3 text-xs leading-5 text-stone-700 dark:text-zinc-300">
+                  {#if aiMetadata.description}
+                    <div>
+                      <div class="mb-1 font-semibold text-stone-500 dark:text-zinc-500">{$t.lightbox.aiDescription}</div>
+                      <p class="whitespace-pre-wrap">{aiMetadata.description}</p>
+                    </div>
+                  {/if}
+                  {#if aiMetadata.prompt}
+                    <div>
+                      <div class="mb-1 font-semibold text-stone-500 dark:text-zinc-500">{$t.lightbox.aiPromptResult}</div>
+                      <p class="whitespace-pre-wrap">{aiMetadata.prompt}</p>
+                    </div>
+                  {/if}
+                </div>
+              {/if}
+            </section>
+          {/if}
           <div class="grid grid-cols-2 gap-2 text-xs">
             <div class="rounded-lg border border-stone-200 bg-stone-50/80 px-3 py-2 dark:border-zinc-800 dark:bg-zinc-950/50">
               <div class="text-stone-400 dark:text-zinc-600">{$t.common.size}</div>

@@ -121,6 +121,18 @@ const settingsResponse = {
     api_key_source: 'stored',
     api_key_env_var: null
   },
+  ai_assistant: {
+    enabled: true,
+    api_url: 'https://example.com',
+    model: 'gpt-4o-mini',
+    vision_model: 'gpt-4o-mini',
+    timeout_seconds: 60,
+    api_path: '/v1/chat/completions',
+    api_key_masked: '********',
+    has_api_key: true,
+    api_key_source: 'stored',
+    api_key_env_var: null
+  },
   r2_backup: {
     enabled: false,
     endpoint_url: '',
@@ -1113,7 +1125,7 @@ test('prompt helper tags append once and optimizer replaces prompt with undo', a
   await expect(page.getByRole('status')).toContainText('Tag already exists');
 
   const optimizeRequest = page.waitForRequest((request) => new URL(request.url()).pathname === '/api/prompt/optimize');
-  await page.getByRole('button', { name: 'Optimize' }).click();
+  await page.getByRole('button', { name: 'Optimize', exact: true }).click();
   const request = await optimizeRequest;
   expect(request.postDataJSON()).toMatchObject({
     prompt: 'small cabin, high detail',
@@ -1139,6 +1151,58 @@ test('floating prompt optimizer stays hidden when unavailable', async ({ page })
   await expect(page.getByTestId('prompt-optimizer-assistant-trigger')).toHaveCount(0);
 });
 
+test('AI Assistant controls use shared prompt optimizer API config', async ({ page }) => {
+  await loadApp(page, {
+    settings: {
+      ...settingsResponse,
+      prompt_optimizer: {
+        ...settingsResponse.prompt_optimizer,
+        enabled: false
+      },
+      ai_assistant: {
+        ...settingsResponse.ai_assistant,
+        api_url: '',
+        model: '',
+        has_api_key: false
+      }
+    }
+  });
+
+  await page.getByLabel('Instruction').fill('sunlit alley with a bicycle');
+
+  await expect(page.getByText('Enable AI Assistant and configure Prompt Optimizer in Settings')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Rewrite' })).toBeEnabled();
+  await expect(page.getByTestId('ai-assistant-panel').getByRole('button', { name: 'Quick optimize' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Check' })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Variants' })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Params' })).toBeEnabled();
+});
+
+test('AI Assistant Quick optimize uses the prompt optimizer flow', async ({ page }) => {
+  await loadApp(page);
+
+  const prompt = page.getByRole('textbox', { name: 'Prompt', exact: true });
+  await prompt.fill('sunlit alley with a bicycle');
+
+  const assistantPanel = page.getByTestId('ai-assistant-panel');
+  await assistantPanel.getByLabel('Instruction').fill('make it rainy at dusk');
+
+  const optimizeRequest = page.waitForRequest((request) => new URL(request.url()).pathname === '/api/prompt/optimize');
+  await assistantPanel.getByRole('button', { name: 'Quick optimize' }).click();
+  const request = await optimizeRequest;
+  expect(request.postDataJSON()).toMatchObject({
+    prompt: 'sunlit alley with a bicycle',
+    intent: 'make it rainy at dusk',
+    target_language: 'en',
+    api_path: '/v1/images/generations'
+  });
+
+  await expect(assistantPanel).toContainText('Quick optimized prompt');
+  await expect(assistantPanel).toContainText('Optimized sunlit alley with a bicycle');
+  await assistantPanel.getByRole('button', { name: 'Apply' }).click();
+  await expect(prompt).toHaveValue('Optimized sunlit alley with a bicycle');
+});
+
 test('floating prompt optimizer compares, rejects, cleans up, and accepts without covering the editor', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await loadApp(page);
@@ -1156,7 +1220,7 @@ test('floating prompt optimizer compares, rejects, cleans up, and accepts withou
   expect((promptBox?.y || 0) + (promptBox?.height || 0)).toBeLessThan(triggerBox?.y || Number.POSITIVE_INFINITY);
 
   await trigger.click();
-  const dialog = page.getByRole('dialog', { name: 'Prompt Optimizer' });
+  const dialog = page.getByRole('dialog', { name: 'Quick optimize' });
   await expect(dialog).toBeVisible();
 
   const intentInput = dialog.getByLabel('Modification intent');
@@ -1203,7 +1267,7 @@ test('prompt optimize sends localized target language', async ({ page }) => {
 
   await page.getByRole('textbox', { name: '提示词', exact: true }).fill('一只小机器人');
   const optimizeRequest = page.waitForRequest((request) => new URL(request.url()).pathname === '/api/prompt/optimize');
-  await page.getByRole('button', { name: '优化' }).click();
+  await page.getByRole('button', { name: '优化', exact: true }).click();
   const request = await optimizeRequest;
   expect(request.postDataJSON()).toMatchObject({
     prompt: '一只小机器人',
@@ -1222,9 +1286,9 @@ test('floating prompt optimizer opens on click and can be long-press dragged', a
   expect(initialBox).not.toBeNull();
 
   await trigger.click();
-  await expect(page.getByRole('dialog', { name: 'Prompt Optimizer' })).toBeVisible();
+  await expect(page.getByRole('dialog', { name: 'Quick optimize' })).toBeVisible();
   await page.keyboard.press('Escape');
-  await expect(page.getByRole('dialog', { name: 'Prompt Optimizer' })).toBeHidden();
+  await expect(page.getByRole('dialog', { name: 'Quick optimize' })).toBeHidden();
 
   const startX = Math.round((initialBox?.x || 0) + (initialBox?.width || 0) / 2);
   const startY = Math.round((initialBox?.y || 0) + (initialBox?.height || 0) / 2);
@@ -1282,7 +1346,7 @@ test('floating prompt optimizer opens on click and can be long-press dragged', a
   expect(reloadedBox?.y || 0).toBeLessThan((initialBox?.y || 0) - 40);
 
   await trigger.click();
-  await expect(page.getByRole('dialog', { name: 'Prompt Optimizer' })).toBeVisible();
+  await expect(page.getByRole('dialog', { name: 'Quick optimize' })).toBeVisible();
 });
 
 test('prompt snippets drawer saves, searches, edits, copies, deletes, and uses templates', async ({ page }) => {

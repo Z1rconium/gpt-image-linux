@@ -180,9 +180,10 @@ async def lifespan(app: FastAPI):
         jobs.run_image_unit_dispatcher(app.state.worker_id)
     )
     app.state.gallery_export_lock = asyncio.Lock()
-    app.state.gallery_job_subscribers = {"export": {}, "export_direct": {}, "sync": {}, "import": {}}
+    app.state.gallery_job_subscribers = {"export": {}, "export_direct": {}, "sync": {}, "import": {}, "ai_analyze": {}}
     app.state.gallery_job_sse_poller_tasks = {}
     from .routers import gallery as gallery_router
+    from .routers import assistant as assistant_router
     app.state.thumbnail_dispatcher_kick = asyncio.Event()
     app.state.thumbnail_dispatcher_task = asyncio.create_task(
         gallery_router.run_thumbnail_dispatcher(app.state.worker_id)
@@ -204,6 +205,9 @@ async def lifespan(app: FastAPI):
     )
     app.state.gallery_r2_scheduled_sync_task = asyncio.create_task(
         gallery_router.run_gallery_r2_scheduled_sync(app.state.worker_id)
+    )
+    app.state.gallery_ai_analyze_dispatcher_task = asyncio.create_task(
+        assistant_router.run_ai_analyze_dispatcher(app.state.worker_id)
     )
     app.state.access_failures: OrderedDict[str, tuple[int, float]] = OrderedDict()
     jobs.reconcile_active_generate_jobs_from_storage()
@@ -254,6 +258,9 @@ async def lifespan(app: FastAPI):
         scheduled_sync_task = getattr(app.state, "gallery_r2_scheduled_sync_task", None)
         if scheduled_sync_task and not scheduled_sync_task.done():
             scheduled_sync_task.cancel()
+        ai_analyze_dispatcher_task = getattr(app.state, "gallery_ai_analyze_dispatcher_task", None)
+        if ai_analyze_dispatcher_task and not ai_analyze_dispatcher_task.done():
+            ai_analyze_dispatcher_task.cancel()
         gallery_job_sse_poller_tasks = list(
             getattr(app.state, "gallery_job_sse_poller_tasks", {}).values()
         )
@@ -278,6 +285,7 @@ async def lifespan(app: FastAPI):
                 gc_task,
                 file_gc_task,
                 scheduled_sync_task,
+                ai_analyze_dispatcher_task,
                 *gallery_job_sse_poller_tasks,
                 *tasks,
             )

@@ -134,6 +134,22 @@ PROMPT_OPTIMIZER_MAX_RESPONSE_MB = max(
 )
 PROMPT_OPTIMIZER_HOST_ALLOWLIST = os.getenv("PROMPT_OPTIMIZER_HOST_ALLOWLIST", "").strip()
 
+# ── AI Assistant ────────────────────────────────────────────────
+AI_ASSISTANT_ENABLED = env_flag("AI_ASSISTANT_ENABLED", "true")
+AI_ASSISTANT_VISION_MODEL = os.getenv("AI_ASSISTANT_VISION_MODEL", "gpt-4o-mini").strip()
+AI_ASSISTANT_MAX_RESPONSE_MB = max(
+    1,
+    int(os.getenv("AI_ASSISTANT_MAX_RESPONSE_MB", "8")),
+)
+AI_ASSISTANT_IMAGE_MAX_SIDE = max(
+    256,
+    int(os.getenv("AI_ASSISTANT_IMAGE_MAX_SIDE", "1024")),
+)
+AI_ASSISTANT_IMAGE_MAX_BYTES = max(
+    65536,
+    int(os.getenv("AI_ASSISTANT_IMAGE_MAX_BYTES", str(1024 * 1024))),
+)
+
 # ── Cloudflare R2 gallery backup ─────────────────────────────────
 R2_BACKUP_ENABLED = env_flag("R2_BACKUP_ENABLED")
 R2_ENDPOINT_URL = os.getenv("R2_ENDPOINT_URL", "").strip()
