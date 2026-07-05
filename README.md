@@ -165,7 +165,7 @@ Most runtime options live in `.env.example`. API presets, prompt optimizer, R2 b
 | `THUMBNAILS_DIR` / `THUMBNAIL_*` | Gallery thumbnail storage and generation controls. |
 | `DATA_DIR` / `DATABASE_FILE` | SQLite runtime storage. |
 | `PROMPT_OPTIMIZER_*` | Optional server-side prompt optimizer settings. |
-| `AI_ASSISTANT_*` | AI Assistant is enabled by default; set `AI_ASSISTANT_ENABLED=false` to disable it. API URL, key, text model, timeout, route, and host allowlist reuse `PROMPT_OPTIMIZER_*`. |
+| `AI_ASSISTANT_*` | AI Assistant is enabled by default; set `AI_ASSISTANT_ENABLED=false` to disable it. API URL, key, text model, timeout, route, and host allowlist reuse `PROMPT_OPTIMIZER_*`. `AI_ASSISTANT_MAX_CONCURRENCY` caps concurrent upstream assistant calls and `AI_ASSISTANT_BATCH_MAX_IMAGES` caps one gallery AI batch. |
 | `R2_*` | Optional Cloudflare R2 gallery backup sync settings; custom endpoint hosts require `R2_ENDPOINT_HOST_ALLOWLIST`. |
 | `PUBLIC_ORIGIN` / `ALLOWED_HOSTS` | Reverse-proxy Host/CSRF hardening. |
 | `ENABLE_NGINX_ACCEL_REDIRECT` / `PUBLIC_IMAGE_BASE_URL` / `PUBLIC_THUMBNAIL_BASE_URL` | Optional nginx/CDN image byte serving behavior. |
@@ -473,7 +473,7 @@ ALLOW_UNAUTHENTICATED=true granian --interface asgi backend.app.main:app --host 
 | `THUMBNAILS_DIR` / `THUMBNAIL_*` | Gallery 缩略图存储和生成控制。 |
 | `DATA_DIR` / `DATABASE_FILE` | SQLite 运行时数据。 |
 | `PROMPT_OPTIMIZER_*` | 可选提示词优化器配置。 |
-| `AI_ASSISTANT_*` | AI Assistant 默认启用；如需关闭，设置 `AI_ASSISTANT_ENABLED=false`。API URL、密钥、文本模型、超时、路径和 host allowlist 复用 `PROMPT_OPTIMIZER_*`。 |
+| `AI_ASSISTANT_*` | AI Assistant 默认启用；如需关闭，设置 `AI_ASSISTANT_ENABLED=false`。API URL、密钥、文本模型、超时、路径和 host allowlist 复用 `PROMPT_OPTIMIZER_*`。`AI_ASSISTANT_MAX_CONCURRENCY` 限制并发上游 Assistant 调用，`AI_ASSISTANT_BATCH_MAX_IMAGES` 限制单次 Gallery AI 批量分析图片数。 |
 | `R2_*` | 可选 Cloudflare R2 Gallery 备份配置；自定义 endpoint host 需要配置 `R2_ENDPOINT_HOST_ALLOWLIST`。 |
 | `PUBLIC_ORIGIN` / `ALLOWED_HOSTS` | 反向代理 Host/CSRF 加固。 |
 | `ENABLE_NGINX_ACCEL_REDIRECT` / `PUBLIC_IMAGE_BASE_URL` / `PUBLIC_THUMBNAIL_BASE_URL` | 可选 nginx/CDN 图片字节服务行为。 |

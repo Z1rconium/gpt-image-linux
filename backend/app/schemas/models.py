@@ -623,7 +623,7 @@ class AssistantRecommendParamsResponse(AssistantBaseResponse):
 
 
 class AssistantJobDiagnoseRequest(StrictRequestModel):
-    include_prompt: bool = True
+    include_prompt: bool = False
 
 
 class AssistantJobDiagnoseResponse(AssistantBaseResponse):

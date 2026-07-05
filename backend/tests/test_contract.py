@@ -181,6 +181,8 @@ def _configure_runtime(tmp_path: Path, *, access_key: str = "", allow_unauthenti
     config.AI_ASSISTANT_ENABLED = True
     config.AI_ASSISTANT_VISION_MODEL = "gpt-4o-mini"
     config.AI_ASSISTANT_MAX_RESPONSE_MB = 8
+    config.AI_ASSISTANT_MAX_CONCURRENCY = 2
+    config.AI_ASSISTANT_BATCH_MAX_IMAGES = 200
     config.AI_ASSISTANT_IMAGE_MAX_SIDE = 1024
     config.AI_ASSISTANT_IMAGE_MAX_BYTES = 1048576
     config.R2_BACKUP_ENABLED = False
@@ -1924,6 +1926,84 @@ def test_ai_assistant_prompt_tools_and_param_recommendations(client, monkeypatch
     assert seen["kwargs"]["api_path"] == "/v1/responses"
 
 
+def test_ai_assistant_request_concurrency_limit_returns_429(client, monkeypatch):
+    settings = client.get("/api/settings").json()
+    configured = client.post(
+        "/api/settings",
+        json=_assistant_runtime_payload(settings),
+    )
+    assert configured.status_code == 200
+
+    config.AI_ASSISTANT_MAX_CONCURRENCY = 1
+    acquired_once = False
+
+    def fake_acquire_background_slot(**kwargs):
+        nonlocal acquired_once
+        assert kwargs["slot_count"] == 1
+        if acquired_once:
+            return None
+        acquired_once = True
+        return "ai_assistant_request:0"
+
+    async def fake_request_assistant_json(**kwargs):
+        return ({"rewritten_prompt": "limited prompt", "warnings": []}, "assistant-model", 10)
+
+    monkeypatch.setattr(storage, "acquire_background_slot", fake_acquire_background_slot)
+    monkeypatch.setattr(storage, "release_background_slot", lambda **kwargs: True)
+    monkeypatch.setattr(assistant_router.assistant_client, "request_assistant_json", fake_request_assistant_json)
+
+    ok = client.post("/api/assistant/prompt/rewrite", json={"prompt": "tiny robot", "target_language": "en"})
+    assert ok.status_code == 200
+    limited = client.post("/api/assistant/prompt/rewrite", json={"prompt": "tiny robot", "target_language": "en"})
+    assert limited.status_code == 429
+    assert "concurrency limit" in limited.json()["detail"]
+
+
+def test_ai_assistant_response_fields_are_truncated_before_persistence(client, monkeypatch):
+    settings = client.get("/api/settings").json()
+    configured = client.post(
+        "/api/settings",
+        json=_assistant_runtime_payload(settings),
+    )
+    assert configured.status_code == 200
+    entry = _fake_gallery_entry("assistant-long-fields", "prompt", "1024x1024", "assistant-long-fields.png")
+    assert entry is not None
+
+    async def fake_request_assistant_json(**kwargs):
+        return (
+            {
+                "description": "d" * 5000,
+                "prompt": "p" * 9000,
+                "analysis": {
+                    "subjects": ["s" * 500 for _ in range(20)],
+                    "style": "x" * 2000,
+                    "composition": "c" * 2000,
+                    "lighting": "l" * 2000,
+                    "colors": ["red" * 80 for _ in range(20)],
+                },
+                "warnings": ["w" * 900 for _ in range(20)],
+            },
+            "assistant-vision-model",
+            11,
+        )
+
+    monkeypatch.setattr(assistant_router.assistant_client, "request_assistant_json", fake_request_assistant_json)
+    resp = client.post("/api/assistant/gallery/assistant-long-fields/analyze")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body["description"]) == 2000
+    assert len(body["prompt"]) == 4000
+    assert len(body["analysis"]["style"]) == 500
+    assert len(body["analysis"]["composition"]) == 800
+    assert len(body["warnings"]) == 10
+    assert all(len(warning) == 500 for warning in body["warnings"])
+
+    metadata = storage.get_gallery_ai_metadata("assistant-long-fields")
+    assert metadata is not None
+    assert len(metadata["description"]) == 2000
+    assert len(metadata["prompt"]) == 4000
+
+
 def test_ai_assistant_job_diagnose_does_not_expose_secrets(client, monkeypatch):
     settings = client.get("/api/settings").json()
     configured = client.post(
@@ -1937,7 +2017,7 @@ def test_ai_assistant_job_diagnose_does_not_expose_secrets(client, monkeypatch):
             "job_id": "diagnose-job",
             "status": "error",
             "stage": "generation_failed",
-            "message": "Failed upstream",
+            "message": "Failed upstream with Authorization: Bearer env-secret and https://api.example.com/v1/path?api_key=env-secret",
             "operation": "generation",
             "prompt": "secret prompt",
             "size": "1024x1024",
@@ -1946,13 +2026,14 @@ def test_ai_assistant_job_diagnose_does_not_expose_secrets(client, monkeypatch):
             "completed_at": "2026-01-01T00:00:00+00:00",
             "api_path": "/v1/images/generations",
             "api_preset_name": "Default",
-            "error": "upstream failed",
+            "error": "upstream failed api_key=env-secret",
         }
     )
 
     async def fake_request_assistant_json(**kwargs):
-        assert "secret prompt" in kwargs["user_prompt"]
+        assert "secret prompt" not in kwargs["user_prompt"]
         assert "env-secret" not in kwargs["user_prompt"]
+        assert "[REDACTED]" in kwargs["user_prompt"]
         return (
             {
                 "summary": "Upstream failure",
@@ -1965,11 +2046,12 @@ def test_ai_assistant_job_diagnose_does_not_expose_secrets(client, monkeypatch):
         )
 
     monkeypatch.setattr(assistant_router.assistant_client, "request_assistant_json", fake_request_assistant_json)
-    resp = client.post("/api/assistant/jobs/diagnose-job/diagnose", json={"include_prompt": True})
+    resp = client.post("/api/assistant/jobs/diagnose-job/diagnose", json={})
     assert resp.status_code == 200
     body = resp.json()
     assert body["summary"] == "Upstream failure"
     assert body["safe_job"]["job_id"] == "diagnose-job"
+    assert "prompt" not in body["safe_job"]
     assert "env-secret" not in json.dumps(body)
 
 
@@ -1988,6 +2070,25 @@ def test_ai_assistant_gallery_metadata_and_analysis_flow(client, monkeypatch):
         if "preview" in kwargs["user_prompt"]:
             assert kwargs["image"]["mime_type"] == "image/jpeg"
             assert kwargs["image"]["bytes"] <= config.AI_ASSISTANT_IMAGE_MAX_BYTES
+            schema = kwargs["schema"]
+            if "analysis" not in schema and "description" in schema:
+                return (
+                    {
+                        "description": "A small red square",
+                        "warnings": [],
+                    },
+                    "assistant-vision-model",
+                    15,
+                )
+            if "analysis" not in schema and "prompt" in schema:
+                return (
+                    {
+                        "prompt": "red square on white background",
+                        "warnings": [],
+                    },
+                    "assistant-vision-model",
+                    16,
+                )
             return (
                 {
                     "description": "A small red square",
@@ -2093,6 +2194,149 @@ def test_ai_assistant_gallery_batch_analysis_jobs_and_limits(client, monkeypatch
     assert "already queued or running" in limited.json()["detail"]
 
 
+def test_ai_assistant_gallery_batch_analysis_limits_selection_and_uses_filter_payload(client, monkeypatch):
+    settings = client.get("/api/settings").json()
+    configured = client.post(
+        "/api/settings",
+        json=_assistant_runtime_payload(settings),
+    )
+    assert configured.status_code == 200
+    first = _fake_gallery_entry("assistant-filter-1", "filter prompt 1", "1024x1024", "assistant-filter-1.png")
+    second = _fake_gallery_entry("assistant-filter-2", "filter prompt 2", "1024x1024", "assistant-filter-2.png")
+    assert first is not None and second is not None
+
+    token_resp = client.post("/api/gallery/batch/selection-tokens", json={"filters": {"prompt": "filter prompt"}})
+    assert token_resp.status_code == 201
+    token = token_resp.json()["selection_token"]
+
+    original_limit = config.AI_ASSISTANT_BATCH_MAX_IMAGES
+    config.AI_ASSISTANT_BATCH_MAX_IMAGES = 1
+    try:
+        too_many = client.post("/api/assistant/gallery/batch/analyze", json={"selection_token": token})
+    finally:
+        config.AI_ASSISTANT_BATCH_MAX_IMAGES = original_limit
+    assert too_many.status_code == 413
+
+    async def fake_request_assistant_json(**kwargs):
+        return (
+            {
+                "description": "filter batch",
+                "prompt": "filter prompt",
+                "analysis": {"subjects": ["filter"]},
+                "warnings": [],
+            },
+            "assistant-vision-model",
+            9,
+        )
+
+    monkeypatch.setattr(assistant_router.assistant_client, "request_assistant_json", fake_request_assistant_json)
+    submitted = client.post("/api/assistant/gallery/batch/analyze", json={"selection_token": token})
+    assert submitted.status_code == 202
+    job_id = submitted.json()["job_id"]
+    queued_job = storage.get_gallery_job("ai_analyze", job_id)
+    assert queued_job is not None
+    assert "filters" in queued_job["payload"]
+    assert "ids" not in queued_job["payload"]
+
+    job = _wait_for_gallery_batch_analyze_job(client, job_id)
+    assert job["status"] == "success"
+    assert job["requested_count"] == 2
+    assert job["analyzed_count"] == 2
+
+
+def test_ai_assistant_gallery_batch_analysis_selection_snapshot_excludes_later_rows(client, monkeypatch):
+    settings = client.get("/api/settings").json()
+    configured = client.post("/api/settings", json=_assistant_runtime_payload(settings))
+    assert configured.status_code == 200
+    _fake_gallery_entry("assistant-snapshot-1", "snapshot prompt 1", "1024x1024", "assistant-snapshot-1.png")
+    _fake_gallery_entry("assistant-snapshot-2", "snapshot prompt 2", "1024x1024", "assistant-snapshot-2.png")
+
+    token_resp = client.post("/api/gallery/batch/selection-tokens", json={"filters": {"prompt": "snapshot prompt"}})
+    assert token_resp.status_code == 201
+    monkeypatch.setattr(assistant_router, "_kick_ai_analyze_dispatcher", lambda: None)
+
+    submitted = client.post(
+        "/api/assistant/gallery/batch/analyze",
+        json={"selection_token": token_resp.json()["selection_token"]},
+    )
+    assert submitted.status_code == 202
+    job_id = submitted.json()["job_id"]
+    queued = storage.get_gallery_job("ai_analyze", job_id)
+    assert queued is not None
+    assert queued["payload"]["snapshot"]
+
+    _fake_gallery_entry("assistant-snapshot-3", "snapshot prompt 3", "1024x1024", "assistant-snapshot-3.png")
+    analyzed_ids: list[str] = []
+
+    async def fake_analyze_with_lease(image_id, **kwargs):
+        analyzed_ids.append(image_id)
+
+    monkeypatch.setattr(assistant_router, "_analyze_gallery_image_with_lease_renewal", fake_analyze_with_lease)
+    claimed = storage.claim_next_gallery_job(
+        kind="ai_analyze",
+        worker_id="owner-a",
+        lease_expires_at="2999-01-01T00:00:00+00:00",
+        now="2026-01-01T00:00:00+00:00",
+        running_limit=1,
+    )
+    assert claimed is not None
+
+    asyncio.run(assistant_router._run_ai_analyze_job(claimed))
+    stored = storage.get_gallery_job("ai_analyze", job_id)
+    assert stored is not None
+    assert stored["status"] == "success"
+    assert stored["requested_count"] == 2
+    assert stored["processed_count"] == 2
+    assert stored["exported_count"] == 2
+    assert set(analyzed_ids) == {"assistant-snapshot-1", "assistant-snapshot-2"}
+
+
+def test_ai_assistant_gallery_batch_analysis_selection_snapshot_counts_deleted_rows(client, monkeypatch):
+    settings = client.get("/api/settings").json()
+    configured = client.post("/api/settings", json=_assistant_runtime_payload(settings))
+    assert configured.status_code == 200
+    _fake_gallery_entry("assistant-snapshot-delete-1", "snapshot delete 1", "1024x1024", "assistant-snapshot-delete-1.png")
+    _fake_gallery_entry("assistant-snapshot-delete-2", "snapshot delete 2", "1024x1024", "assistant-snapshot-delete-2.png")
+
+    token_resp = client.post("/api/gallery/batch/selection-tokens", json={"filters": {"prompt": "snapshot delete"}})
+    assert token_resp.status_code == 201
+    monkeypatch.setattr(assistant_router, "_kick_ai_analyze_dispatcher", lambda: None)
+    submitted = client.post(
+        "/api/assistant/gallery/batch/analyze",
+        json={"selection_token": token_resp.json()["selection_token"]},
+    )
+    assert submitted.status_code == 202
+    job_id = submitted.json()["job_id"]
+    deleted, _deleted_files = storage.delete_gallery_image("assistant-snapshot-delete-2")
+    assert deleted is True
+
+    analyzed_ids: list[str] = []
+
+    async def fake_analyze_with_lease(image_id, **kwargs):
+        analyzed_ids.append(image_id)
+
+    monkeypatch.setattr(assistant_router, "_analyze_gallery_image_with_lease_renewal", fake_analyze_with_lease)
+    claimed = storage.claim_next_gallery_job(
+        kind="ai_analyze",
+        worker_id="owner-a",
+        lease_expires_at="2999-01-01T00:00:00+00:00",
+        now="2026-01-01T00:00:00+00:00",
+        running_limit=1,
+    )
+    assert claimed is not None
+
+    asyncio.run(assistant_router._run_ai_analyze_job(claimed))
+    stored = storage.get_gallery_job("ai_analyze", job_id)
+    assert stored is not None
+    assert stored["status"] == "error"
+    assert stored["requested_count"] == 2
+    assert stored["processed_count"] == 1
+    assert stored["exported_count"] == 1
+    assert stored["missing_count"] == 1
+    assert stored["failed_count"] == 0
+    assert analyzed_ids == ["assistant-snapshot-delete-1"]
+
+
 def test_ai_assistant_gallery_batch_analysis_validates_runtime_before_queueing(client, monkeypatch):
     settings = client.get("/api/settings").json()
     configured = client.post(
@@ -2167,6 +2411,168 @@ def test_ai_assistant_gallery_batch_analysis_renews_lease_during_image_calls(cli
     assert renewals
     assert all(item[0] == job_id for item in renewals)
     assert all(item[1] for item in renewals)
+
+
+def test_ai_assistant_gallery_batch_analysis_retries_assistant_slot_backpressure(client, monkeypatch):
+    calls = 0
+
+    async def fake_analyze_with_lease(image_id, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise assistant_router.HTTPException(status_code=429, detail="AI Assistant is at its concurrency limit")
+
+    monkeypatch.setattr(assistant_router, "AI_ASSISTANT_SLOT_RETRY_SECONDS", 0)
+    monkeypatch.setattr(assistant_router, "_analyze_gallery_image_with_lease_renewal", fake_analyze_with_lease)
+    job = storage.create_gallery_job(
+        job_id="assistant-batch-backpressure",
+        kind="ai_analyze",
+        status="running",
+        stage="analyzing",
+        message="running",
+        progress=0,
+        created_at="2026-01-01T00:00:00+00:00",
+        updated_at="2026-01-01T00:00:00+00:00",
+        lease_owner="owner-a",
+        lease_expires_at="2999-01-01T00:00:00+00:00",
+        requested_count=1,
+        payload={"ids": ["assistant-backpressure-1"]},
+    )
+
+    asyncio.run(assistant_router._run_ai_analyze_job(job))
+    stored = storage.get_gallery_job("ai_analyze", "assistant-batch-backpressure")
+    assert stored is not None
+    assert stored["status"] == "success"
+    assert stored["processed_count"] == 1
+    assert stored["exported_count"] == 1
+    assert stored["failed_count"] == 0
+    assert calls == 2
+
+
+def test_ai_assistant_gallery_batch_analysis_stops_when_lease_owner_changes(client, monkeypatch):
+    settings = client.get("/api/settings").json()
+    configured = client.post(
+        "/api/settings",
+        json=_assistant_runtime_payload(settings),
+    )
+    assert configured.status_code == 200
+    entry = _fake_gallery_entry("assistant-batch-owner", "prompt", "1024x1024", "assistant-batch-owner.png")
+    assert entry is not None
+
+    async def fake_analyze_with_lease(*args, **kwargs):
+        return None
+
+    progress_calls = 0
+    original_update_progress = storage.update_gallery_job_progress
+
+    def fake_update_progress(job_id, updates, **kwargs):
+        nonlocal progress_calls
+        progress_calls += 1
+        if progress_calls == 1:
+            return False
+        return original_update_progress(job_id, updates, **kwargs)
+
+    monkeypatch.setattr(assistant_router, "_analyze_gallery_image_with_lease_renewal", fake_analyze_with_lease)
+    monkeypatch.setattr(storage, "update_gallery_job_progress", fake_update_progress)
+
+    job = storage.create_gallery_job(
+        job_id="assistant-batch-owner-job",
+        kind="ai_analyze",
+        status="running",
+        stage="analyzing",
+        message="running",
+        progress=0,
+        created_at="2026-01-01T00:00:00+00:00",
+        updated_at="2026-01-01T00:00:00+00:00",
+        lease_owner="owner-a",
+        lease_expires_at="2999-01-01T00:00:00+00:00",
+        requested_count=1,
+        payload={"ids": ["assistant-batch-owner"]},
+    )
+
+    asyncio.run(assistant_router._run_ai_analyze_job(job))
+    stored = storage.get_gallery_job("ai_analyze", "assistant-batch-owner-job")
+    assert stored is not None
+    assert stored["status"] == "running"
+    assert stored["progress"] == 0
+    assert progress_calls == 1
+
+
+def test_ai_assistant_gallery_batch_analysis_resumes_id_jobs_after_stored_progress(client, monkeypatch):
+    analyzed_ids: list[str] = []
+
+    async def fake_analyze_with_lease(image_id, **kwargs):
+        analyzed_ids.append(image_id)
+
+    monkeypatch.setattr(assistant_router, "_analyze_gallery_image_with_lease_renewal", fake_analyze_with_lease)
+
+    job = storage.create_gallery_job(
+        job_id="assistant-batch-resume-ids",
+        kind="ai_analyze",
+        status="running",
+        stage="analyzing",
+        message="running",
+        progress=32,
+        created_at="2026-01-01T00:00:00+00:00",
+        updated_at="2026-01-01T00:00:00+00:00",
+        lease_owner="owner-a",
+        lease_expires_at="2999-01-01T00:00:00+00:00",
+        requested_count=3,
+        processed_count=1,
+        exported_count=1,
+        payload={"ids": ["assistant-resume-1", "assistant-resume-2", "assistant-resume-3"]},
+    )
+
+    asyncio.run(assistant_router._run_ai_analyze_job(job))
+    stored = storage.get_gallery_job("ai_analyze", "assistant-batch-resume-ids")
+    assert stored is not None
+    assert stored["status"] == "success"
+    assert stored["processed_count"] == 3
+    assert stored["exported_count"] == 3
+    assert analyzed_ids == ["assistant-resume-2", "assistant-resume-3"]
+
+
+def test_ai_assistant_gallery_batch_analysis_checkpoints_completed_selection_rows(client, monkeypatch):
+    def fake_get_gallery_id_batch(*args, **kwargs):
+        return [
+            {"id": "assistant-select-1", "sort_seq": 30},
+            {"id": "assistant-select-2", "sort_seq": 20},
+            {"id": "assistant-select-3", "sort_seq": 10},
+        ]
+
+    analyzed_ids: list[str] = []
+
+    async def fake_analyze_with_lease(image_id, **kwargs):
+        analyzed_ids.append(image_id)
+        if image_id == "assistant-select-2":
+            raise assistant_router.AIAnalyzeJobLeaseLost("lost lease")
+
+    monkeypatch.setattr(storage, "get_gallery_id_batch", fake_get_gallery_id_batch)
+    monkeypatch.setattr(assistant_router, "_analyze_gallery_image_with_lease_renewal", fake_analyze_with_lease)
+
+    job = storage.create_gallery_job(
+        job_id="assistant-batch-selection-checkpoint",
+        kind="ai_analyze",
+        status="running",
+        stage="analyzing",
+        message="running",
+        progress=0,
+        created_at="2026-01-01T00:00:00+00:00",
+        updated_at="2026-01-01T00:00:00+00:00",
+        lease_owner="owner-a",
+        lease_expires_at="2999-01-01T00:00:00+00:00",
+        requested_count=3,
+        payload={"filters": {}, "checkpoint": None},
+    )
+
+    asyncio.run(assistant_router._run_ai_analyze_job(job))
+    stored = storage.get_gallery_job("ai_analyze", "assistant-batch-selection-checkpoint")
+    assert stored is not None
+    assert stored["status"] == "running"
+    assert stored["processed_count"] == 1
+    assert stored["exported_count"] == 1
+    assert stored["payload"]["checkpoint"] == {"id": "assistant-select-1", "sort_seq": 30}
+    assert analyzed_ids == ["assistant-select-1", "assistant-select-2"]
 
 
 def test_ai_assistant_gallery_batch_analysis_treats_missing_images_as_error(client, monkeypatch):

@@ -1282,7 +1282,13 @@ test('floating prompt optimizer opens on click and can be long-press dragged', a
   const trigger = page.getByTestId('prompt-optimizer-assistant-trigger');
   await expect(trigger).toBeVisible();
 
-  const initialBox = await trigger.boundingBox();
+  const triggerRect = () =>
+    trigger.evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+    });
+
+  const initialBox = await triggerRect();
   expect(initialBox).not.toBeNull();
 
   await trigger.click();
@@ -1290,23 +1296,44 @@ test('floating prompt optimizer opens on click and can be long-press dragged', a
   await page.keyboard.press('Escape');
   await expect(page.getByRole('dialog', { name: 'Quick optimize' })).toBeHidden();
 
-  const startX = Math.round((initialBox?.x || 0) + (initialBox?.width || 0) / 2);
-  const startY = Math.round((initialBox?.y || 0) + (initialBox?.height || 0) / 2);
+  const dragInitialBox = await triggerRect();
+  const pointerOffsetX = 24;
+  const pointerOffsetY = Math.round((dragInitialBox?.height || 0) / 2);
+  const startX = Math.round((dragInitialBox?.x || 0) + pointerOffsetX);
+  const startY = Math.round((dragInitialBox?.y || 0) + pointerOffsetY);
+  const dragTargetX = startX - 130;
+  const dragTargetY = startY - 110;
   await page.mouse.move(startX, startY);
   await page.mouse.down();
   await page.waitForTimeout(320);
-  await page.mouse.move(startX - 130, startY - 110, { steps: 8 });
+
+  const heldBox = await triggerRect();
+  const heldStyle = await trigger.evaluate((element) => ({
+    left: (element as HTMLElement).style.left,
+    top: (element as HTMLElement).style.top,
+    bottom: (element as HTMLElement).style.bottom
+  }));
+  expect(heldBox).not.toBeNull();
+  expect(Math.abs(Math.round(parseFloat(heldStyle.left)) - Math.round(dragInitialBox?.x || 0))).toBeLessThanOrEqual(3);
+  expect(Math.abs(Math.round(parseFloat(heldStyle.top)) - Math.round(dragInitialBox?.y || 0))).toBeLessThanOrEqual(3);
+  expect(heldStyle.bottom).toBe('auto');
+
+  await page.mouse.move(dragTargetX, dragTargetY, { steps: 8 });
   await page.mouse.up();
 
-  const movedBox = await trigger.boundingBox();
+  const movedBox = await triggerRect();
+  const movedStyle = await trigger.evaluate((element) => ({
+    left: (element as HTMLElement).style.left,
+    top: (element as HTMLElement).style.top
+  }));
   expect(movedBox).not.toBeNull();
-  expect(movedBox?.x || 0).toBeLessThan((initialBox?.x || 0) - 40);
-  expect(movedBox?.y || 0).toBeLessThan((initialBox?.y || 0) - 40);
-  expect(Math.abs(Math.round((movedBox?.x || 0) + (movedBox?.width || 0) / 2) - (startX - 130))).toBeLessThanOrEqual(3);
-  expect(Math.abs(Math.round((movedBox?.y || 0) + (movedBox?.height || 0) / 2) - (startY - 110))).toBeLessThanOrEqual(24);
+  expect(movedBox?.x || 0).toBeLessThan((dragInitialBox?.x || 0) - 40);
+  expect(movedBox?.y || 0).toBeLessThan((dragInitialBox?.y || 0) - 40);
+  expect(Math.abs(Math.round(parseFloat(movedStyle.left) + pointerOffsetX) - dragTargetX)).toBeLessThanOrEqual(3);
+  expect(Math.abs(Math.round(parseFloat(movedStyle.top) + pointerOffsetY) - dragTargetY)).toBeLessThanOrEqual(3);
 
   await page.mouse.move(startX - 8, startY - 8);
-  const settledBox = await trigger.boundingBox();
+  const settledBox = await triggerRect();
   expect(settledBox).not.toBeNull();
   expect(
     Math.abs(
@@ -1330,7 +1357,7 @@ test('floating prompt optimizer opens on click and can be long-press dragged', a
   await page.mouse.move(-140, -120, { steps: 8 });
   await page.mouse.up();
 
-  const clampedBox = await trigger.boundingBox();
+  const clampedBox = await triggerRect();
   expect(clampedBox).not.toBeNull();
   expect(clampedBox?.x || 0).toBeGreaterThanOrEqual(12);
   expect(clampedBox?.y || 0).toBeGreaterThanOrEqual(12);
@@ -1340,10 +1367,10 @@ test('floating prompt optimizer opens on click and can be long-press dragged', a
   await page.reload();
   await expect(page.getByRole('heading', { name: 'Prompt', exact: true })).toBeVisible();
 
-  const reloadedBox = await trigger.boundingBox();
+  const reloadedBox = await triggerRect();
   expect(reloadedBox).not.toBeNull();
-  expect(reloadedBox?.x || 0).toBeLessThan((initialBox?.x || 0) - 40);
-  expect(reloadedBox?.y || 0).toBeLessThan((initialBox?.y || 0) - 40);
+  expect(reloadedBox?.x || 0).toBeLessThan((dragInitialBox?.x || 0) - 40);
+  expect(reloadedBox?.y || 0).toBeLessThan((dragInitialBox?.y || 0) - 40);
 
   await trigger.click();
   await expect(page.getByRole('dialog', { name: 'Quick optimize' })).toBeVisible();

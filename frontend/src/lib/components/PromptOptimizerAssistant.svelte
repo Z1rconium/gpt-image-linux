@@ -43,7 +43,8 @@
   let pressTimer: ReturnType<typeof setTimeout> | null = null;
   let activePointerId: number | null = null;
   let pointerDownAt: FloatingPosition | null = null;
-  let dragCenterOffset: FloatingPosition | null = null;
+  let pointerDownTriggerPosition: FloatingPosition | null = null;
+  let dragPointerOffset: FloatingPosition | null = null;
   let dragPending = false;
   let dragging = false;
   let suppressClick = false;
@@ -158,7 +159,8 @@
     clearPressTimer();
     activePointerId = null;
     pointerDownAt = null;
-    dragCenterOffset = null;
+    pointerDownTriggerPosition = null;
+    dragPointerOffset = null;
     dragPending = false;
     dragging = false;
     lastPointerPosition = null;
@@ -257,19 +259,22 @@
   function startDrag(event: PointerEvent) {
     if (!triggerButton || activePointerId !== event.pointerId || !pointerDownAt) return;
 
-    const rect = triggerButton.getBoundingClientRect();
     const anchor = lastPointerPosition || pointerDownAt;
-    dragCenterOffset = {
-      x: rect.width / 2,
-      y: rect.height / 2
+    const triggerPosition = pointerDownTriggerPosition || {
+      x: triggerButton.getBoundingClientRect().left,
+      y: triggerButton.getBoundingClientRect().top
+    };
+    dragPointerOffset = {
+      x: anchor.x - triggerPosition.x,
+      y: anchor.y - triggerPosition.y
     };
     dragging = true;
     dragPending = false;
     suppressClick = true;
     setFloatingPosition(
       {
-        x: anchor.x - dragCenterOffset.x,
-        y: anchor.y - dragCenterOffset.y
+        x: anchor.x - dragPointerOffset.x,
+        y: anchor.y - dragPointerOffset.y
       },
       true
     );
@@ -283,6 +288,8 @@
       x: event.clientX,
       y: event.clientY
     };
+    const rect = triggerButton?.getBoundingClientRect();
+    pointerDownTriggerPosition = rect ? { x: rect.left, y: rect.top } : null;
     lastPointerPosition = pointerDownAt;
     dragPending = true;
     suppressClick = false;
@@ -315,11 +322,11 @@
       return;
     }
 
-    if (!dragCenterOffset) return;
+    if (!dragPointerOffset) return;
     setFloatingPosition(
       {
-        x: event.clientX - dragCenterOffset.x,
-        y: event.clientY - dragCenterOffset.y
+        x: event.clientX - dragPointerOffset.x,
+        y: event.clientY - dragPointerOffset.y
       },
       true
     );
@@ -339,7 +346,8 @@
     clearPressTimer();
     activePointerId = null;
     pointerDownAt = null;
-    dragCenterOffset = null;
+    pointerDownTriggerPosition = null;
+    dragPointerOffset = null;
     dragPending = false;
     dragging = false;
     lastPointerPosition = null;

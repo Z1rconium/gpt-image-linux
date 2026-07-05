@@ -103,6 +103,8 @@ __all__ = [
     "get_gallery",
     "get_gallery_count",
     "get_gallery_ids",
+    "get_gallery_id_batch",
+    "get_gallery_selection_snapshot",
     "get_gallery_entry",
     "get_gallery_entries_by_ids",
     "get_gallery_filter_options",
@@ -2862,7 +2864,9 @@ def upsert_gallery_ai_metadata(
     _ensure_database()
     now = utc_now()
     normalized_analysis = analysis if isinstance(analysis, dict) else {}
-    analysis_json = json.dumps(normalized_analysis, ensure_ascii=False, sort_keys=True)
+    normalized_description = str(description or "")[:2000]
+    normalized_prompt = str(prompt or "")[:4000]
+    analysis_json = json.dumps(normalized_analysis, ensure_ascii=False, sort_keys=True)[:12000]
     with _connect() as conn:
         with _transaction(conn):
             exists = conn.execute(
@@ -2892,8 +2896,8 @@ def upsert_gallery_ai_metadata(
                 """,
                 (
                     image_id,
-                    str(description or ""),
-                    str(prompt or ""),
+                    normalized_description,
+                    normalized_prompt,
                     analysis_json,
                     str(model or ""),
                     now,
@@ -3765,6 +3769,83 @@ def get_gallery_ids(filters: dict[str, Any] | None = None) -> list[str]:
             tuple(params),
         ).fetchall()
     return [str(row["id"]) for row in rows if row["id"]]
+
+
+def get_gallery_selection_snapshot(filters: dict[str, Any] | None = None) -> dict[str, Any]:
+    _ensure_database()
+    with _connect() as conn:
+        where_sql, params = _build_gallery_filter_where(filters)
+        boundary = conn.execute(
+            f"""
+            SELECT id, sort_seq
+            FROM gallery_entries
+            {where_sql}
+            ORDER BY sort_seq DESC, id DESC
+            LIMIT 1
+            """,
+            tuple(params),
+        ).fetchone()
+        if not boundary:
+            return {"count": 0, "boundary": None}
+
+        boundary_sort_seq = int(boundary["sort_seq"] or 0)
+        boundary_id = str(boundary["id"] or "")
+        bounded_where = _combine_gallery_where(
+            where_sql,
+            "(sort_seq < ? OR (sort_seq = ? AND id <= ?))",
+        )
+        count_row = conn.execute(
+            f"SELECT COUNT(*) FROM gallery_entries{bounded_where}",
+            (*params, boundary_sort_seq, boundary_sort_seq, boundary_id),
+        ).fetchone()
+    return {
+        "count": int(count_row[0] or 0) if count_row else 0,
+        "boundary": {
+            "sort_seq": boundary_sort_seq,
+            "id": boundary_id,
+        },
+    }
+
+
+def get_gallery_id_batch(
+    filters: dict[str, Any] | None = None,
+    *,
+    after_sort_seq: int | None = None,
+    after_id: str | None = None,
+    before_or_at_sort_seq: int | None = None,
+    before_or_at_id: str | None = None,
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    """Return a keyset-paginated batch of gallery ids for background jobs."""
+    _ensure_database()
+    batch_limit = max(1, int(limit or 1))
+    with _connect() as conn:
+        where_sql, params = _build_gallery_filter_where(filters)
+        if before_or_at_sort_seq is not None and before_or_at_id is not None:
+            where_sql = _combine_gallery_where(
+                where_sql,
+                "(sort_seq < ? OR (sort_seq = ? AND id <= ?))",
+            )
+            params = [
+                *params,
+                int(before_or_at_sort_seq),
+                int(before_or_at_sort_seq),
+                str(before_or_at_id),
+            ]
+        rows = _get_gallery_row_batch_after_cursor_on_conn(
+            conn,
+            where_sql,
+            params,
+            last_sort_seq=after_sort_seq,
+            last_id=after_id,
+            limit=batch_limit,
+            columns=("id", "sort_seq"),
+        )
+    return [
+        {"id": str(row["id"]), "sort_seq": int(row["sort_seq"] or 0)}
+        for row in rows
+        if row["id"]
+    ]
 
 
 def _get_gallery_total_bytes_on_conn(
@@ -5213,14 +5294,25 @@ def get_gallery_jobs_updated_at_edges(kind: str, job_ids: set[str]) -> dict[str,
     return rows_by_job_id
 
 
-def update_gallery_job(job_id: str, updates: dict[str, Any]) -> dict[str, Any] | None:
+def update_gallery_job(
+    job_id: str,
+    updates: dict[str, Any],
+    *,
+    lease_owner: str | None = None,
+) -> dict[str, Any] | None:
     _ensure_database()
     if not updates:
         with _connect() as conn:
-            row = conn.execute(
-                f"SELECT {', '.join(GALLERY_JOB_COLUMNS)} FROM gallery_jobs WHERE job_id = ?",
-                (job_id,),
-            ).fetchone()
+            if lease_owner:
+                row = conn.execute(
+                    f"SELECT {', '.join(GALLERY_JOB_COLUMNS)} FROM gallery_jobs WHERE job_id = ? AND lease_owner = ?",
+                    (job_id, lease_owner),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    f"SELECT {', '.join(GALLERY_JOB_COLUMNS)} FROM gallery_jobs WHERE job_id = ?",
+                    (job_id,),
+                ).fetchone()
         return _gallery_job_from_row(row) if row else None
 
     allowed = set(GALLERY_JOB_COLUMNS) - {"job_id", "kind", "created_at", "payload_json"}
@@ -5266,10 +5358,28 @@ def update_gallery_job(job_id: str, updates: dict[str, Any]) -> dict[str, Any] |
     assignments = ", ".join(f"{key} = ?" for key in normalized)
     with _connect() as conn:
         with _transaction(conn):
-            conn.execute(
-                f"UPDATE gallery_jobs SET {assignments} WHERE job_id = ?",
-                (*normalized.values(), job_id),
-            )
+            if lease_owner:
+                cursor = conn.execute(
+                    f"""
+                    UPDATE gallery_jobs
+                    SET {assignments}
+                    WHERE job_id = ?
+                        AND lease_owner = ?
+                        AND status = 'running'
+                        AND (
+                            lease_expires_at IS NULL
+                            OR lease_expires_at > ?
+                        )
+                    """,
+                    (*normalized.values(), job_id, lease_owner, utc_now()),
+                )
+                if int(cursor.rowcount or 0) <= 0:
+                    return None
+            else:
+                conn.execute(
+                    f"UPDATE gallery_jobs SET {assignments} WHERE job_id = ?",
+                    (*normalized.values(), job_id),
+                )
             row = conn.execute(
                 f"SELECT {', '.join(GALLERY_JOB_COLUMNS)} FROM gallery_jobs WHERE job_id = ?",
                 (job_id,),
@@ -5320,7 +5430,12 @@ def _normalize_gallery_job_updates(updates: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
-def update_gallery_job_progress(job_id: str, updates: dict[str, Any]) -> bool:
+def update_gallery_job_progress(
+    job_id: str,
+    updates: dict[str, Any],
+    *,
+    lease_owner: str | None = None,
+) -> bool:
     """Update a gallery job without fetching the row back.
 
     Used for high-frequency export/sync progress writes where SSE only needs the
@@ -5333,10 +5448,26 @@ def update_gallery_job_progress(job_id: str, updates: dict[str, Any]) -> bool:
     assignments = ", ".join(f"{key} = ?" for key in normalized)
     with _connect() as conn:
         with _transaction(conn):
-            cursor = conn.execute(
-                f"UPDATE gallery_jobs SET {assignments} WHERE job_id = ?",
-                (*normalized.values(), job_id),
-            )
+            if lease_owner:
+                cursor = conn.execute(
+                    f"""
+                    UPDATE gallery_jobs
+                    SET {assignments}
+                    WHERE job_id = ?
+                        AND lease_owner = ?
+                        AND status = 'running'
+                        AND (
+                            lease_expires_at IS NULL
+                            OR lease_expires_at > ?
+                        )
+                    """,
+                    (*normalized.values(), job_id, lease_owner, utc_now()),
+                )
+            else:
+                cursor = conn.execute(
+                    f"UPDATE gallery_jobs SET {assignments} WHERE job_id = ?",
+                    (*normalized.values(), job_id),
+                )
     return cursor.rowcount > 0
 
 

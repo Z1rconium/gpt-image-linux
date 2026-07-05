@@ -36,7 +36,7 @@
     SettingsResponse
   } from '$lib/api/types';
   import { accessStore } from '$lib/stores/access';
-  import { assistantStore } from '$lib/stores/assistant';
+  import { assistantStore, isAbortError } from '$lib/stores/assistant';
   import { confirmStore } from '$lib/stores/confirm';
   import { editSourceStore, MAX_EDIT_SOURCE_IMAGES } from '$lib/stores/editSource';
   import { galleryActivityStore, galleryStore } from '$lib/stores/gallery';
@@ -77,6 +77,7 @@
   let requestedUrlSyncMode: 'replace' | 'push' | null = null;
   let lightboxLookupSeq = 0;
   let lightboxAiMetadataSeq = 0;
+  let lightboxAiController: AbortController | null = null;
   let lightboxNavigating = false;
   let lightboxAiMetadata: AssistantGalleryMetadataResponse | null = null;
   let jobDiagnoses: Record<string, AssistantJobDiagnoseResponse> = {};
@@ -248,6 +249,8 @@
   function closeLightbox() {
     lightboxStore.close();
     lightboxAiMetadataSeq += 1;
+    lightboxAiController?.abort();
+    lightboxAiController = null;
     lightboxAiMetadata = null;
     queueUrlSync('replace');
   }
@@ -825,10 +828,17 @@
     showToast($t.messages.galleryImageReady);
   }
 
+  function nextLightboxAiSignal() {
+    lightboxAiController?.abort();
+    lightboxAiController = new AbortController();
+    return lightboxAiController.signal;
+  }
+
   async function describeLightboxImage(image: GalleryEntry) {
     const seq = ++lightboxAiMetadataSeq;
+    const signal = nextLightboxAiSignal();
     try {
-      const result = await assistantStore.describeGalleryImage(image.id);
+      const result = await assistantStore.describeGalleryImage(image.id, signal);
       if (seq !== lightboxAiMetadataSeq || $lightboxStore.image?.id !== image.id) return;
       lightboxAiMetadata = {
         image_id: image.id,
@@ -840,14 +850,15 @@
         updated_at: null
       };
     } catch (error) {
-      if (seq === lightboxAiMetadataSeq && $lightboxStore.image?.id === image.id) showError(error);
+      if (!isAbortError(error) && seq === lightboxAiMetadataSeq && $lightboxStore.image?.id === image.id) showError(error);
     }
   }
 
   async function promptLightboxImage(image: GalleryEntry) {
     const seq = ++lightboxAiMetadataSeq;
+    const signal = nextLightboxAiSignal();
     try {
-      const result = await assistantStore.promptFromGalleryImage(image.id);
+      const result = await assistantStore.promptFromGalleryImage(image.id, signal);
       if (seq !== lightboxAiMetadataSeq || $lightboxStore.image?.id !== image.id) return;
       lightboxAiMetadata = {
         image_id: image.id,
@@ -863,14 +874,15 @@
         showToast($t.messages.aiAssistantPromptApplied);
       }
     } catch (error) {
-      if (seq === lightboxAiMetadataSeq && $lightboxStore.image?.id === image.id) showError(error);
+      if (!isAbortError(error) && seq === lightboxAiMetadataSeq && $lightboxStore.image?.id === image.id) showError(error);
     }
   }
 
   async function analyzeLightboxImage(image: GalleryEntry) {
     const seq = ++lightboxAiMetadataSeq;
+    const signal = nextLightboxAiSignal();
     try {
-      const result = await assistantStore.analyzeGalleryImage(image.id);
+      const result = await assistantStore.analyzeGalleryImage(image.id, signal);
       if (seq !== lightboxAiMetadataSeq || $lightboxStore.image?.id !== image.id) return;
       lightboxAiMetadata = {
         image_id: image.id,
@@ -883,7 +895,7 @@
       };
       showToast($t.messages.aiAssistantGalleryAnalyzed);
     } catch (error) {
-      if (seq === lightboxAiMetadataSeq && $lightboxStore.image?.id === image.id) showError(error);
+      if (!isAbortError(error) && seq === lightboxAiMetadataSeq && $lightboxStore.image?.id === image.id) showError(error);
     }
   }
 
@@ -1106,7 +1118,7 @@
 
   async function diagnoseJob(job: GenerateJobStatus) {
     try {
-      const diagnosis = await assistantStore.diagnoseJob(job.job_id, { include_prompt: true });
+      const diagnosis = await assistantStore.diagnoseJob(job.job_id);
       jobDiagnoses = { ...jobDiagnoses, [job.job_id]: diagnosis };
     } catch (error) {
       showError(error);
@@ -1156,6 +1168,8 @@
       galleryStore.cleanup();
       previewStore.cleanup();
       uiStore.cleanup();
+      lightboxAiController?.abort();
+      lightboxAiController = null;
       optimizingPrompt = false;
     };
   });
