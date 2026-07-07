@@ -1313,16 +1313,6 @@
     />
   </PromptForm>
 
-  <PromptOptimizerAssistant
-    enabled={optimizerAssistantEnabled}
-    currentPrompt={form.prompt}
-    apiPath={form.apiPath}
-    model={form.model}
-    size={form.size}
-    quality={form.quality}
-    onApplyPrompt={applyOptimizedPrompt}
-  />
-
   <AiAssistantPanel
     enabled={aiAssistantAvailable}
     optimizerEnabled={optimizerAvailable}
@@ -1386,6 +1376,16 @@
     onBatchAiAnalyze={batchAnalyzeGallery}
   />
 </main>
+
+<PromptOptimizerAssistant
+  enabled={optimizerAssistantEnabled}
+  currentPrompt={form.prompt}
+  apiPath={form.apiPath}
+  model={form.model}
+  size={form.size}
+  quality={form.quality}
+  onApplyPrompt={applyOptimizedPrompt}
+/>
 
 <Lightbox
   open={Boolean($lightboxStore.image)}

@@ -1311,12 +1311,16 @@ test('floating prompt optimizer opens on click and can be long-press dragged', a
   const heldStyle = await trigger.evaluate((element) => ({
     left: (element as HTMLElement).style.left,
     top: (element as HTMLElement).style.top,
-    bottom: (element as HTMLElement).style.bottom
+    bottom: (element as HTMLElement).style.bottom,
+    marginTop: getComputedStyle(element).marginTop
   }));
   expect(heldBox).not.toBeNull();
+  expect(Math.abs(Math.round(heldBox?.x || 0) - Math.round(dragInitialBox?.x || 0))).toBeLessThanOrEqual(3);
+  expect(Math.abs(Math.round(heldBox?.y || 0) - Math.round(dragInitialBox?.y || 0))).toBeLessThanOrEqual(3);
   expect(Math.abs(Math.round(parseFloat(heldStyle.left)) - Math.round(dragInitialBox?.x || 0))).toBeLessThanOrEqual(3);
   expect(Math.abs(Math.round(parseFloat(heldStyle.top)) - Math.round(dragInitialBox?.y || 0))).toBeLessThanOrEqual(3);
   expect(heldStyle.bottom).toBe('auto');
+  expect(heldStyle.marginTop).toBe('0px');
 
   await page.mouse.move(dragTargetX, dragTargetY, { steps: 8 });
   await page.mouse.up();
