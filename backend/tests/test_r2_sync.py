@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from backend.app.core import settings as config
-from backend.app.core.validators import normalize_r2_endpoint_url
+from backend.app.core.validators import is_private_ip, normalize_r2_endpoint_url
 from backend.app.integrations import r2_sync
 from backend.app.repositories import storage
 
@@ -285,11 +285,16 @@ def test_r2_endpoint_allowlist_still_blocks_private_dns(monkeypatch):
         normalize_r2_endpoint_url("https://storage.example.com")
 
 
+@pytest.mark.parametrize("ip", ["100.64.0.1", "198.18.0.1", "192.0.2.1", "2001:db8::1"])
+def test_ssrf_guard_blocks_all_non_global_address_space(ip):
+    assert is_private_ip(ip) is True
+
+
 def test_r2_endpoint_allowlist_allows_public_custom_hostname(monkeypatch):
     monkeypatch.setattr(config, "R2_ENDPOINT_HOST_ALLOWLIST", "storage.example.com")
     monkeypatch.setattr(
         "backend.app.core.validators.resolve_hostname",
-        lambda hostname: (hostname, ["203.0.113.10"]),
+        lambda hostname: (hostname, ["93.184.216.34"]),
     )
 
     assert normalize_r2_endpoint_url("https://storage.example.com") == "https://storage.example.com"

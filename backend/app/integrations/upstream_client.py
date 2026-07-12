@@ -67,6 +67,30 @@ HTTP_IMAGE_URL_RE = re.compile(r"https?://[^\s<>'\")]+")
 
 
 DOWNLOAD_CONCURRENCY = 3
+MAX_PERSISTABLE_UPSTREAM_ERROR_CHARS = 2000
+
+
+def _sanitize_upstream_error_text(value: Any) -> str:
+    text = str(value or "")[:MAX_PERSISTABLE_UPSTREAM_ERROR_CHARS]
+    text = re.sub(
+        r"(?i)(authorization\s*[:=]\s*(?:bearer\s+)?)[^\s,;]+",
+        r"\1[REDACTED]",
+        text,
+    )
+    return re.sub(
+        r'''(?i)(["']?(?:api[_-]?key|access[_-]?key|secret|token)["']?\s*[:=]\s*["']?)[^"',\s}]+''',
+        r"\1[REDACTED]",
+        text,
+    )
+
+
+def validate_upstream_image_data(value: Any, requested_n: int) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        raise UpstreamApiError("Upstream image data must be an array")
+    bounded = value[: max(1, int(requested_n))]
+    if any(not isinstance(item, dict) for item in bounded):
+        raise UpstreamApiError("Upstream image data entries must be objects")
+    return bounded
 
 
 def _warn_if_socks5_upstream_resolves_private(
@@ -502,6 +526,7 @@ async def save_gallery_entries_from_upstream_data(
     save_message: str,
     progress: ProgressCallback | None,
 ) -> list[storage.GalleryEntry]:
+    data = validate_upstream_image_data(data, payload.n)
     max_bytes = config.MAX_FILE_SIZE_MB * 1024 * 1024
     total = len(data)
 
@@ -650,10 +675,14 @@ def get_upstream_error_message(
     if is_json_response:
         try:
             error_body = json.loads(response_text)
-            return error_body.get("error", {}).get("message", response_text)
+            if isinstance(error_body, dict):
+                error = error_body.get("error")
+                if isinstance(error, dict):
+                    return _sanitize_upstream_error_text(error.get("message", response_text))
+            return _sanitize_upstream_error_text(response_text)
         except Exception:
-            return response_text
-    return f"HTTP {status}: {response_text[:200]}"
+            return _sanitize_upstream_error_text(response_text)
+    return f"HTTP {status}: {_sanitize_upstream_error_text(response_text[:200])}"
 
 
 def raise_upstream_error(
@@ -717,6 +746,8 @@ async def parse_upstream_json_response(
         raise UpstreamApiError(
             f"Upstream returned non-JSON ({status}): {response_text[:200]}"
         )
+    if not isinstance(result, dict):
+        raise UpstreamApiError("Upstream JSON response must be an object")
     return result, response_text
 
 
@@ -751,7 +782,10 @@ async def parse_upstream_chat_completion_response(
 
     if is_json_response:
         try:
-            return json.loads(response_text), response_text
+            result = json.loads(response_text)
+            if not isinstance(result, dict):
+                raise UpstreamApiError("Upstream chat response must be an object")
+            return result, response_text
         except json.JSONDecodeError as e:
             raise UpstreamApiError(
                 f"Upstream returned non-JSON ({status}): {response_text[:200]}"
@@ -852,6 +886,7 @@ async def call_image_generation_api(
         if progress:
             progress("extracting_generation_data", "Extracting image data array")
         data = result.get("data", [])
+    data = validate_upstream_image_data(data, payload.n)
     if not data:
         text_preview = response_text[:200] if isinstance(response_text, str) else str(response_text)[:200]
         raise UpstreamApiError(f"No image data in upstream response: {text_preview}")
@@ -940,7 +975,7 @@ async def call_image_edit_api(
 
         if progress:
             progress("extracting_edit_data", "Extracting edited image data array")
-        data = result.get("data", [])
+        data = validate_upstream_image_data(result.get("data", []), payload.n)
         if not data:
             raise UpstreamApiError(f"No image data in upstream response: {response_text[:200]}")
 

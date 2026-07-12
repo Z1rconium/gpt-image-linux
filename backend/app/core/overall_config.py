@@ -4,6 +4,11 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from . import settings as config
+from .validators import (
+    get_env_var_ref_name,
+    is_malformed_env_var_ref,
+    resolve_env_var_ref,
+)
 
 
 OverallConfigType = Literal["string", "secret", "bool", "int", "float"]
@@ -97,22 +102,22 @@ OVERALL_CONFIG_REGISTRY: tuple[OverallConfigSpec, ...] = (
     _spec("R2_SECRET_ACCESS_KEY", "secret", "", "R2 Backup", "R2 secret access key.", secret=True, exposed_in_settings=True),
     _spec("R2_SYNC_INTERVAL_HOURS", "int", "0", "R2 Backup", "Scheduled R2 sync interval in hours; 0 disables automatic sync.", exposed_in_settings=True, min_value=0),
     _spec("R2_SYNC_CONCURRENCY", "int", "4", "R2 Backup", "Concurrent R2 HEAD/upload workers.", min_value=1),
-    _spec("ACCESS_KEY", "secret", "", "Access / Security", "Access gate key.", secret=True),
+    _spec("ACCESS_KEY", "secret", "", "Access / Security", "Access gate key.", secret=True, restart_required=True),
     _spec("ALLOW_UNAUTHENTICATED", "bool", "false", "Access / Security", "Allow startup without access key; logs a warning because non-health APIs are unauthenticated.", restart_required=True),
     _spec("ACCESS_KEY_COOKIE_NAME", "string", "gpt_image_access", "Access / Security", "Access cookie name.", restart_required=True),
-    _spec("ACCESS_COOKIE_SECURE", "bool", "true", "Access / Security", "Set Secure on access cookie."),
-    _spec("ACCESS_MAX_FAILURES", "int", "5", "Access / Security", "Failed access attempts before lockout.", min_value=1),
-    _spec("ACCESS_LOCKOUT_SECONDS", "int", "300", "Access / Security", "Access lockout duration.", min_value=1),
-    _spec("IP_ALLOWLIST", "string", "", "Access / Security", "Client IP/CIDR allowlist.", validator="ip_list"),
+    _spec("ACCESS_COOKIE_SECURE", "bool", "true", "Access / Security", "Set Secure on access cookie.", restart_required=True),
+    _spec("ACCESS_MAX_FAILURES", "int", "5", "Access / Security", "Failed access attempts before lockout.", min_value=1, restart_required=True),
+    _spec("ACCESS_LOCKOUT_SECONDS", "int", "300", "Access / Security", "Access lockout duration.", min_value=1, restart_required=True),
+    _spec("IP_ALLOWLIST", "string", "", "Access / Security", "Client IP/CIDR allowlist.", validator="ip_list", restart_required=True),
     _spec("TRUST_PROXY_HEADERS", "bool", "false", "Access / Security", "Trust reverse-proxy headers.", restart_required=True),
     _spec("TRUSTED_PROXY_IPS", "string", "", "Access / Security", "Trusted reverse proxy IP/CIDR list.", validator="ip_list", restart_required=True),
-    _spec("PUBLIC_ORIGIN", "string", "", "Access / Security", "Canonical browser origin.", validator="origin"),
-    _spec("ALLOWED_HOSTS", "string", "", "Access / Security", "Host / X-Forwarded-Host allowlist.", validator="host_or_origin_list"),
-    _spec("CSRF_ORIGIN_CHECK_ENABLED", "bool", "true", "Access / Security", "Reject unsafe requests without valid Origin, Referer, or same-origin fetch metadata."),
-    _spec("UPSTREAM_HOST_ALLOWLIST", "string", "", "Access / Security", "Upstream API host allowlist; SOCKS5 proxy is the trust boundary for remote DNS/network reachability.", validator="host_list"),
-    _spec("WEBHOOK_HOST_ALLOWLIST", "string", "", "Webhooks", "Webhook callback host allowlist.", validator="host_list"),
+    _spec("PUBLIC_ORIGIN", "string", "", "Access / Security", "Canonical browser origin.", validator="origin", restart_required=True),
+    _spec("ALLOWED_HOSTS", "string", "", "Access / Security", "Host / X-Forwarded-Host allowlist.", validator="host_or_origin_list", restart_required=True),
+    _spec("CSRF_ORIGIN_CHECK_ENABLED", "bool", "true", "Access / Security", "Reject unsafe requests without valid Origin, Referer, or same-origin fetch metadata.", restart_required=True),
+    _spec("UPSTREAM_HOST_ALLOWLIST", "string", "", "Access / Security", "Upstream API host allowlist; SOCKS5 proxy is the trust boundary for remote DNS/network reachability.", validator="host_list", restart_required=True),
+    _spec("WEBHOOK_HOST_ALLOWLIST", "string", "", "Webhooks", "Webhook callback host allowlist.", validator="host_list", restart_required=True),
     _spec("ALLOW_PLAINTEXT_SECRETS", "bool", "false", "Secret Persistence", "Allow literal secrets in SQLite.", restart_required=True),
-    _spec("WEBHOOK_SIGNING_SECRET", "secret", "", "Webhooks", "Webhook signing secret.", secret=True),
+    _spec("WEBHOOK_SIGNING_SECRET", "secret", "", "Webhooks", "Webhook signing secret.", secret=True, restart_required=True),
     _spec("WEBHOOK_TIMEOUT_SECONDS", "float", "5", "Webhooks", "Webhook timeout per attempt.", min_value=0.1),
     _spec("WEBHOOK_MAX_ATTEMPTS", "int", "3", "Webhooks", "Webhook delivery attempts.", min_value=1),
     _spec("MAX_FILE_SIZE_MB", "int", "50", "Limits", "Max uploaded/downloaded image size.", min_value=1),
@@ -123,6 +128,8 @@ OVERALL_CONFIG_REGISTRY: tuple[OverallConfigSpec, ...] = (
     _spec("IMPORT_MAX_FILES", "int", "500", "Limits", "Max files inside one import archive.", min_value=1),
     _spec("IMPORT_MAX_UNCOMPRESSED_MB", "int", "1024", "Limits", "Max uncompressed import archive size.", min_value=1),
     _spec("IMPORT_MAX_METADATA_BYTES", "int", "2097152", "Limits", "Max import metadata.json bytes.", min_value=1),
+    _spec("IMPORT_MAX_ENTRIES", "int", "500", "Limits", "Max metadata image records in one import.", min_value=1),
+    _spec("IMPORT_MAX_OUTPUT_MB", "int", "1024", "Limits", "Max total image bytes written by one import.", min_value=1),
     _spec("IMPORT_MAX_COMPRESSION_RATIO", "float", "100", "Limits", "Max import compression ratio.", min_value=1),
     _spec("MAX_ACTIVE_GENERATE_JOBS", "int", "2", "Job Queue / SSE", "Concurrent generation/edit jobs.", restart_required=True, min_value=1),
     _spec("MAX_QUEUED_GENERATE_JOBS", "int", "20", "Job Queue / SSE", "Additional queued jobs before 429.", restart_required=True, min_value=0),
@@ -145,7 +152,10 @@ OVERALL_CONFIG_BY_NAME = {spec.name: spec for spec in OVERALL_CONFIG_REGISTRY}
 
 def current_env_snapshot() -> dict[str, tuple[str, bool]]:
     return {
-        spec.name: (os.getenv(spec.name, ""), os.getenv(spec.name) is not None)
+        spec.name: (
+            "" if spec.secret else os.getenv(spec.name, ""),
+            os.getenv(spec.name) is not None,
+        )
         for spec in OVERALL_CONFIG_REGISTRY
     }
 
@@ -249,6 +259,8 @@ def effective_value(spec: OverallConfigSpec, row: dict[str, Any] | None) -> tupl
     if row and row.get("override_value") is not None:
         return str(row.get("override_value") or ""), "override"
     if row and row.get("is_env_set"):
+        if spec.secret:
+            return os.getenv(spec.name, ""), "env"
         return str(row.get("env_value") or ""), "env"
     return spec.default, "default"
 
@@ -283,6 +295,8 @@ def apply_rows_to_config(
         if overrides_only and (not row or row.get("override_value") is None):
             continue
         value, _source = effective_value(spec, row)
+        if spec.secret:
+            value = resolve_env_var_ref(value)
         setattr(config, spec.name, typed_value(spec, value))
 
     try:
@@ -302,9 +316,28 @@ def validate_effective_security(rows: dict[str, dict[str, Any]]) -> None:
     def get_string(name: str) -> str:
         spec = OVERALL_CONFIG_BY_NAME[name]
         value, _ = effective_value(spec, rows.get(name))
+        if spec.secret:
+            value = resolve_env_var_ref(value)
         return coerce_value(spec, value)
 
     if get_bool("TRUST_PROXY_HEADERS") and not _split_list(get_string("TRUSTED_PROXY_IPS")):
         raise ValueError("TRUST_PROXY_HEADERS=true requires TRUSTED_PROXY_IPS")
     if not get_bool("ALLOW_UNAUTHENTICATED") and not get_string("ACCESS_KEY"):
         raise ValueError("ACCESS_KEY is required when ALLOW_UNAUTHENTICATED=false")
+
+
+def normalize_secret_override(spec: OverallConfigSpec, value: str) -> str:
+    normalized = coerce_value(spec, value)
+    if not spec.secret or not normalized:
+        return normalized
+    if is_malformed_env_var_ref(normalized):
+        raise ValueError(f"{spec.name} env ref must be formatted as ${{ENV_VAR_NAME}}")
+    env_var = get_env_var_ref_name(normalized)
+    if env_var:
+        return f"${{{env_var}}}"
+    if config.ALLOW_PLAINTEXT_SECRETS:
+        return normalized
+    raise ValueError(
+        f"{spec.name} must use ${{ENV_VAR_NAME}} unless "
+        "ALLOW_PLAINTEXT_SECRETS=true"
+    )

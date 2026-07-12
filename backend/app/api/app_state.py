@@ -126,11 +126,14 @@ async def lifespan(app: FastAPI):
     if run_startup_maintenance:
         try:
             removed_gallery_entries = storage.sync_gallery_with_image_files()
+            cleaned_auxiliary = storage.cleanup_auxiliary_state()
             if removed_gallery_entries:
                 logger.info(
                     "Removed %s stale gallery entries for missing image files",
                     removed_gallery_entries,
                 )
+            if any(cleaned_auxiliary.values()):
+                logger.info("Cleaned stale auxiliary rows: %s", cleaned_auxiliary)
         except Exception:
             storage.release_background_lease(
                 name="startup_maintenance",
@@ -173,7 +176,6 @@ async def lifespan(app: FastAPI):
     app.state.generate_jobs_broadcast_reconcile = False
     app.state.generate_jobs_sse_poller_task = None
     app.state.generate_job_sse_poller_task = None
-    app.state.generate_job_webhooks = {}
     app.state.generate_job_last_persist_at = {}
     app.state.image_unit_dispatcher_kick = asyncio.Event()
     app.state.image_unit_dispatcher_task = asyncio.create_task(

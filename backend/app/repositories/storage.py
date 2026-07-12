@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import secrets
 import sqlite3
 import threading
@@ -25,6 +26,7 @@ from ..core.observability import metrics, observe_job_stage
 from ..core.utils import utc_now
 from ..core.validators import (
     get_env_var_ref_name,
+    is_malformed_env_var_ref,
     normalize_secret_env_ref_or_plaintext,
     normalize_r2_endpoint_url,
     normalize_socks5_proxy_url,
@@ -114,6 +116,7 @@ __all__ = [
     "encode_gallery_cursor",
     "get_gallery_total_bytes",
     "cleanup_orphan_gallery_files",
+    "cleanup_auxiliary_state",
     "get_runtime_coordination_metrics",
     "create_gallery_job",
     "get_gallery_job",
@@ -131,6 +134,7 @@ __all__ = [
     "list_gallery_job_ids_with_files",
     "get_generate_job",
     "get_generate_job_updated_at_edge",
+    "pop_generate_job_webhook",
     "get_generate_jobs_list_updated_at_edge",
     "get_generate_jobs_updated_at_edges",
     "aggregate_image_job_units",
@@ -265,6 +269,7 @@ GENERATE_JOB_COLUMNS = (
     "image_width",
     "image_height",
     "error",
+    "webhook_url",
 )
 IMAGE_JOB_UNIT_COLUMNS = (
     "unit_id",
@@ -368,6 +373,8 @@ GALLERY_PAGE_ANCHOR_INVALIDATING_UPDATE_FIELDS = {
 }
 GALLERY_ORPHAN_FILE_TTL_SECONDS = 300
 GALLERY_ORPHAN_GC_BATCH_SIZE = 500
+GALLERY_IMPORT_BATCH_SIZE = 50
+MAX_PERSISTED_JOB_TEXT_CHARS = 2000
 _GALLERY_COUNT_CACHE_MAX_SIZE = 512
 _GALLERY_BYTES_CACHE_MAX_SIZE = 512
 THUMBNAIL_CPU_SLOT_LEASE_SECONDS = 600
@@ -1228,7 +1235,8 @@ def _ensure_database():
                     images_json TEXT,
                     image_width INTEGER,
                     image_height INTEGER,
-                    error TEXT
+                    error TEXT,
+                    webhook_url TEXT
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_generate_jobs_status_updated_at
@@ -1752,6 +1760,8 @@ def _migrate_generate_jobs_schema(conn: sqlite3.Connection):
         conn.execute("ALTER TABLE generate_jobs ADD COLUMN stage_timings_json TEXT")
     if "images_json" not in columns:
         conn.execute("ALTER TABLE generate_jobs ADD COLUMN images_json TEXT")
+    if "webhook_url" not in columns:
+        conn.execute("ALTER TABLE generate_jobs ADD COLUMN webhook_url TEXT")
 
 
 def _migrate_gallery_jobs_schema(conn: sqlite3.Connection):
@@ -1841,11 +1851,16 @@ def _overall_config_rows(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
 
 
 def sync_overall_config_env_values(env_values: dict[str, tuple[str, bool]]) -> dict[str, dict[str, Any]]:
+    from ..core.overall_config import OVERALL_CONFIG_BY_NAME
+
     _ensure_database()
     now = utc_now()
+    scrubbed_plaintext_overrides: list[str] = []
     with _connect() as conn:
         with _transaction(conn):
             for name, (env_value, is_env_set) in env_values.items():
+                spec = OVERALL_CONFIG_BY_NAME.get(name)
+                stored_env_value = "" if spec and spec.secret else str(env_value or "")
                 conn.execute(
                     """
                     INSERT INTO overall_config_values (
@@ -1862,9 +1877,35 @@ def sync_overall_config_env_values(env_values: dict[str, tuple[str, bool]]) -> d
                         is_env_set = excluded.is_env_set,
                         updated_at = excluded.updated_at
                     """,
-                    (name, str(env_value or ""), 1 if is_env_set else 0, now),
+                    (name, stored_env_value, 1 if is_env_set else 0, now),
                 )
+                if (
+                    spec
+                    and spec.secret
+                    and not config.ALLOW_PLAINTEXT_SECRETS
+                ):
+                    row = conn.execute(
+                        "SELECT override_value FROM overall_config_values WHERE name = ?",
+                        (name,),
+                    ).fetchone()
+                    override = str(row["override_value"] or "") if row else ""
+                    if override and not get_env_var_ref_name(override):
+                        conn.execute(
+                            """
+                            UPDATE overall_config_values
+                            SET override_value = NULL, override_updated_at = NULL
+                            WHERE name = ?
+                            """,
+                            (name,),
+                        )
+                        scrubbed_plaintext_overrides.append(name)
             rows = _overall_config_rows(conn)
+    if scrubbed_plaintext_overrides:
+        logger.warning(
+            "Removed legacy plaintext secret overrides from SQLite for %s; "
+            "rotate any affected credentials and replace them with environment references",
+            ", ".join(sorted(scrubbed_plaintext_overrides)),
+        )
     _secure_data_storage_permissions()
     return rows
 
@@ -1878,11 +1919,34 @@ def list_overall_config_values() -> dict[str, dict[str, Any]]:
 def save_overall_config_overrides(
     updates: dict[str, str | None],
 ) -> dict[str, dict[str, Any]]:
+    from ..core.overall_config import OVERALL_CONFIG_BY_NAME
+
     _ensure_database()
     now = utc_now()
     with _connect() as conn:
         with _transaction(conn):
             for name, value in updates.items():
+                spec = OVERALL_CONFIG_BY_NAME.get(name)
+                if (
+                    spec
+                    and spec.secret
+                    and value
+                    and is_malformed_env_var_ref(value)
+                ):
+                    raise ValueError(
+                        f"{name} env ref must be formatted as ${{ENV_VAR_NAME}}"
+                    )
+                if (
+                    spec
+                    and spec.secret
+                    and value
+                    and not get_env_var_ref_name(value)
+                    and not config.ALLOW_PLAINTEXT_SECRETS
+                ):
+                    raise ValueError(
+                        f"{name} must use ${{ENV_VAR_NAME}} unless "
+                        "ALLOW_PLAINTEXT_SECRETS=true"
+                    )
                 conn.execute(
                     """
                     INSERT INTO overall_config_values (
@@ -2375,9 +2439,26 @@ def _normalize_generate_job(job: dict[str, Any]) -> dict[str, Any]:
             except (TypeError, ValueError):
                 continue
         else:
-            normalized[column] = str(value)
+            text = str(value)
+            if column in {"message", "error"}:
+                text = _sanitize_persisted_job_text(text)
+            normalized[column] = text
 
     return normalized
+
+
+def _sanitize_persisted_job_text(value: str) -> str:
+    text = str(value or "")[:MAX_PERSISTED_JOB_TEXT_CHARS]
+    text = re.sub(
+        r"(?i)(authorization\s*[:=]\s*(?:bearer\s+)?)[^\s,;]+",
+        r"\1[REDACTED]",
+        text,
+    )
+    return re.sub(
+        r'''(?i)(["']?(?:api[_-]?key|access[_-]?key|secret|token)["']?\s*[:=]\s*["']?)[^"',\s}]+''',
+        r"\1[REDACTED]",
+        text,
+    )
 
 
 def _generate_job_values(job: dict[str, Any]) -> tuple[Any, ...]:
@@ -2388,7 +2469,11 @@ def _upsert_generate_job_on_conn(conn: sqlite3.Connection, job: dict[str, Any]) 
     columns_sql = ", ".join(GENERATE_JOB_COLUMNS)
     placeholders_sql = ", ".join("?" for _ in GENERATE_JOB_COLUMNS)
     updates_sql = ", ".join(
-        f"{column} = excluded.{column}"
+        (
+            f"{column} = COALESCE(excluded.{column}, generate_jobs.{column})"
+            if column == "webhook_url"
+            else f"{column} = excluded.{column}"
+        )
         for column in GENERATE_JOB_COLUMNS
         if column != "job_id"
     )
@@ -3259,16 +3344,8 @@ def complete_thumbnail_job(filename: str, *, owner: str) -> bool:
     with _connect() as conn:
         with _transaction(conn):
             cursor = conn.execute(
-                """
-                UPDATE thumbnail_jobs
-                SET status = 'success',
-                    lease_owner = NULL,
-                    lease_expires_at = NULL,
-                    updated_at = ?,
-                    error = NULL
-                WHERE filename = ? AND lease_owner = ?
-                """,
-                (utc_now(), filename, owner),
+                "DELETE FROM thumbnail_jobs WHERE filename = ? AND lease_owner = ?",
+                (filename, owner),
             )
             return cursor.rowcount > 0
 
@@ -3298,6 +3375,12 @@ def fail_thumbnail_job(
                 if int(row["attempts"] or 0) >= max_attempts
                 else "queued"
             )
+            if next_status == "error":
+                cursor = conn.execute(
+                    "DELETE FROM thumbnail_jobs WHERE filename = ? AND lease_owner = ?",
+                    (filename, owner),
+                )
+                return cursor.rowcount > 0
             conn.execute(
                 """
                 UPDATE thumbnail_jobs
@@ -3313,17 +3396,64 @@ def fail_thumbnail_job(
             return True
 
 
-def _dedupe_gallery_filename(filename: str, used_filenames: set[str]) -> str:
+def cleanup_auxiliary_state(*, now: datetime | None = None) -> dict[str, int]:
+    _ensure_database()
+    now_dt = now or datetime.now(timezone.utc)
+    cutoff = (now_dt - timedelta(seconds=WORKER_METRIC_SNAPSHOT_TTL_SECONDS)).isoformat()
+    with _connect() as conn:
+        with _transaction(conn):
+            thumbnail_cursor = conn.execute(
+                """
+                DELETE FROM thumbnail_jobs
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM gallery_entries
+                    WHERE gallery_entries.filename = thumbnail_jobs.filename
+                )
+                """
+            )
+            r2_cursor = conn.execute(
+                """
+                DELETE FROM r2_sync_state
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM gallery_entries
+                    WHERE gallery_entries.filename = r2_sync_state.filename
+                )
+                """
+            )
+            heartbeat_cursor = conn.execute(
+                "DELETE FROM worker_heartbeats WHERE last_seen_at <= ?",
+                (cutoff,),
+            )
+            snapshot_cursor = conn.execute(
+                "DELETE FROM worker_metric_snapshots WHERE updated_at <= ?",
+                (cutoff,),
+            )
+    return {
+        "thumbnail_jobs": max(0, thumbnail_cursor.rowcount),
+        "r2_sync_state": max(0, r2_cursor.rowcount),
+        "worker_heartbeats": max(0, heartbeat_cursor.rowcount),
+        "worker_metric_snapshots": max(0, snapshot_cursor.rowcount),
+    }
+
+
+def _dedupe_gallery_filename(
+    filename: str,
+    used_filenames: set[str],
+    next_suffix: dict[tuple[str, str], int] | None = None,
+) -> str:
     if filename not in used_filenames:
         return filename
 
     path_name = Path(filename)
     base = path_name.stem
     ext = path_name.suffix
-    counter = 1
+    key = (base, ext)
+    counter = (next_suffix or {}).get(key, 1)
     while True:
         candidate = f"{base}_{counter}{ext}"
         if candidate not in used_filenames:
+            if next_suffix is not None:
+                next_suffix[key] = counter + 1
             return candidate
         counter += 1
 
@@ -3361,21 +3491,23 @@ def _dedupe_import_entries_on_conn(
             ).fetchall()
             used_ids.update(row["id"] for row in rows if row["id"])
 
-    seen_filenames: set[str] = set()
-    seen_ids: set[str] = set()
-
+    next_suffix: dict[tuple[str, str], int] = {}
     for entry, prepared in zip(entries, prepared_files):
         image_id = str(entry["id"])
-        while image_id in used_ids or image_id in seen_ids:
+        while image_id in used_ids:
             image_id = generate_image_id()
         entry["id"] = image_id
-        seen_ids.add(image_id)
+        used_ids.add(image_id)
 
         filename = str(entry["filename"])
-        deduped_filename = _dedupe_gallery_filename(filename, used_filenames | seen_filenames)
+        deduped_filename = _dedupe_gallery_filename(
+            filename,
+            used_filenames,
+            next_suffix,
+        )
         entry["filename"] = deduped_filename
         prepared.filename = deduped_filename
-        seen_filenames.add(deduped_filename)
+        used_filenames.add(deduped_filename)
 
         if deduped_filename != filename:
             entry.pop("thumbnail_filename", None)
@@ -3547,6 +3679,21 @@ def _save_images_and_insert_gallery_entries(
 
 
 def import_gallery_entries(
+    entries_data: Iterable[tuple[bytes, dict[str, Any]]],
+) -> int:
+    total_imported = 0
+    batch: list[tuple[bytes, dict[str, Any]]] = []
+    for item in entries_data:
+        batch.append(item)
+        if len(batch) >= GALLERY_IMPORT_BATCH_SIZE:
+            total_imported += _import_gallery_entries_batch(batch)
+            batch = []
+    if batch:
+        total_imported += _import_gallery_entries_batch(batch)
+    return total_imported
+
+
+def _import_gallery_entries_batch(
     entries_data: Iterable[tuple[bytes, dict[str, Any]]],
 ) -> int:
     _ensure_database()
@@ -5177,6 +5324,28 @@ def get_generate_job(job_id: str) -> dict[str, Any] | None:
     return _generate_job_from_row(row)
 
 
+def pop_generate_job_webhook(job_id: str) -> str:
+    _ensure_database()
+    with _connect() as conn:
+        with _transaction(conn):
+            row = conn.execute(
+                "SELECT webhook_url FROM generate_jobs WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+            webhook_url = str(row["webhook_url"] or "") if row else ""
+            if not webhook_url:
+                return ""
+            cursor = conn.execute(
+                """
+                UPDATE generate_jobs
+                SET webhook_url = NULL
+                WHERE job_id = ? AND webhook_url = ?
+                """,
+                (job_id, webhook_url),
+            )
+            return webhook_url if cursor.rowcount > 0 else ""
+
+
 def get_generate_job_updated_at_edge(job_id: str) -> str | None:
     _ensure_database()
     with _connect() as conn:
@@ -6563,8 +6732,8 @@ def fail_image_job_unit(
                 (
                     status,
                     stage,
-                    message,
-                    error,
+                    _sanitize_persisted_job_text(message),
+                    _sanitize_persisted_job_text(error),
                     json.dumps(stage_timings or {}, ensure_ascii=False, sort_keys=True),
                     duration,
                     completed_at or now,
@@ -6966,6 +7135,7 @@ def _delete_gallery_entries_by_ids(
             )
 
     filenames_to_delete = removed_filenames - remaining_filenames
+    _delete_auxiliary_rows_for_filenames_on_conn(conn, filenames_to_delete)
     return removed_ids, filenames_to_delete
 
 
@@ -7036,7 +7206,25 @@ def _delete_gallery_entries_by_filters(
                 row["filename"] for row in remaining_rows if row["filename"]
             )
 
-    return removed_count, removed_filenames - remaining_filenames
+    filenames_to_delete = removed_filenames - remaining_filenames
+    _delete_auxiliary_rows_for_filenames_on_conn(conn, filenames_to_delete)
+    return removed_count, filenames_to_delete
+
+
+def _delete_auxiliary_rows_for_filenames_on_conn(
+    conn: sqlite3.Connection,
+    filenames: Iterable[str],
+) -> None:
+    for chunk in _iter_sqlite_in_chunks(filenames):
+        placeholders = ", ".join("?" for _ in chunk)
+        conn.execute(
+            f"DELETE FROM thumbnail_jobs WHERE filename IN ({placeholders})",
+            tuple(chunk),
+        )
+        conn.execute(
+            f"DELETE FROM r2_sync_state WHERE filename IN ({placeholders})",
+            tuple(chunk),
+        )
 
 
 def delete_gallery_image(image_id: str) -> tuple[bool, int]:
@@ -7262,6 +7450,8 @@ def delete_all_gallery_images() -> tuple[int, int]:
 
                 conn.execute("DELETE FROM gallery_entries")
                 conn.execute("DELETE FROM gallery_filter_options")
+                conn.execute("DELETE FROM thumbnail_jobs")
+                conn.execute("DELETE FROM r2_sync_state")
                 _invalidate_filter_options_cache()
                 _invalidate_gallery_query_caches_on_conn(conn)
 

@@ -20,6 +20,7 @@ from ..presets import (
     get_upstream_socks5_proxy,
     get_webhook_url,
     is_malformed_api_key_env_ref,
+    load_api_settings,
     mask_socks5_proxy_url,
     mask_webhook_url,
     persist_api_settings,
@@ -133,7 +134,7 @@ async def update_overall_config(req: OverallConfigUpdateRequest):
         if value is None:
             raise HTTPException(status_code=422, detail=f"value is required for {item.name}")
         try:
-            updates[item.name] = overall_config.coerce_value(spec, str(value))
+            updates[item.name] = overall_config.normalize_secret_override(spec, str(value))
         except ValueError as e:
             raise HTTPException(status_code=422, detail=f"{item.name}: {e}") from e
 
@@ -174,6 +175,7 @@ async def update_overall_config(req: OverallConfigUpdateRequest):
 
 @router.post("/api/settings", response_model=SettingsResponse)
 async def update_settings(req: SettingsRequest):
+    await asyncio.to_thread(load_api_settings)
     preset = (
         get_preset_by_id(req.active_preset_id)
         if req.active_preset_id
@@ -238,6 +240,7 @@ async def update_settings(req: SettingsRequest):
 
 @router.get("/api/settings", response_model=SettingsResponse)
 async def get_settings():
+    await asyncio.to_thread(load_api_settings)
     return await asyncio.to_thread(build_settings_response)
 
 
@@ -253,6 +256,7 @@ async def check_r2_settings_health(req: R2BackupSettingsRequest):
 
 @router.post("/api/settings/presets", response_model=SettingsResponse)
 async def create_settings_preset(req: PresetCreateRequest):
+    await asyncio.to_thread(load_api_settings)
     source = get_preset_by_id(req.source_preset_id) if req.source_preset_id else None
     source = source or get_active_preset()
     presets = get_api_presets()
@@ -289,6 +293,7 @@ async def create_settings_preset(req: PresetCreateRequest):
 
 @router.post("/api/settings/presets/{preset_id}/activate", response_model=SettingsResponse)
 async def activate_settings_preset(preset_id: str):
+    await asyncio.to_thread(load_api_settings)
     preset = get_preset_by_id(preset_id)
     if not preset:
         raise HTTPException(status_code=404, detail="Preset not found")
@@ -300,6 +305,7 @@ async def activate_settings_preset(preset_id: str):
 
 @router.delete("/api/settings/presets/{preset_id}", response_model=SettingsResponse)
 async def delete_settings_preset(preset_id: str):
+    await asyncio.to_thread(load_api_settings)
     presets = get_api_presets()
     if len(presets) <= 1:
         raise HTTPException(status_code=400, detail="At least one preset is required")

@@ -109,15 +109,12 @@ def is_private_ip(ip_str: str) -> bool:
         ip = ipaddress.ip_address(ip_str)
     except ValueError:
         return True
-
-    for network in PRIVATE_RANGES:
-        candidate_ip = ip
-        if isinstance(network, ipaddress.IPv6Network):
-            if isinstance(candidate_ip, ipaddress.IPv6Address) and candidate_ip.ipv4_mapped:
-                candidate_ip = ipaddress.IPv4Address(str(candidate_ip.ipv4_mapped))
-        if candidate_ip in network:
-            return True
-    return False
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+        ip = ip.ipv4_mapped
+    # SSRF destinations must be globally routable.  This also covers shared,
+    # benchmark, documentation, reserved, multicast and otherwise non-global
+    # address space that is not represented by the historical private ranges.
+    return not ip.is_global
 
 
 def resolve_hostname(hostname: str) -> tuple[str, list[str]]:

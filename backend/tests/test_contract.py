@@ -33,6 +33,7 @@ from backend.app.api.routers import metrics as metrics_router
 from backend.app.api.routers import settings as settings_router
 from backend.app.api.routers import static as static_router
 from backend.app.api.jobs import EditImageSource
+from backend.app.core import overall_config
 from backend.app.core import settings as config
 from backend.app.integrations import r2_sync
 from backend.app.core.observability import metrics, record_job_stage_timing
@@ -2801,7 +2802,7 @@ def test_r2_backup_settings_allows_custom_endpoint_only_with_admin_allowlist(
     monkeypatch.setattr(config, "R2_ENDPOINT_HOST_ALLOWLIST", "storage.example.com")
     monkeypatch.setattr(
         "backend.app.core.validators.resolve_hostname",
-        lambda hostname: (hostname, ["203.0.113.10"]),
+        lambda hostname: (hostname, ["93.184.216.34"]),
     )
 
     seen: dict[str, dict] = {}
@@ -3593,6 +3594,14 @@ def test_overall_config_secret_mask_and_preserve(client):
         "/api/settings/overall-config",
         json={"updates": [{"name": "WEBHOOK_SIGNING_SECRET", "value": "super-secret"}]},
     )
+    assert response.status_code == 422
+    assert "ALLOW_PLAINTEXT_SECRETS" in response.text
+
+    config.ALLOW_PLAINTEXT_SECRETS = True
+    response = client.put(
+        "/api/settings/overall-config",
+        json={"updates": [{"name": "WEBHOOK_SIGNING_SECRET", "value": "super-secret"}]},
+    )
     assert response.status_code == 200
     item = next(i for i in response.json()["items"] if i["name"] == "WEBHOOK_SIGNING_SECRET")
     assert item["value"] == "********"
@@ -3606,6 +3615,15 @@ def test_overall_config_secret_mask_and_preserve(client):
     assert response.status_code == 200
     rows = storage.list_overall_config_values()
     assert rows["WEBHOOK_SIGNING_SECRET"]["override_value"] == "super-secret"
+
+
+def test_overall_config_secret_env_value_is_not_persisted(client, monkeypatch):
+    monkeypatch.setenv("WEBHOOK_SIGNING_SECRET", "never-store-this")
+    rows = storage.sync_overall_config_env_values(
+        overall_config.current_env_snapshot()
+    )
+    assert rows["WEBHOOK_SIGNING_SECRET"]["is_env_set"] is True
+    assert rows["WEBHOOK_SIGNING_SECRET"]["env_value"] == ""
 
 
 def test_overall_config_validation_errors(client):
@@ -3640,6 +3658,7 @@ def test_overall_config_restart_and_build_only_badges(client):
         json={
             "updates": [
                 {"name": "ACCESS_KEY_COOKIE_NAME", "value": "custom_access"},
+                {"name": "IP_ALLOWLIST", "value": "192.0.2.1"},
                 {"name": "PYTHON_BASE_IMAGE", "value": "python:3.12-slim"},
             ]
         },
@@ -3648,10 +3667,12 @@ def test_overall_config_restart_and_build_only_badges(client):
     body = response.json()
     assert set(body["restart_required_names"]) == {
         "ACCESS_KEY_COOKIE_NAME",
+        "IP_ALLOWLIST",
         "PYTHON_BASE_IMAGE",
     }
     items = {item["name"]: item for item in body["items"]}
     assert items["ACCESS_KEY_COOKIE_NAME"]["restart_required"] is True
+    assert items["IP_ALLOWLIST"]["restart_required"] is True
     assert items["PYTHON_BASE_IMAGE"]["build_only"] is True
 
 
@@ -6372,6 +6393,36 @@ def test_thumbnail_job_queue_claims_and_completes(tmp_path):
     assert storage.get_pending_thumbnail_job_count() == 0
 
 
+def test_gallery_delete_and_auxiliary_gc_remove_stale_rows(tmp_path):
+    _configure_runtime(tmp_path)
+    _fake_gallery_entry("aux-row", "aux", "auto", "aux-row.png")
+    storage.enqueue_thumbnail_job("aux-row.png", force=True)
+    storage.mark_gallery_r2_sync_state(
+        [{"filename": "aux-row.png", "key": "gallery/aux-row.png", "bytes": len(PNG_BYTES)}]
+    )
+
+    deleted, _ = storage.delete_gallery_image("aux-row")
+    assert deleted is True
+    with storage._connect() as conn:
+        assert conn.execute(
+            "SELECT 1 FROM thumbnail_jobs WHERE filename = 'aux-row.png'"
+        ).fetchone() is None
+        assert conn.execute(
+            "SELECT 1 FROM r2_sync_state WHERE filename = 'aux-row.png'"
+        ).fetchone() is None
+        conn.execute(
+            "INSERT INTO worker_heartbeats VALUES ('old-worker', '2000-01-01T00:00:00+00:00', 0)"
+        )
+        conn.execute(
+            "INSERT INTO worker_metric_snapshots VALUES ('old-worker', '{}', '2000-01-01T00:00:00+00:00')"
+        )
+        conn.commit()
+
+    cleaned = storage.cleanup_auxiliary_state()
+    assert cleaned["worker_heartbeats"] == 1
+    assert cleaned["worker_metric_snapshots"] == 1
+
+
 @pytest.mark.parametrize(
     ("archive_bytes", "expected_detail", "config_updates"),
     [
@@ -6446,6 +6497,59 @@ def test_import_archive_rejects_large_metadata(client):
 
     assert resp.status_code == 400
     assert resp.json()["detail"] == "metadata.json is too large"
+
+
+def test_import_archive_rejects_duplicate_metadata_member(client):
+    metadata = {
+        "schema_version": 1,
+        "images": [
+            {"id": "one", "filename": "images/import-1.png", "prompt": "one", "size": "auto"},
+            {"id": "two", "filename": "images/import-1.png", "prompt": "two", "size": "auto"},
+        ],
+    }
+    resp = _post_import_archive(client, _import_archive_bytes(metadata=metadata))
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "Import metadata references an image more than once"
+
+
+def test_import_archive_rejects_metadata_entry_limit(client):
+    config.IMPORT_MAX_ENTRIES = 1
+    metadata = {
+        "schema_version": 1,
+        "images": [
+            {"id": "one", "filename": "images/import-1.png", "prompt": "one", "size": "auto"},
+            {"id": "two", "filename": "images/import-1.png", "prompt": "two", "size": "auto"},
+        ],
+    }
+    resp = _post_import_archive(client, _import_archive_bytes(metadata=metadata))
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "Import metadata contains too many entries"
+
+
+def test_generate_job_webhook_is_sqlite_backed_and_consumed_once(tmp_path):
+    _configure_runtime(tmp_path)
+    storage.upsert_generate_job(
+        {
+            "job_id": "webhook-job",
+            "status": "queued",
+            "webhook_url": "https://hooks.example.com/callback",
+        }
+    )
+    assert storage.pop_generate_job_webhook("webhook-job") == "https://hooks.example.com/callback"
+    assert storage.pop_generate_job_webhook("webhook-job") == ""
+
+
+def test_upstream_image_data_is_bounded_and_schema_checked():
+    from backend.app.integrations.upstream_client import (
+        UpstreamApiError,
+        validate_upstream_image_data,
+    )
+
+    assert validate_upstream_image_data([{"url": "a"}, {"url": "b"}], 1) == [{"url": "a"}]
+    with pytest.raises(UpstreamApiError, match="must be an array"):
+        validate_upstream_image_data("not-an-array", 1)
+    with pytest.raises(UpstreamApiError, match="entries must be objects"):
+        validate_upstream_image_data(["not-an-object"], 1)
 
 
 def test_import_archive_rejects_uploaded_archive_size_limit(client):

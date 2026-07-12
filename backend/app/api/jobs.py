@@ -23,6 +23,7 @@ from .presets import (
     get_exception_message,
     get_upstream_socks5_proxy,
     get_webhook_url,
+    load_api_settings,
 )
 from ..core import settings as config
 from ..core.api_paths import normalize_default_model
@@ -104,7 +105,7 @@ def publish_generate_job(
     list_debounce: bool = True,
     list_reconcile: bool = False,
 ):
-    event = {"event": "job", "data": job}
+    event = {"event": "job", "data": public_generate_job(job)}
     for queue in list(get_job_subscribers().get(job["job_id"], set())):
         publish_queue(queue, event)
     publish_generate_jobs(debounce=list_debounce, reconcile=list_reconcile)
@@ -121,7 +122,7 @@ def sort_generate_jobs(jobs: list[dict]) -> list[dict]:
 def snapshot_active_generate_jobs_from_memory() -> list[dict]:
     generate_jobs = getattr(app.state, "generate_jobs", {})
     jobs = [
-        job.copy()
+        public_generate_job(job)
         for job in generate_jobs.values()
         if job.get("status") in ACTIVE_GENERATE_JOB_STATUSES
     ]
@@ -208,8 +209,10 @@ def publish_generate_jobs(*, debounce: bool = True, reconcile: bool = False):
     )
 
 
-def get_generate_job_webhooks() -> dict[str, str]:
-    return app.state.generate_job_webhooks
+def public_generate_job(job: dict) -> dict:
+    result = job.copy()
+    result.pop("webhook_url", None)
+    return result
 
 
 def validate_job_webhook_url(webhook_url: str | None) -> str | None:
@@ -229,10 +232,10 @@ def validate_job_webhook_url(webhook_url: str | None) -> str | None:
 
 
 def dispatch_job_webhook(job: dict):
-    webhook_url = get_generate_job_webhooks().pop(job["job_id"], "")
+    webhook_url = storage.pop_generate_job_webhook(job["job_id"])
     if not webhook_url:
         return
-    asyncio.create_task(webhooks.deliver_webhook(webhook_url, job.copy()))
+    asyncio.create_task(webhooks.deliver_webhook(webhook_url, public_generate_job(job)))
 
 
 def build_job_update(job_id: str, updates: dict) -> dict:
@@ -475,6 +478,7 @@ def rebuild_request(operation: str, payload: dict) -> GenerateRequest | EditRequ
 
 
 def get_preset_for_unit(unit: dict) -> dict | None:
+    load_api_settings()
     preset_id = str(unit.get("api_preset_id") or "")
     preset_name = str(unit.get("api_preset_name") or "")
     for preset in get_api_presets():
@@ -693,6 +697,7 @@ def queue_image_job(
     pending_edit_source_bytes: int = 0,
     edit_sources_payload: list[dict] | None = None,
 ) -> GenerateJobResponse:
+    load_api_settings()
     active_preset = get_active_preset()
     active_preset_id = str(active_preset.get("id") or "default")
     api_url = str(active_preset.get("api_url") or "").rstrip("/")
@@ -732,8 +737,7 @@ def queue_image_job(
         api_preset_name=api_preset_name,
         image_units=image_units,
     )
-    if webhook_url:
-        get_generate_job_webhooks()[job_id] = webhook_url
+    pending_job["webhook_url"] = webhook_url
     try:
         stored_job, _units = storage.enqueue_image_job(
             parent_job=pending_job,
@@ -750,15 +754,12 @@ def queue_image_job(
             max_pending_edit_source_bytes=get_max_pending_edit_source_bytes(),
         )
     except storage.ImageJobQueueFullError as e:
-        get_generate_job_webhooks().pop(job_id, None)
         metrics.increment("image_jobs.rejected.queue_full")
         raise HTTPException(status_code=429, detail="Generation job queue is full") from e
     except storage.EditSourceQueueFullError as e:
-        get_generate_job_webhooks().pop(job_id, None)
         metrics.increment("image_jobs.rejected.edit_source_full")
         raise HTTPException(status_code=429, detail="Edit source queue is full") from e
     except Exception:
-        get_generate_job_webhooks().pop(job_id, None)
         raise
 
     app.state.generate_jobs[job_id] = stored_job

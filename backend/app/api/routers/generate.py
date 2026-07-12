@@ -11,7 +11,6 @@ from ..jobs import (
     cleanup_parent_edit_sources,
     get_job_subscribers,
     get_jobs_subscribers,
-    get_generate_job_webhooks,
     publish_queue,
     queue_image_job,
     reconcile_active_generate_jobs,
@@ -427,7 +426,5 @@ async def cancel_generate_job(job_id: str):
             await asyncio.to_thread(storage.release_edit_source_reservation, job_id)
         else:
             await asyncio.to_thread(cleanup_parent_edit_sources, job_id)
-
-    get_generate_job_webhooks().pop(job_id, None)
 
     return MessageResponse(status="success", message="Generation job cancelled")
