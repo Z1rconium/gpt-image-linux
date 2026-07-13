@@ -2172,9 +2172,21 @@ def test_ai_assistant_uploaded_image_prompt_is_bounded_language_aware_and_not_pe
     assert seen["image"]["bytes"] <= config.AI_ASSISTANT_IMAGE_MAX_BYTES
     assert json.loads(seen["user_prompt"])["target_language"] == "zh-CN"
     assert "Write the prompt in Simplified Chinese" in seen["system_prompt"]
-    assert "subject and action" in seen["system_prompt"]
+    assert "subject identity and action" in seen["system_prompt"]
+    assert "overall color palette and color relationships" in seen["system_prompt"]
+    assert "dominant and accent colors" in seen["system_prompt"]
+    assert "artistic medium and rendering style" in seen["system_prompt"]
+    assert "line quality" in seen["system_prompt"]
+    assert "named character, mascot, or public figure" in seen["system_prompt"]
+    assert "anime, manga, comics, games, film, or television" in seen["system_prompt"]
+    assert "the source work or franchise" in seen["system_prompt"]
+    assert "not as attribution of the input image's source" in seen["system_prompt"]
+    assert "If the identity is uncertain, do not guess" in seen["system_prompt"]
+    assert "Use high information density" in seen["system_prompt"]
     assert "spatial relationships" in seen["system_prompt"]
+    assert "single prompt in the requested language" in seen["system_prompt"]
     assert "Do not invent unseen brands" in seen["system_prompt"]
+    assert "artist names, exact camera or lens settings, or background stories" in seen["system_prompt"]
     assert "Do not create a separate negative prompt" in seen["system_prompt"]
 
 
