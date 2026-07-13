@@ -49,6 +49,7 @@ type MockOptions = {
   runningJobs?: unknown[];
   historyJobs?: unknown[];
   language?: 'en' | 'zh-CN';
+  reversePrompt?: string;
 };
 
 const baseGalleryImages: GalleryImageFixture[] = [
@@ -633,6 +634,32 @@ async function mockApi(page: Page, options: MockOptions = {}) {
           system_prompt: optimizerSystemPrompt,
           default_system_prompt: 'Default optimizer system prompt',
           customized: true
+        })
+      );
+      return;
+    }
+    if (url.pathname === '/api/assistant/image/prompt' && request.method() === 'POST') {
+      await route.fulfill(
+        json({
+          prompt: options.reversePrompt ?? 'A bright red square centered on a clean white background',
+          model: 'assistant-vision-model',
+          duration_ms: 18,
+          warnings: []
+        })
+      );
+      return;
+    }
+    if (url.pathname.match(/^\/api\/assistant\/gallery\/[^/]+\/metadata$/) && request.method() === 'GET') {
+      const imageId = decodeURIComponent(url.pathname.split('/').at(-2) || '');
+      await route.fulfill(
+        json({
+          image_id: imageId,
+          description: 'Stored AI description',
+          prompt: 'Stored AI prompt',
+          analysis: { subjects: ['square'] },
+          model: 'assistant-vision-model',
+          created_at: '2026-05-18T12:00:00Z',
+          updated_at: '2026-05-18T12:00:00Z'
         })
       );
       return;
@@ -1427,6 +1454,124 @@ test('prompt snippets drawer saves, searches, edits, copies, deletes, and uses t
   await confirmDialog.getByRole('button', { name: 'Delete' }).click();
   await expect(reopenedDrawer.getByText('Product hero updated')).toBeHidden();
   await expect(page.getByRole('status')).toContainText('Prompt snippet deleted');
+});
+
+test('reverse prompt dialog uploads, replaces, copies, saves, applies, and resets local images', async ({ page }) => {
+  await loadApp(page);
+
+  const prompt = page.getByRole('textbox', { name: 'Prompt', exact: true });
+  await page.getByRole('button', { name: 'Reverse prompt', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Reverse prompt' });
+  await expect(dialog).toBeVisible();
+
+  const fileInput = dialog.locator('input[type="file"]');
+  await fileInput.setInputFiles({ name: 'first.png', mimeType: 'image/png', buffer: PNG_BYTES });
+  await expect(dialog.getByRole('img', { name: 'first.png' })).toBeVisible();
+  await expect(dialog.getByRole('button', { name: 'Replace image' })).toBeVisible();
+  await expect(dialog.getByRole('button', { name: 'Remove image' })).toBeVisible();
+
+  const firstRequestPromise = page.waitForRequest((request) => {
+    return request.method() === 'POST' && new URL(request.url()).pathname === '/api/assistant/image/prompt';
+  });
+  await dialog.getByRole('button', { name: 'Reverse prompt', exact: true }).click();
+  const firstRequest = await firstRequestPromise;
+  expect(firstRequest.postData()).toContain('name="target_language"');
+  expect(firstRequest.postData()).toContain('en');
+  await expect(dialog.getByRole('heading', { name: 'Generated prompt' })).toBeVisible();
+  await expect(dialog).toContainText('A bright red square centered on a clean white background');
+  await page.screenshot({ path: '/tmp/gpt-image-reverse-prompt-desktop.png' });
+
+  await dialog.getByRole('button', { name: 'Copy', exact: true }).click();
+  await expect(page.getByRole('status')).toContainText('Prompt copied');
+
+  await fileInput.setInputFiles({ name: 'replacement.png', mimeType: 'image/png', buffer: PNG_BYTES });
+  await expect(dialog.getByRole('img', { name: 'replacement.png' })).toBeVisible();
+  await expect(dialog.getByRole('heading', { name: 'Generated prompt' })).toHaveCount(0);
+  await dialog.getByRole('button', { name: 'Remove image' }).click();
+  await expect(dialog.getByRole('button', { name: 'Choose an image' })).toBeVisible();
+
+  await fileInput.setInputFiles({ name: 'saved.png', mimeType: 'image/png', buffer: PNG_BYTES });
+  await dialog.getByRole('button', { name: 'Reverse prompt', exact: true }).click();
+  await expect(dialog.getByRole('heading', { name: 'Generated prompt' })).toBeVisible();
+  await dialog.getByRole('button', { name: 'Save snippet' }).click();
+  await expect(dialog).toBeHidden();
+  await expect(page.getByRole('status')).toContainText('Prompt snippet saved');
+
+  await page.getByRole('button', { name: 'Prompt snippets' }).click();
+  const snippets = page.getByRole('dialog', { name: 'Prompt Snippets' });
+  await expect(snippets.getByRole('heading', { name: 'Reverse prompt', exact: true })).toBeVisible();
+  await snippets.getByRole('button', { name: 'Close prompt snippets' }).click();
+
+  await page.getByRole('button', { name: 'Reverse prompt', exact: true }).click();
+  await expect(dialog.getByRole('button', { name: 'Choose an image' })).toBeVisible();
+  await fileInput.setInputFiles({ name: 'apply.png', mimeType: 'image/png', buffer: PNG_BYTES });
+  await dialog.getByRole('button', { name: 'Reverse prompt', exact: true }).click();
+  await dialog.getByRole('button', { name: 'Apply to prompt' }).click();
+  await expect(dialog).toBeHidden();
+  await expect(prompt).toHaveValue('A bright red square centered on a clean white background');
+
+  await page.getByRole('button', { name: 'Reverse prompt', exact: true }).click();
+  await expect(dialog.getByRole('button', { name: 'Choose an image' })).toBeVisible();
+  await dialog.getByRole('button', { name: 'Close', exact: true }).click();
+  await expect(dialog).toBeHidden();
+});
+
+test('reverse prompt remains discoverable and disables analysis when Assistant config is unavailable', async ({ page }) => {
+  await loadApp(page, {
+    settings: {
+      ...settingsResponse,
+      ai_assistant: {
+        ...settingsResponse.ai_assistant,
+        enabled: false
+      }
+    }
+  });
+
+  await page.getByRole('button', { name: 'Reverse prompt', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Reverse prompt' });
+  await expect(dialog).toContainText('AI Assistant is unavailable');
+  await dialog.locator('input[type="file"]').setInputFiles({ name: 'local.png', mimeType: 'image/png', buffer: PNG_BYTES });
+  await expect(dialog.getByRole('img', { name: 'local.png' })).toBeVisible();
+  await expect(dialog.getByRole('button', { name: 'Reverse prompt', exact: true })).toBeDisabled();
+});
+
+test('reverse prompt header and dialog stay within a mobile viewport', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await loadApp(page);
+
+  const headerActions = [
+    page.getByRole('button', { name: 'Reverse prompt', exact: true }),
+    page.getByRole('button', { name: 'Prompt snippets' }),
+    page.getByRole('button', { name: 'Job History' }),
+    page.getByRole('button', { name: 'Settings' })
+  ];
+  for (const action of headerActions) {
+    await expect(action).toBeVisible();
+    const box = await action.boundingBox();
+    expect(box?.x ?? -1).toBeGreaterThanOrEqual(0);
+    expect((box?.x ?? 0) + (box?.width ?? 0)).toBeLessThanOrEqual(390);
+  }
+
+  await headerActions[0].click();
+  const dialog = page.getByRole('dialog', { name: 'Reverse prompt' });
+  const dialogBox = await dialog.boundingBox();
+  expect(dialogBox?.x ?? -1).toBeGreaterThanOrEqual(0);
+  expect(dialogBox?.y ?? -1).toBeGreaterThanOrEqual(0);
+  expect((dialogBox?.x ?? 0) + (dialogBox?.width ?? 0)).toBeLessThanOrEqual(390);
+  expect((dialogBox?.y ?? 0) + (dialogBox?.height ?? 0)).toBeLessThanOrEqual(844);
+  await page.screenshot({ path: '/tmp/gpt-image-reverse-prompt-mobile.png' });
+});
+
+test('lightbox keeps describe, analyze, and stored AI metadata without reverse prompt action', async ({ page }) => {
+  await loadApp(page);
+
+  await page.getByRole('img', { name: 'First gallery image' }).click();
+  const lightbox = page.getByRole('dialog', { name: 'Image Details' });
+  await expect(lightbox.getByRole('button', { name: 'Describe', exact: true })).toBeVisible();
+  await expect(lightbox.getByRole('button', { name: 'Analyze', exact: true })).toBeVisible();
+  await expect(lightbox.getByRole('button', { name: 'Prompt', exact: true })).toHaveCount(0);
+  await expect(lightbox).toContainText('Stored AI description');
+  await expect(lightbox).toContainText('Stored AI prompt');
 });
 
 test('gallery cards can reuse prompt or full generation parameters', async ({ page }) => {

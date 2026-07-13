@@ -225,6 +225,7 @@ Key backend routes:
 | `POST` | `/api/assistant/prompt/rewrite`, `/api/assistant/prompt/check`, `/api/assistant/prompt/variants` | Prompt Copilot rewrite, review, and variant tools. |
 | `POST` | `/api/assistant/generate/recommend-params` | Recommend only generation parameters supported by the selected API path. |
 | `POST` | `/api/assistant/jobs/{job_id}/diagnose`, `/api/assistant/edit/plan` | Diagnose a job or plan an edit without submitting it. |
+| `POST` | `/api/assistant/image/prompt` | Reverse-prompt one validated local raster image in memory; returns a generation prompt without creating a Gallery record. |
 | `POST/GET` | `/api/assistant/gallery/*` | Describe, reverse-prompt, analyze, batch-analyze, and read AI metadata for local gallery images. |
 | `POST` | `/api/generate` | Start generation job. |
 | `POST` | `/api/edits` | Start edit job with uploaded source images. |
@@ -533,6 +534,7 @@ Overall Config 会把 override 持久化到 SQLite。部分配置可热更新；
 | `POST` | `/api/assistant/prompt/rewrite`, `/api/assistant/prompt/check`, `/api/assistant/prompt/variants` | Prompt Copilot 改写、检查和变体工具。 |
 | `POST` | `/api/assistant/generate/recommend-params` | 仅推荐当前 API path 支持的生成参数。 |
 | `POST` | `/api/assistant/jobs/{job_id}/diagnose`, `/api/assistant/edit/plan` | 诊断任务或生成编辑规划，不会自动提交。 |
+| `POST` | `/api/assistant/image/prompt` | 在内存中校验并反推一张本地位图；返回可用于生成的提示词，不创建 Gallery 记录。 |
 | `POST/GET` | `/api/assistant/gallery/*` | 描述、反推 prompt、分析、批量分析和读取本地 Gallery AI metadata。 |
 | `POST` | `/api/generate` | 创建生成任务。 |
 | `POST` | `/api/edits` | 用上传源图创建编辑任务。 |

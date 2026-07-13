@@ -19,6 +19,7 @@ export type UiState = {
   settingsOpen: boolean;
   jobsOpen: boolean;
   promptSnippetsOpen: boolean;
+  imagePromptOpen: boolean;
   sizeDialogOpen: boolean;
   editPreviewOpen: boolean;
 };
@@ -27,6 +28,7 @@ const initialUiState: UiState = {
   settingsOpen: false,
   jobsOpen: false,
   promptSnippetsOpen: false,
+  imagePromptOpen: false,
   sizeDialogOpen: false,
   editPreviewOpen: false
 };

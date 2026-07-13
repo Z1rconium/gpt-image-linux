@@ -326,6 +326,10 @@ export type AssistantEditPlanResponse = AssistantBaseResponse & {
   next_action: 'confirm' | 'revise' | 'add_sources';
 };
 
+export type AssistantImagePromptResponse = AssistantBaseResponse & {
+  prompt: string;
+};
+
 export type AssistantGalleryImageResponse = AssistantBaseResponse & {
   image_id: string;
   description: string;

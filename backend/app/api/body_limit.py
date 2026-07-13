@@ -12,6 +12,8 @@ from .edit_limits import (
     MAX_EDIT_SOURCE_IMAGES,
 )
 
+ASSISTANT_IMAGE_MULTIPART_OVERHEAD_BYTES = 64 * 1024
+
 
 def _is_json_content_type(content_type: str) -> bool:
     media_type = content_type.split(";", 1)[0].strip().lower()
@@ -21,6 +23,10 @@ def _is_json_content_type(content_type: str) -> bool:
 def _max_body_for_path(path: str, content_type: str = "") -> int:
     path_limits: list[tuple[str, int]] = [
         ("/api/import", config.IMPORT_ARCHIVE_MAX_MB * 1024 * 1024),
+        (
+            "/api/assistant/image/prompt",
+            config.MAX_FILE_SIZE_MB * 1024 * 1024 + ASSISTANT_IMAGE_MULTIPART_OVERHEAD_BYTES,
+        ),
         (
             "/api/edits",
             config.MAX_FILE_SIZE_MB

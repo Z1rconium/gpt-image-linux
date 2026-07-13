@@ -7,6 +7,7 @@ import type {
   AssistantGalleryBatchRequest,
   AssistantGalleryImageResponse,
   AssistantGalleryMetadataResponse,
+  AssistantImagePromptResponse,
   AssistantJobDiagnoseRequest,
   AssistantJobDiagnoseResponse,
   AssistantPromptCheckRequest,
@@ -237,6 +238,28 @@ function createAssistantStore() {
     }
   }
 
+  async function promptFromImage(file: File, targetLanguage: 'en' | 'zh-CN', signal?: AbortSignal) {
+    const requestSignal = operationSignal('imagePrompt', signal);
+    beginCounter('prompt');
+    const formData = new FormData();
+    formData.append('image', file, file.name);
+    formData.append('target_language', targetLanguage);
+    try {
+      return await apiFetch<AssistantImagePromptResponse>(
+        '/api/assistant/image/prompt',
+        {
+          method: 'POST',
+          signal: requestSignal,
+          body: formData
+        },
+        'reverse prompting uploaded image with AI Assistant'
+      );
+    } finally {
+      endCounter('prompt');
+      clearOperationSignal('imagePrompt', requestSignal);
+    }
+  }
+
   async function describeGalleryImage(imageId: string, signal?: AbortSignal) {
     const requestSignal = operationSignal(`gallery:describe:${imageId}`, signal);
     beginGalleryLoading(imageId);
@@ -328,6 +351,7 @@ function createAssistantStore() {
     recommendParams,
     diagnoseJob,
     planEdit,
+    promptFromImage,
     describeGalleryImage,
     promptFromGalleryImage,
     analyzeGalleryImage,

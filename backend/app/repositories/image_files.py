@@ -176,6 +176,7 @@ def _verify_pillow_image(
 
     configure_pillow_image_limits()
     warning_type = _decompression_bomb_warning()
+    bomb_error_type = getattr(Image, "DecompressionBombError", OSError)
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("error", warning_type)
@@ -196,7 +197,7 @@ def _verify_pillow_image(
                     raise ValueError("Image dimensions must be positive")
     except warning_type as e:
         _raise_image_validation_error(e)
-    except (OSError, UnidentifiedImageError, SyntaxError, ValueError) as e:
+    except (OSError, UnidentifiedImageError, SyntaxError, ValueError, bomb_error_type) as e:
         _raise_image_validation_error(e)
 
 

@@ -6,12 +6,13 @@ import re
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-from fastapi import APIRouter, Body, HTTPException
+from fastapi import APIRouter, Body, File, Form, HTTPException, UploadFile
 
 from .. import presets
 from ..app_state import app
+from ..uploads import is_image_upload, resolve_upload_content_type
 from ...core import settings as config
 from ...core import validators as ssrf
 from ...core.utils import utc_now
@@ -26,6 +27,7 @@ from ...schemas.models import (
     AssistantGalleryImageResponse,
     AssistantGalleryMetadataResponse,
     AssistantHealthResponse,
+    AssistantImagePromptResponse,
     AIAssistantSettingsRequest,
     AssistantJobDiagnoseRequest,
     AssistantJobDiagnoseResponse,
@@ -43,6 +45,14 @@ from ...schemas.models import (
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+ASSISTANT_IMAGE_UPLOAD_CHUNK_BYTES = 1024 * 1024
+IMAGE_PROMPT_SYSTEM_PROMPT = """You reconstruct one directly usable image-generation prompt from visible pixels.
+Organize the prompt in this order when the information is present: subject and action; environment; composition and viewpoint; lighting; color; materials and surface qualities; medium or rendering style; reasonably inferable lens and depth of field; clearly legible text.
+Use high information density. Faithfully preserve spatial relationships, scale, pose, framing, and visual emphasis.
+The prompt field must contain only the single prompt in the requested language. Do not put analysis, reasoning, a title, Markdown, source attribution, or meta-language such as \"this image\" in that field.
+Do not invent unseen brands, artist names, exact camera or lens settings, or background stories. Use neutral descriptions for details that cannot be determined confidently.
+Do not create a separate negative prompt. Keep safety warnings out of the prompt and return them only in the warnings field."""
 
 AI_ANALYZE_JOB_KIND = "ai_analyze"
 GALLERY_SELECTION_TOKEN_KIND = "batch_selection"
@@ -194,6 +204,16 @@ def _warnings(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
     return [_clamp_text(item, 500) for item in value if _clamp_text(item, 500)][:10]
+
+
+def _image_prompt_system_prompt(target_language: Literal["en", "zh-CN"] | None = None) -> str:
+    if target_language == "zh-CN":
+        language_instruction = "Write the prompt in Simplified Chinese."
+    elif target_language == "en":
+        language_instruction = "Write the prompt in English."
+    else:
+        language_instruction = "Use the language you would normally use for this API."
+    return f"{IMAGE_PROMPT_SYSTEM_PROMPT}\n{language_instruction}"
 
 
 def _string_list(value: Any, *, max_items: int = 8) -> list[str]:
@@ -625,6 +645,82 @@ async def plan_edit(req: AssistantEditPlanRequest):
     )
 
 
+async def _read_image_prompt_upload(image: UploadFile) -> bytes:
+    if not is_image_upload(image):
+        raise HTTPException(status_code=400, detail="Upload must be a supported raster image file")
+
+    max_bytes = config.MAX_FILE_SIZE_MB * 1024 * 1024
+    image_bytes = bytearray()
+    while True:
+        chunk = await image.read(ASSISTANT_IMAGE_UPLOAD_CHUNK_BYTES)
+        if not chunk:
+            break
+        if len(image_bytes) + len(chunk) > max_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Uploaded image is too large. Max size is {config.MAX_FILE_SIZE_MB} MB",
+            )
+        image_bytes.extend(chunk)
+
+    if not image_bytes:
+        raise HTTPException(status_code=400, detail="Uploaded image is empty")
+
+    filename = image.filename or "image"
+    content_type = resolve_upload_content_type(image)
+    try:
+        await asyncio.to_thread(
+            storage.validate_image_bytes,
+            bytes(image_bytes),
+            filename=filename,
+            content_type=content_type,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return bytes(image_bytes)
+
+
+@router.post("/api/assistant/image/prompt", response_model=AssistantImagePromptResponse)
+async def prompt_from_uploaded_image(
+    image: UploadFile = File(...),
+    target_language: Literal["en", "zh-CN"] = Form("en"),
+):
+    _resolve_runtime(vision=True)
+    image_bytes = await _read_image_prompt_upload(image)
+    try:
+        preview = await asyncio.to_thread(
+            assistant_client.prepare_vision_preview_bytes,
+            image_bytes,
+        )
+    except assistant_client.AssistantError as e:
+        raise HTTPException(status_code=400 if e.status == 400 else 502, detail=str(e)) from e
+
+    data, model, duration_ms = await _assistant_json(
+        system_prompt=_image_prompt_system_prompt(target_language),
+        user_prompt=json.dumps(
+            {
+                "target_language": target_language,
+                "preview": {key: preview[key] for key in ("bytes", "width", "height")},
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        ),
+        schema={"prompt": "string", "warnings": ["string"]},
+        vision=True,
+        image=preview,  # type: ignore[arg-type]
+        max_tokens=700,
+        temperature=0.2,
+    )
+    prompt = _clamp_text(data.get("prompt"), 4000)
+    if not prompt:
+        raise HTTPException(status_code=502, detail="AI Assistant returned an empty image prompt")
+    return AssistantImagePromptResponse(
+        prompt=prompt,
+        warnings=_warnings(data.get("warnings")),
+        model=model,
+        duration_ms=duration_ms,
+    )
+
+
 async def _gallery_entry_and_preview(image_id: str) -> tuple[Any, dict[str, str]]:
     entry = await asyncio.to_thread(storage.get_gallery_entry, image_id)
     if not entry:
@@ -795,11 +891,9 @@ async def _describe_gallery_image(image_id: str) -> AssistantGalleryImageRespons
 async def _prompt_gallery_image(image_id: str) -> AssistantGalleryImageResponse:
     _entry, _preview, data, model, duration_ms = await _assistant_vision_json(
         image_id,
-        system_prompt=(
-            "You reverse-engineer a local gallery image into one directly usable image generation prompt. "
-            "Do not include analysis or metadata."
-        ),
+        system_prompt=_image_prompt_system_prompt(),
         schema={"prompt": "string", "warnings": ["string"]},
+        include_stored_prompt=False,
         max_tokens=550,
         temperature=0.2,
     )

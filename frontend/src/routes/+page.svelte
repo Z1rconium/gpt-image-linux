@@ -6,6 +6,7 @@
   import EditSourcePicker from '$lib/components/EditSourcePicker.svelte';
   import GalleryGrid from '$lib/components/GalleryGrid.svelte';
   import Header from '$lib/components/Header.svelte';
+  import ImagePromptDialog from '$lib/components/ImagePromptDialog.svelte';
   import JobHistoryDrawer from '$lib/components/JobHistoryDrawer.svelte';
   import Lightbox from '$lib/components/Lightbox.svelte';
   import PreviewPanel from '$lib/components/PreviewPanel.svelte';
@@ -109,6 +110,7 @@
     optimizerAvailable &&
     !$uiStore.settingsOpen &&
     !$uiStore.promptSnippetsOpen &&
+    !$uiStore.imagePromptOpen &&
     !$uiStore.jobsOpen &&
     !$uiStore.editPreviewOpen &&
     !$uiStore.sizeDialogOpen &&
@@ -328,6 +330,7 @@
         $uiStore.editPreviewOpen ||
         $uiStore.sizeDialogOpen ||
         $uiStore.promptSnippetsOpen ||
+        $uiStore.imagePromptOpen ||
         $uiStore.jobsOpen ||
         $uiStore.settingsOpen
     );
@@ -394,6 +397,14 @@
 
   function closePromptSnippetsDrawer() {
     setUi('promptSnippetsOpen', false);
+  }
+
+  function openImagePromptDialog() {
+    setUi('imagePromptOpen', true);
+  }
+
+  function closeImagePromptDialog() {
+    setUi('imagePromptOpen', false);
   }
 
   function setJobsTab(tab: JobsTab) {
@@ -718,6 +729,34 @@
     showToast($t.messages.promptSnippetCopied);
   }
 
+  function applyImagePrompt(prompt: string) {
+    form = { ...form, prompt };
+    showToast($t.messages.aiAssistantPromptApplied);
+  }
+
+  async function saveImagePrompt(prompt: string) {
+    try {
+      await promptSnippetsStore.createSnippet({
+        title: $t.imagePrompt.snippetTitle,
+        prompt,
+        favorite: true
+      });
+      showToast($t.messages.promptSnippetSaved);
+    } catch (error) {
+      showError(error);
+      throw error;
+    }
+  }
+
+  async function copyImagePrompt(prompt: string) {
+    try {
+      await copyText(prompt);
+      showToast($t.messages.promptSnippetCopied);
+    } catch (error) {
+      showError(error);
+    }
+  }
+
   async function optimizePrompt() {
     const originalPrompt = form.prompt;
     const prompt = originalPrompt.trim();
@@ -849,30 +888,6 @@
         created_at: lightboxAiMetadata?.image_id === image.id ? lightboxAiMetadata.created_at : null,
         updated_at: null
       };
-    } catch (error) {
-      if (!isAbortError(error) && seq === lightboxAiMetadataSeq && $lightboxStore.image?.id === image.id) showError(error);
-    }
-  }
-
-  async function promptLightboxImage(image: GalleryEntry) {
-    const seq = ++lightboxAiMetadataSeq;
-    const signal = nextLightboxAiSignal();
-    try {
-      const result = await assistantStore.promptFromGalleryImage(image.id, signal);
-      if (seq !== lightboxAiMetadataSeq || $lightboxStore.image?.id !== image.id) return;
-      lightboxAiMetadata = {
-        image_id: image.id,
-        description: lightboxAiMetadata?.image_id === image.id ? lightboxAiMetadata.description : '',
-        prompt: result.prompt,
-        analysis: lightboxAiMetadata?.image_id === image.id ? lightboxAiMetadata.analysis : {},
-        model: result.model,
-        created_at: lightboxAiMetadata?.image_id === image.id ? lightboxAiMetadata.created_at : null,
-        updated_at: null
-      };
-      if (result.prompt) {
-        form = { ...form, prompt: result.prompt };
-        showToast($t.messages.aiAssistantPromptApplied);
-      }
     } catch (error) {
       if (!isAbortError(error) && seq === lightboxAiMetadataSeq && $lightboxStore.image?.id === image.id) showError(error);
     }
@@ -1144,7 +1159,8 @@
 
     const keydown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
-        if ($uiStore.editPreviewOpen) setUi('editPreviewOpen', false);
+        if ($uiStore.imagePromptOpen) closeImagePromptDialog();
+        else if ($uiStore.editPreviewOpen) setUi('editPreviewOpen', false);
         else if ($lightboxStore.image) closeLightbox();
         else if ($uiStore.sizeDialogOpen) setUi('sizeDialogOpen', false);
         return;
@@ -1189,14 +1205,25 @@
   releaseUrl={$versionStore.releaseUrl}
   {activeJobsCount}
   promptSnippetsOpen={$uiStore.promptSnippetsOpen}
+  imagePromptOpen={$uiStore.imagePromptOpen}
   jobsOpen={$uiStore.jobsOpen}
   settingsOpen={$uiStore.settingsOpen}
   onOpenPromptSnippets={openPromptSnippetsDrawer}
+  onOpenImagePrompt={openImagePromptDialog}
   onOpenJobs={openJobsDrawer}
   onOpenSettings={() => setUi('settingsOpen', true)}
 />
 
 <ConfirmDialog request={$confirmStore.request} />
+
+<ImagePromptDialog
+  open={$uiStore.imagePromptOpen}
+  available={aiAssistantAvailable}
+  onClose={closeImagePromptDialog}
+  onApply={applyImagePrompt}
+  onSave={saveImagePrompt}
+  onCopy={copyImagePrompt}
+/>
 
 <SettingsDrawer
   open={$uiStore.settingsOpen}
@@ -1405,7 +1432,6 @@
   aiMetadata={lightboxAiMetadata}
   aiLoadingImageId={$assistantStore.galleryLoadingImageId}
   onAiDescribe={describeLightboxImage}
-  onAiPrompt={promptLightboxImage}
   onAiAnalyze={analyzeLightboxImage}
   onNavigatePrevious={() => navigateLightbox(-1)}
   onNavigateNext={() => navigateLightbox(1)}

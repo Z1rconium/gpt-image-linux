@@ -324,14 +324,14 @@ async def probe_assistant_endpoint(
         }
 
 
-def prepare_vision_preview(path: Path) -> dict[str, str | int]:
+def _prepare_vision_preview(opener, *, decode_error: str, byte_limit_error: str) -> dict[str, str | int]:
     if Image is None or ImageOps is None:
         raise AssistantError("Pillow is required for AI Assistant image analysis", status=400)
     width = 0
     height = 0
     data = b""
     try:
-        with Image.open(path) as image:
+        with opener() as image:
             image = ImageOps.exif_transpose(image)
             if image.mode not in {"RGB", "L"}:
                 image = image.convert("RGB")
@@ -350,13 +350,10 @@ def prepare_vision_preview(path: Path) -> dict[str, str | int]:
                 quality -= 10
             width, height = image.size
     except (OSError, UnidentifiedImageError) as e:
-        raise AssistantError("Gallery image could not be decoded for AI analysis", status=400) from e
+        raise AssistantError(decode_error, status=400) from e
 
     if len(data) > config.AI_ASSISTANT_IMAGE_MAX_BYTES:
-        raise AssistantError(
-            "Gallery image preview exceeds AI Assistant byte limit",
-            status=400,
-        )
+        raise AssistantError(byte_limit_error, status=400)
     validate_image_bytes(data, filename="assistant-preview.jpg", content_type="image/jpeg")
     return {
         "b64": base64.b64encode(data).decode("ascii"),
@@ -365,3 +362,19 @@ def prepare_vision_preview(path: Path) -> dict[str, str | int]:
         "width": width,
         "height": height,
     }
+
+
+def prepare_vision_preview(path: Path) -> dict[str, str | int]:
+    return _prepare_vision_preview(
+        lambda: Image.open(path),
+        decode_error="Gallery image could not be decoded for AI analysis",
+        byte_limit_error="Gallery image preview exceeds AI Assistant byte limit",
+    )
+
+
+def prepare_vision_preview_bytes(image_bytes: bytes) -> dict[str, str | int]:
+    return _prepare_vision_preview(
+        lambda: Image.open(io.BytesIO(image_bytes)),
+        decode_error="Uploaded image could not be decoded for AI analysis",
+        byte_limit_error="Uploaded image preview exceeds AI Assistant byte limit",
+    )

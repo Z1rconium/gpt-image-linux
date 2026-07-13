@@ -8,9 +8,11 @@
   export let hasVersionUpdate = false;
   export let releaseUrl: string | null = null;
   export let promptSnippetsOpen = false;
+  export let imagePromptOpen = false;
   export let jobsOpen = false;
   export let settingsOpen = false;
   export let onOpenPromptSnippets: () => void = () => {};
+  export let onOpenImagePrompt: () => void = () => {};
   export let onOpenJobs: () => void = () => {};
   export let onOpenSettings: () => void = () => {};
 
@@ -80,6 +82,17 @@
             <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"></path>
           </svg>
         {/if}
+      </button>
+      <button
+        type="button"
+        class="mobile-touch-target control-focus inline-flex h-10 min-w-10 items-center justify-center rounded-lg border border-emerald-500/35 px-2 text-emerald-700 transition-colors hover:bg-emerald-500/10 dark:text-emerald-200"
+        title={$t.header.reversePrompt}
+        aria-label={$t.header.reversePrompt}
+        aria-controls="image-prompt-dialog"
+        aria-expanded={imagePromptOpen}
+        on:click={() => onOpenImagePrompt()}
+      >
+        <span class="text-sm font-semibold leading-none">{$t.header.reversePromptShort}</span>
       </button>
       <button
         type="button"

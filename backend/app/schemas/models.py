@@ -656,6 +656,10 @@ class AssistantEditPlanResponse(AssistantBaseResponse):
     next_action: Literal["confirm", "revise", "add_sources"] = "confirm"
 
 
+class AssistantImagePromptResponse(AssistantBaseResponse):
+    prompt: str
+
+
 class AssistantGalleryImageResponse(AssistantBaseResponse):
     image_id: str
     description: str = ""

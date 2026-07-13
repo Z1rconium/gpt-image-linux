@@ -18,7 +18,6 @@
   export let aiMetadata: AssistantGalleryMetadataResponse | null = null;
   export let aiLoadingImageId: string | null = null;
   export let onAiDescribe: (image: GalleryEntry) => void = () => {};
-  export let onAiPrompt: (image: GalleryEntry) => void = () => {};
   export let onAiAnalyze: (image: GalleryEntry) => void = () => {};
   export let canNavigatePrevious = false;
   export let canNavigateNext = false;
@@ -163,12 +162,9 @@
                   <span class="text-[11px] text-zinc-500">{$t.aiAssistant.working}</span>
                 {/if}
               </div>
-              <div class="grid grid-cols-3 gap-2">
+              <div class="grid grid-cols-2 gap-2">
                 <button type="button" disabled={aiLoading} class="control-focus rounded-lg border border-zinc-700 px-2 py-2 text-xs text-zinc-300 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50" on:click={() => onAiDescribe(image)}>
                   {$t.lightbox.aiDescribe}
-                </button>
-                <button type="button" disabled={aiLoading} class="control-focus rounded-lg border border-emerald-500/40 px-2 py-2 text-xs text-emerald-700 hover:bg-emerald-500/10 disabled:cursor-not-allowed disabled:opacity-50 dark:text-emerald-200" on:click={() => onAiPrompt(image)}>
-                  {$t.lightbox.aiPrompt}
                 </button>
                 <button type="button" disabled={aiLoading} class="control-focus rounded-lg border border-cyan-500/35 px-2 py-2 text-xs text-cyan-700 hover:bg-cyan-500/10 disabled:cursor-not-allowed disabled:opacity-50 dark:text-cyan-200" on:click={() => onAiAnalyze(image)}>
                   {$t.lightbox.aiAnalyze}
