@@ -285,15 +285,15 @@
   }
 
   function healthPanelClass(status: PresetHealthStatus | 'ok' | 'warning' | 'error') {
-    if (status === 'ok') return 'border-emerald-500/40 bg-emerald-500/10 text-emerald-100';
-    if (status === 'warning') return 'border-amber-500/40 bg-amber-500/10 text-amber-100';
-    return 'border-red-500/40 bg-red-500/10 text-red-100';
+    if (status === 'ok') return 'border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-500/40 dark:bg-emerald-500/10 dark:text-emerald-100';
+    if (status === 'warning') return 'border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-100';
+    return 'border-red-200 bg-red-50 text-red-800 dark:border-red-500/40 dark:bg-red-500/10 dark:text-red-100';
   }
 
   function healthBadgeClass(status: PresetHealthStatus | 'ok' | 'warning' | 'error') {
-    if (status === 'ok') return 'border-emerald-500/40 text-emerald-300';
-    if (status === 'warning') return 'border-amber-500/40 text-amber-300';
-    return 'border-red-500/40 text-red-300';
+    if (status === 'ok') return 'border-emerald-300 text-emerald-700 dark:border-emerald-500/40 dark:text-emerald-300';
+    if (status === 'warning') return 'border-amber-300 text-amber-700 dark:border-amber-500/40 dark:text-amber-300';
+    return 'border-red-300 text-red-700 dark:border-red-500/40 dark:text-red-300';
   }
 
   function closePromptOptimizerHealth() {
@@ -594,38 +594,38 @@
     <button class="drawer-backdrop absolute inset-0" type="button" tabindex="-1" aria-label={$t.settings.closeLabel} on:click={requestCloseDrawer}></button>
     <aside
       id="settings-drawer"
-      class="mobile-drawer-panel fade-in absolute right-0 top-0 flex h-full w-full max-w-lg flex-col border-l border-zinc-800 bg-zinc-900 shadow-2xl"
+      class="mobile-drawer-panel fade-in absolute right-0 top-0 flex h-full w-full max-w-lg flex-col border-l border-stone-200 bg-white shadow-2xl shadow-stone-300/50 dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-none"
       aria-labelledby="settings-drawer-title"
       use:dialog={{ open, onClose: requestCloseDrawer }}
       use:swipeClose={{ enabled: open, onClose: requestCloseDrawer }}
     >
-      <div class="flex items-center justify-between border-b border-zinc-800 p-5">
+      <div class="flex items-center justify-between border-b border-stone-200 p-5 dark:border-zinc-800">
         <div>
-          <h2 id="settings-drawer-title" class="text-lg font-semibold text-zinc-100">{$t.settings.title}</h2>
-          <p class="mt-1 text-xs text-zinc-500">{$t.settings.subtitle}</p>
+          <h2 id="settings-drawer-title" class="text-lg font-semibold text-stone-900 dark:text-zinc-100">{$t.settings.title}</h2>
+          <p class="mt-1 text-xs text-stone-500 dark:text-zinc-500">{$t.settings.subtitle}</p>
         </div>
-        <button type="button" class="mobile-touch-target control-focus rounded-lg p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100" aria-label={$t.settings.closeLabel} on:click={requestCloseDrawer}>x</button>
+        <button type="button" class="mobile-touch-target control-focus rounded-lg p-1.5 text-stone-500 hover:bg-stone-100 hover:text-stone-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100" aria-label={$t.settings.closeLabel} on:click={requestCloseDrawer}>x</button>
       </div>
 
       <div class="mobile-drawer-scroll min-h-0 flex-1 overflow-y-auto p-5">
         <button
           type="button"
-          class="control-focus mb-5 w-full rounded-lg border border-zinc-700 px-3 py-2.5 text-sm font-semibold text-zinc-200 transition-colors hover:border-zinc-600 hover:bg-zinc-800"
+          class="control-focus mb-5 w-full rounded-lg border border-stone-300 px-3 py-2.5 text-sm font-semibold text-stone-700 transition-colors hover:border-stone-400 hover:bg-stone-100 dark:border-zinc-700 dark:text-zinc-200 dark:hover:border-zinc-600 dark:hover:bg-zinc-800"
           on:click={openOverallConfigModal}
         >
           {$t.settings.overallConfig}
         </button>
 
         <div class="mb-5 flex items-center justify-between">
-          <h3 class="text-sm font-semibold text-zinc-200">{$t.settings.presets}</h3>
+          <h3 class="text-sm font-semibold text-stone-800 dark:text-zinc-200">{$t.settings.presets}</h3>
           <div class="flex gap-2">
-            <button type="button" class="control-focus rounded-lg border border-zinc-700 px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800" on:click={onCreate}>
+            <button type="button" class="control-focus rounded-lg border border-stone-300 px-3 py-1.5 text-xs text-stone-700 hover:bg-stone-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" on:click={onCreate}>
               {$t.settings.newPreset}
             </button>
             <button
               type="button"
               disabled={!settings || settings.presets.length <= 1 || !activePresetId || Boolean(activatingPresetId)}
-              class="control-focus rounded-lg border border-zinc-700 px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40"
+              class="control-focus rounded-lg border border-stone-300 px-3 py-1.5 text-xs text-stone-700 hover:bg-stone-100 disabled:cursor-not-allowed disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
               on:click={() => onDelete(activePresetId)}
             >
               {$t.settings.deletePreset}
@@ -639,21 +639,21 @@
               type="button"
               class={`control-focus w-full rounded-md border px-3 py-2.5 text-left transition-colors ${
                 preset.id === settings?.active_preset_id
-                  ? 'border-emerald-500/70 bg-emerald-500/10 text-zinc-100'
-                  : 'border-zinc-800 bg-zinc-950/40 text-zinc-300 hover:border-zinc-700 hover:bg-zinc-800/70'
+                  ? 'border-emerald-500/70 bg-emerald-500/10 text-stone-900 dark:text-zinc-100'
+                  : 'border-stone-200 bg-stone-50/80 text-stone-700 hover:border-stone-300 hover:bg-stone-100 dark:border-zinc-800 dark:bg-zinc-950/40 dark:text-zinc-300 dark:hover:border-zinc-700 dark:hover:bg-zinc-800/70'
               }`}
               on:click={() => activateSelectedPreset(preset.id)}
             >
               <div class="flex items-start justify-between gap-3">
                 <div class="min-w-0">
                   <div class="truncate text-sm font-medium">{preset.name || $t.common.untitledPreset}</div>
-                  <div class="mt-1 truncate font-mono text-xs text-zinc-500">{preset.api_url || $t.common.noApiUrl}</div>
+                  <div class="mt-1 truncate font-mono text-xs text-stone-500 dark:text-zinc-500">{preset.api_url || $t.common.noApiUrl}</div>
                 </div>
-                <span class="shrink-0 rounded-md border border-zinc-700 px-2 py-0.5 text-[11px] font-medium text-zinc-500">
+                <span class="shrink-0 rounded-md border border-stone-300 px-2 py-0.5 text-[11px] font-medium text-stone-500 dark:border-zinc-700 dark:text-zinc-500">
                   {activatingPresetId === preset.id ? $t.settings.switchingPreset : preset.id === settings?.active_preset_id ? $t.common.active : $t.common.switch}
                 </span>
               </div>
-              <div class="mt-2 flex items-center justify-between gap-3 text-xs text-zinc-500">
+              <div class="mt-2 flex items-center justify-between gap-3 text-xs text-stone-500 dark:text-zinc-500">
                 <span class="truncate font-mono">{preset.api_path}</span>
                 <span class="shrink-0 font-mono">{keyLabel(preset)}</span>
               </div>
@@ -663,47 +663,47 @@
 
         <div class="space-y-4">
           <label class="block">
-            <span class="mb-1.5 block text-xs font-medium text-zinc-400">{$t.settings.presetName}</span>
-            <input bind:value={presetName} class="control-focus w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2.5 text-sm text-zinc-100 focus:border-emerald-500" />
+            <span class="mb-1.5 block text-xs font-medium text-stone-600 dark:text-zinc-400">{$t.settings.presetName}</span>
+            <input bind:value={presetName} class="control-focus w-full rounded-lg border border-stone-300 bg-stone-50 px-3 py-2.5 text-sm text-stone-900 focus:border-emerald-500 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100" />
           </label>
           <label class="block">
-            <span class="mb-1.5 block text-xs font-medium text-zinc-400">{$t.settings.apiUrl}</span>
-            <input bind:value={apiUrl} class="control-focus w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2.5 font-mono text-sm text-zinc-100 focus:border-emerald-500" placeholder="https://api.example.com" />
+            <span class="mb-1.5 block text-xs font-medium text-stone-600 dark:text-zinc-400">{$t.settings.apiUrl}</span>
+            <input bind:value={apiUrl} class="control-focus w-full rounded-lg border border-stone-300 bg-stone-50 px-3 py-2.5 font-mono text-sm text-stone-900 focus:border-emerald-500 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100" placeholder="https://api.example.com" />
           </label>
           <label class="block">
-            <span class="mb-1.5 block text-xs font-medium text-zinc-400">{$t.settings.apiPath}</span>
-            <select bind:value={apiPath} class="control-focus form-select border-zinc-700 bg-zinc-950 text-zinc-100 focus:border-emerald-500">
+            <span class="mb-1.5 block text-xs font-medium text-stone-600 dark:text-zinc-400">{$t.settings.apiPath}</span>
+            <select bind:value={apiPath} class="control-focus form-select border-stone-300 bg-stone-50 text-stone-900 focus:border-emerald-500 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100">
               <option value="/v1/images/generations">/v1/images/generations</option>
               <option value="/v1/responses">/v1/responses</option>
               <option value="/v1/chat/completions">/v1/chat/completions</option>
             </select>
           </label>
           <label class="block">
-            <span class="mb-1.5 block text-xs font-medium text-zinc-400">{$t.settings.defaultModel}</span>
-            <input bind:value={defaultModel} class="control-focus w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2.5 font-mono text-sm text-zinc-100 focus:border-emerald-500" placeholder="gpt-image-2" />
+            <span class="mb-1.5 block text-xs font-medium text-stone-600 dark:text-zinc-400">{$t.settings.defaultModel}</span>
+            <input bind:value={defaultModel} class="control-focus w-full rounded-lg border border-stone-300 bg-stone-50 px-3 py-2.5 font-mono text-sm text-stone-900 focus:border-emerald-500 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100" placeholder="gpt-image-2" />
           </label>
           <label class="block">
-            <span class="mb-1.5 block text-xs font-medium text-zinc-400">{$t.settings.defaultResponseFormat}</span>
-            <select bind:value={defaultResponseFormat} class="control-focus form-select border-zinc-700 bg-zinc-950 text-zinc-100 focus:border-emerald-500">
+            <span class="mb-1.5 block text-xs font-medium text-stone-600 dark:text-zinc-400">{$t.settings.defaultResponseFormat}</span>
+            <select bind:value={defaultResponseFormat} class="control-focus form-select border-stone-300 bg-stone-50 text-stone-900 focus:border-emerald-500 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100">
               {#each RESPONSE_FORMAT_OPTIONS as responseFormat}
                 <option value={responseFormat}>{responseFormat || $t.promptForm.defaultResponseFormat}</option>
               {/each}
             </select>
           </label>
           <label class="block">
-            <span class="mb-1.5 block text-xs font-medium text-zinc-400">{$t.settings.apiKey}</span>
-            <input bind:value={apiKey} type={apiKeyInputType} class="control-focus w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2.5 font-mono text-sm text-zinc-100 focus:border-emerald-500" />
-            <span class="mt-1.5 block text-xs text-zinc-500">{$t.settings.apiKeyHint}</span>
+            <span class="mb-1.5 block text-xs font-medium text-stone-600 dark:text-zinc-400">{$t.settings.apiKey}</span>
+            <input bind:value={apiKey} type={apiKeyInputType} class="control-focus w-full rounded-lg border border-stone-300 bg-stone-50 px-3 py-2.5 font-mono text-sm text-stone-900 focus:border-emerald-500 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100" />
+            <span class="mt-1.5 block text-xs text-stone-500 dark:text-zinc-500">{$t.settings.apiKeyHint}</span>
           </label>
           <label class="block">
-            <span class="mb-1.5 block text-xs font-medium text-zinc-400">{$t.settings.upstreamSocks5Proxy}</span>
-            <input bind:value={upstreamSocks5Proxy} class="control-focus w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2.5 font-mono text-sm text-zinc-100 focus:border-emerald-500" placeholder="socks5://127.0.0.1:1080" />
-            <span class="mt-1.5 block text-xs text-zinc-500">{$t.settings.upstreamSocks5ProxyHint}</span>
+            <span class="mb-1.5 block text-xs font-medium text-stone-600 dark:text-zinc-400">{$t.settings.upstreamSocks5Proxy}</span>
+            <input bind:value={upstreamSocks5Proxy} class="control-focus w-full rounded-lg border border-stone-300 bg-stone-50 px-3 py-2.5 font-mono text-sm text-stone-900 focus:border-emerald-500 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100" placeholder="socks5://127.0.0.1:1080" />
+            <span class="mt-1.5 block text-xs text-stone-500 dark:text-zinc-500">{$t.settings.upstreamSocks5ProxyHint}</span>
           </label>
           <label class="block">
-            <span class="mb-1.5 block text-xs font-medium text-zinc-400">{$t.settings.webhookUrl}</span>
-            <input bind:value={webhookUrl} class="control-focus w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2.5 font-mono text-sm text-zinc-100 focus:border-emerald-500" placeholder="https://..." />
-            <span class="mt-1.5 block text-xs text-zinc-500">{$t.settings.webhookUrlHint}</span>
+            <span class="mb-1.5 block text-xs font-medium text-stone-600 dark:text-zinc-400">{$t.settings.webhookUrl}</span>
+            <input bind:value={webhookUrl} class="control-focus w-full rounded-lg border border-stone-300 bg-stone-50 px-3 py-2.5 font-mono text-sm text-stone-900 focus:border-emerald-500 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100" placeholder="https://..." />
+            <span class="mt-1.5 block text-xs text-stone-500 dark:text-zinc-500">{$t.settings.webhookUrlHint}</span>
           </label>
 
           <R2SettingsSection
@@ -745,7 +745,7 @@
         </div>
       </div>
 
-      <div class="space-y-3 border-t border-zinc-800 p-5">
+      <div class="space-y-3 border-t border-stone-200 p-5 dark:border-zinc-800">
         {#if aiAssistantHealth}
           <div class={`rounded-lg border p-3 text-xs ${healthPanelClass(aiAssistantHealth.status)}`} data-testid="ai-assistant-health-result">
             <div class="flex items-center justify-between gap-3">
@@ -770,7 +770,7 @@
                 </button>
               </div>
             </div>
-            <div class="mt-2 rounded-md border border-zinc-800 bg-zinc-950/50 p-2 text-zinc-300">
+            <div class="mt-2 rounded-md border border-stone-200 bg-white/70 p-2 text-stone-700 dark:border-zinc-800 dark:bg-zinc-950/50 dark:text-zinc-300">
               {aiAssistantHealth.message}
             </div>
           </div>
@@ -799,7 +799,7 @@
                 </button>
               </div>
             </div>
-            <div class="mt-2 rounded-md border border-zinc-800 bg-zinc-950/50 p-2 text-zinc-300">
+            <div class="mt-2 rounded-md border border-stone-200 bg-white/70 p-2 text-stone-700 dark:border-zinc-800 dark:bg-zinc-950/50 dark:text-zinc-300">
               {promptOptimizerHealth.message}
             </div>
           </div>
@@ -828,14 +828,14 @@
             </div>
             <div class="mt-2 space-y-1.5">
               {#each health.checks as check}
-                <div class="rounded-md border border-zinc-800 bg-zinc-950/50 p-2 text-zinc-300">
+                <div class="rounded-md border border-stone-200 bg-white/70 p-2 text-stone-700 dark:border-zinc-800 dark:bg-zinc-950/50 dark:text-zinc-300">
                   <div class="flex items-center justify-between gap-2">
-                    <span class="font-mono text-[11px] text-zinc-500">{check.name}</span>
+                    <span class="font-mono text-[11px] text-stone-500 dark:text-zinc-500">{check.name}</span>
                     <span class={`rounded border px-1.5 py-0.5 text-[10px] font-semibold ${healthBadgeClass(check.status)}`}>
                       {healthStatusLabel(check.status)}
                     </span>
                   </div>
-                  <div class="mt-1 leading-relaxed text-zinc-400">{check.message}</div>
+                  <div class="mt-1 leading-relaxed text-stone-600 dark:text-zinc-400">{check.message}</div>
                 </div>
               {/each}
             </div>
@@ -845,7 +845,7 @@
           <button
             type="button"
             disabled={healthChecking || !activePresetId}
-            class="control-focus rounded-xl border border-zinc-700 px-4 py-3 text-sm font-semibold text-zinc-200 transition-colors hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50"
+            class="control-focus rounded-xl border border-stone-300 px-4 py-3 text-sm font-semibold text-stone-700 transition-colors hover:bg-stone-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
             on:click={checkHealth}
           >
             {healthChecking ? $t.settings.healthChecking : $t.settings.healthCheck}
@@ -866,50 +866,50 @@
       <div class="mobile-dialog-root fixed inset-0 z-[70] flex items-center justify-center bg-black/70 p-4">
         <button class="absolute inset-0" type="button" tabindex="-1" aria-label={$t.settings.closeOverallConfig} on:click={closeOverallConfigModal}></button>
         <div
-          class="mobile-dvh-dialog fade-in relative flex max-h-[90vh] w-full max-w-5xl flex-col rounded-xl border border-zinc-800 bg-zinc-900 shadow-2xl"
+          class="mobile-dvh-dialog fade-in relative flex max-h-[90vh] w-full max-w-5xl flex-col rounded-xl border border-stone-200 bg-white shadow-2xl shadow-stone-300/50 dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-none"
           aria-labelledby="overall-config-dialog-title"
           use:dialog={{ open: overallConfigOpen, onClose: closeOverallConfigModal }}
         >
-          <div class="flex items-start justify-between gap-4 border-b border-zinc-800 p-5">
+          <div class="flex items-start justify-between gap-4 border-b border-stone-200 p-5 dark:border-zinc-800">
             <div class="min-w-0">
-              <h2 id="overall-config-dialog-title" class="text-base font-semibold text-zinc-100">{$t.settings.overallConfig}</h2>
-              <p class="mt-1 text-xs leading-5 text-zinc-500">{$t.settings.overallConfigHint}</p>
+              <h2 id="overall-config-dialog-title" class="text-base font-semibold text-stone-900 dark:text-zinc-100">{$t.settings.overallConfig}</h2>
+              <p class="mt-1 text-xs leading-5 text-stone-500 dark:text-zinc-500">{$t.settings.overallConfigHint}</p>
             </div>
-            <button type="button" class="mobile-touch-target control-focus rounded-lg p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100" aria-label={$t.settings.closeOverallConfig} on:click={closeOverallConfigModal}>
+            <button type="button" class="mobile-touch-target control-focus rounded-lg p-1.5 text-stone-500 hover:bg-stone-100 hover:text-stone-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100" aria-label={$t.settings.closeOverallConfig} on:click={closeOverallConfigModal}>
               x
             </button>
           </div>
 
           <div class="min-h-0 flex-1 overflow-y-auto p-5">
             {#if overallConfigLoading}
-              <div class="rounded-lg border border-zinc-800 bg-zinc-950/60 p-4 text-sm text-zinc-400">{$t.settings.overallConfigLoading}</div>
+              <div class="rounded-lg border border-stone-200 bg-stone-50/90 p-4 text-sm text-stone-600 dark:border-zinc-800 dark:bg-zinc-950/60 dark:text-zinc-400">{$t.settings.overallConfigLoading}</div>
             {:else}
               <div class="space-y-6">
                 {#each overallConfigGroupNames as group}
                   <section>
-                    <h3 class="mb-3 text-sm font-semibold text-zinc-200">{group}</h3>
+                    <h3 class="mb-3 text-sm font-semibold text-stone-800 dark:text-zinc-200">{group}</h3>
                     <div class="space-y-3">
                       {#each overallConfigGroups[group] as item}
-                        <div class="rounded-lg border border-zinc-800 bg-zinc-950/50 p-3" data-testid={`overall-config-${item.name}`}>
+                        <div class="rounded-lg border border-stone-200 bg-stone-50/80 p-3 dark:border-zinc-800 dark:bg-zinc-950/50" data-testid={`overall-config-${item.name}`}>
                           <div class="mb-2 flex flex-wrap items-start justify-between gap-2">
                             <div class="min-w-0">
-                              <div class="font-mono text-xs font-semibold text-zinc-100">{item.name}</div>
-                              <div class="mt-1 text-xs leading-5 text-zinc-500">{item.description}</div>
+                              <div class="font-mono text-xs font-semibold text-stone-900 dark:text-zinc-100">{item.name}</div>
+                              <div class="mt-1 text-xs leading-5 text-stone-500 dark:text-zinc-500">{item.description}</div>
                             </div>
                             <div class="flex shrink-0 flex-wrap justify-end gap-1.5">
-                              <span class="rounded border border-zinc-700 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-zinc-400">{sourceLabel(item.source)}</span>
+                              <span class="rounded border border-stone-300 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-stone-600 dark:border-zinc-700 dark:text-zinc-400">{sourceLabel(item.source)}</span>
                               {#if item.restart_required}
-                                <span class="rounded border border-amber-500/40 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-amber-300">{$t.settings.restartRequired}</span>
+                                <span class="rounded border border-amber-500/40 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-amber-700 dark:text-amber-300">{$t.settings.restartRequired}</span>
                               {/if}
                               {#if item.build_only}
-                                <span class="rounded border border-sky-500/40 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-sky-300">{$t.settings.buildOnly}</span>
+                                <span class="rounded border border-sky-500/40 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-sky-700 dark:text-sky-300">{$t.settings.buildOnly}</span>
                               {/if}
                             </div>
                           </div>
 
                           <div class="grid grid-cols-1 gap-2 sm:grid-cols-[1fr_auto]">
                             {#if item.type === 'bool'}
-                              <label class="flex items-center gap-2 rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2.5 text-xs text-zinc-300">
+                              <label class="flex items-center gap-2 rounded-lg border border-stone-200 bg-white px-3 py-2.5 text-xs text-stone-700 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-300">
                                 <input
                                   type="checkbox"
                                   class="control-focus accent-emerald-500"
@@ -923,13 +923,13 @@
                                 value={String(overallDraftValue(item) ?? '')}
                                 type={item.type === 'int' || item.type === 'float' ? 'number' : item.secret ? 'password' : 'text'}
                                 step={item.type === 'float' ? 'any' : '1'}
-                                class="control-focus w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2.5 font-mono text-sm text-zinc-100 focus:border-emerald-500"
+                                class="control-focus w-full rounded-lg border border-stone-300 bg-white px-3 py-2.5 font-mono text-sm text-stone-900 focus:border-emerald-500 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
                                 on:input={(event) => setOverallDraft(item, event.currentTarget.value)}
                               />
                             {/if}
                             <button
                               type="button"
-                              class="control-focus rounded-lg border border-zinc-700 px-3 py-2 text-xs font-semibold text-zinc-300 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40"
+                              class="control-focus rounded-lg border border-stone-300 px-3 py-2 text-xs font-semibold text-stone-700 hover:bg-stone-100 disabled:cursor-not-allowed disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
                               disabled={!item.has_override && !hasOverallDraft(item.name)}
                               on:click={() => resetOverallConfigItem(item)}
                             >
@@ -937,7 +937,7 @@
                             </button>
                           </div>
                           {#if item.has_override || item.is_env_set}
-                            <div class="mt-2 grid grid-cols-1 gap-1 text-[11px] text-zinc-500 sm:grid-cols-2">
+                            <div class="mt-2 grid grid-cols-1 gap-1 text-[11px] text-stone-500 dark:text-zinc-500 sm:grid-cols-2">
                               <div class="truncate">env: <span class="font-mono">{item.env_value_masked || '-'}</span></div>
                               <div class="truncate">override: <span class="font-mono">{item.override_value_masked || '-'}</span></div>
                             </div>
@@ -950,12 +950,12 @@
               </div>
             {/if}
             {#if overallConfigError}
-              <div class="mt-3 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-200">{overallConfigError}</div>
+              <div class="mt-3 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-700 dark:text-red-200">{overallConfigError}</div>
             {/if}
           </div>
 
-          <div class="flex justify-end gap-3 border-t border-zinc-800 p-5">
-            <button type="button" class="control-focus rounded-lg border border-zinc-700 px-4 py-2 text-sm text-zinc-300 hover:bg-zinc-800" on:click={closeOverallConfigModal}>
+          <div class="flex justify-end gap-3 border-t border-stone-200 p-5 dark:border-zinc-800">
+            <button type="button" class="control-focus rounded-lg border border-stone-300 px-4 py-2 text-sm text-stone-700 hover:bg-stone-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" on:click={closeOverallConfigModal}>
               {$t.common.close}
             </button>
             <button
@@ -975,29 +975,29 @@
       <div class="mobile-dialog-root fixed inset-0 z-[70] flex items-center justify-center bg-black/70 p-4">
         <button class="absolute inset-0" type="button" tabindex="-1" aria-label={$t.settings.closeSystemPromptEditor} on:click={closeSystemPromptEditor}></button>
         <div
-          class="mobile-dvh-dialog fade-in relative flex max-h-[88vh] w-full max-w-3xl flex-col rounded-xl border border-zinc-800 bg-zinc-900 shadow-2xl"
+          class="mobile-dvh-dialog fade-in relative flex max-h-[88vh] w-full max-w-3xl flex-col rounded-xl border border-stone-200 bg-white shadow-2xl shadow-stone-300/50 dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-none"
           aria-labelledby="system-prompt-dialog-title"
           use:dialog={{ open: systemPromptOpen, onClose: closeSystemPromptEditor }}
         >
-          <div class="flex items-start justify-between gap-4 border-b border-zinc-800 p-5">
+          <div class="flex items-start justify-between gap-4 border-b border-stone-200 p-5 dark:border-zinc-800">
             <div class="min-w-0">
-              <h2 id="system-prompt-dialog-title" class="text-base font-semibold text-zinc-100">{$t.settings.systemPromptTitle}</h2>
-              <p class="mt-1 text-xs leading-5 text-zinc-500">{$t.settings.systemPromptHint}</p>
+              <h2 id="system-prompt-dialog-title" class="text-base font-semibold text-stone-900 dark:text-zinc-100">{$t.settings.systemPromptTitle}</h2>
+              <p class="mt-1 text-xs leading-5 text-stone-500 dark:text-zinc-500">{$t.settings.systemPromptHint}</p>
             </div>
-            <button type="button" class="mobile-touch-target control-focus rounded-lg p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100" aria-label={$t.settings.closeSystemPromptEditor} on:click={closeSystemPromptEditor}>
+            <button type="button" class="mobile-touch-target control-focus rounded-lg p-1.5 text-stone-500 hover:bg-stone-100 hover:text-stone-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100" aria-label={$t.settings.closeSystemPromptEditor} on:click={closeSystemPromptEditor}>
               x
             </button>
           </div>
 
           <div class="min-h-0 flex-1 overflow-y-auto p-5">
             {#if systemPromptLoading}
-              <div class="rounded-lg border border-zinc-800 bg-zinc-950/60 p-4 text-sm text-zinc-400">{$t.settings.systemPromptLoading}</div>
+              <div class="rounded-lg border border-stone-200 bg-stone-50/90 p-4 text-sm text-stone-600 dark:border-zinc-800 dark:bg-zinc-950/60 dark:text-zinc-400">{$t.settings.systemPromptLoading}</div>
             {:else}
               <label class="block">
-                <span class="mb-2 block text-xs font-medium text-zinc-400">{$t.settings.systemPromptLabel}</span>
+                <span class="mb-2 block text-xs font-medium text-stone-600 dark:text-zinc-400">{$t.settings.systemPromptLabel}</span>
                 <textarea
                   bind:value={systemPromptText}
-                  class="system-prompt-textarea control-focus min-h-[420px] w-full resize-y rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-3 font-mono text-xs leading-5 text-zinc-100 focus:border-emerald-500"
+                  class="system-prompt-textarea control-focus min-h-[420px] w-full resize-y rounded-lg border border-stone-300 bg-stone-50 px-3 py-3 font-mono text-xs leading-5 text-stone-900 focus:border-emerald-500 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
                   spellcheck="false"
                   data-autofocus
                   use:plainTextInput
@@ -1005,12 +1005,12 @@
               </label>
             {/if}
             {#if systemPromptError}
-              <div class="mt-3 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-200">{systemPromptError}</div>
+              <div class="mt-3 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-700 dark:text-red-200">{systemPromptError}</div>
             {/if}
           </div>
 
-          <div class="flex justify-end gap-3 border-t border-zinc-800 p-5">
-            <button type="button" class="control-focus rounded-lg border border-zinc-700 px-4 py-2 text-sm text-zinc-300 hover:bg-zinc-800" on:click={closeSystemPromptEditor}>
+          <div class="flex justify-end gap-3 border-t border-stone-200 p-5 dark:border-zinc-800">
+            <button type="button" class="control-focus rounded-lg border border-stone-300 px-4 py-2 text-sm text-stone-700 hover:bg-stone-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" on:click={closeSystemPromptEditor}>
               {$t.common.close}
             </button>
             <button

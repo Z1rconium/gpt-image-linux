@@ -868,6 +868,141 @@ test('theme follows system preference, toggles, and persists after reload', asyn
   await expect(page.getByRole('button', { name: 'Switch to dark mode' })).toBeVisible();
 });
 
+test('settings and prompt snippets follow the active theme while open and after reopening', async ({ page }) => {
+  await page.emulateMedia({ colorScheme: 'light' });
+  await loadApp(page);
+
+  const root = page.locator('html');
+  const settingsButton = page.getByRole('button', { name: 'Settings' });
+  const promptsButton = page.getByRole('button', { name: 'Prompt snippets' });
+
+  await expect(root).toHaveAttribute('data-theme', 'light');
+  await settingsButton.click();
+  const settingsDrawer = page.getByRole('dialog', { name: 'Settings' });
+  const settingsTitle = settingsDrawer.getByRole('heading', { name: 'Settings' });
+  const settingsApiUrl = settingsDrawer.getByLabel('API URL', { exact: true });
+  const r2SyncInterval = settingsDrawer.getByLabel('Sync interval hours');
+  const optimizerTimeout = settingsDrawer.getByLabel('Timeout seconds');
+  const assistantVisionModel = settingsDrawer.getByLabel('Assistant vision engine');
+  await expect(settingsDrawer).toHaveCSS('background-color', 'rgb(255, 255, 255)');
+  await expect(settingsTitle).toHaveCSS('color', 'rgb(28, 25, 23)');
+  await expect(settingsApiUrl).toHaveCSS('background-color', 'rgb(250, 250, 249)');
+  await expect(settingsApiUrl).toHaveCSS('color', 'rgb(28, 25, 23)');
+  await expect(r2SyncInterval).toHaveCSS('background-color', 'rgb(250, 250, 249)');
+  await expect(optimizerTimeout).toHaveCSS('background-color', 'rgb(250, 250, 249)');
+  await expect(assistantVisionModel).toHaveCSS('background-color', 'rgb(250, 250, 249)');
+  await expect.poll(() => page.evaluate(() => window.localStorage.getItem('gpt-image-panel-theme'))).toBeNull();
+  await page.screenshot({ path: '/tmp/gpt-image-settings-light-desktop.png' });
+  await settingsDrawer.getByRole('button', { name: 'Close settings' }).click();
+
+  await promptsButton.click();
+  const promptsDrawer = page.getByRole('dialog', { name: 'Prompt Snippets' });
+  const promptsTitle = promptsDrawer.getByRole('heading', { name: 'Prompt Snippets' });
+  const promptsSearch = promptsDrawer.getByLabel('Search snippets');
+  await expect(promptsDrawer).toHaveCSS('background-color', 'rgb(255, 255, 255)');
+  await expect(promptsTitle).toHaveCSS('color', 'rgb(28, 25, 23)');
+  await expect(promptsSearch).toHaveCSS('background-color', 'rgb(250, 250, 249)');
+  await expect(promptsSearch).toHaveCSS('color', 'rgb(28, 25, 23)');
+  await expect.poll(() => page.evaluate(() => window.localStorage.getItem('gpt-image-panel-theme'))).toBeNull();
+
+  await page.getByRole('button', { name: 'Switch to dark mode' }).evaluate((button) =>
+    button.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+  );
+  await expect(root).toHaveAttribute('data-theme', 'dark');
+  await expect(promptsDrawer).toHaveCSS('background-color', 'rgb(24, 24, 27)');
+  await expect(promptsTitle).toHaveCSS('color', 'rgb(244, 244, 245)');
+  await expect(promptsSearch).toHaveCSS('background-color', 'rgb(9, 9, 11)');
+  await expect(promptsSearch).toHaveCSS('color', 'rgb(244, 244, 245)');
+  await page.screenshot({ path: '/tmp/gpt-image-prompts-dark-desktop.png' });
+  await promptsDrawer.getByRole('button', { name: 'Close prompt snippets' }).click();
+
+  await settingsButton.click();
+  await expect(settingsDrawer).toHaveCSS('background-color', 'rgb(24, 24, 27)');
+  await expect(settingsTitle).toHaveCSS('color', 'rgb(244, 244, 245)');
+  await expect(settingsApiUrl).toHaveCSS('background-color', 'rgb(9, 9, 11)');
+  await page.getByRole('button', { name: 'Switch to light mode' }).evaluate((button) =>
+    button.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+  );
+  await expect(root).toHaveAttribute('data-theme', 'light');
+  await expect(settingsDrawer).toHaveCSS('background-color', 'rgb(255, 255, 255)');
+  await expect(settingsApiUrl).toHaveCSS('background-color', 'rgb(250, 250, 249)');
+  await expect.poll(() => page.evaluate(() => window.localStorage.getItem('gpt-image-panel-theme'))).toBe('light');
+  await settingsDrawer.getByRole('button', { name: 'Close settings' }).click();
+
+  await promptsButton.click();
+  await expect(promptsDrawer).toHaveCSS('background-color', 'rgb(255, 255, 255)');
+  await promptsDrawer.getByRole('button', { name: 'Close prompt snippets' }).click();
+  await page.reload();
+  await expect(page.getByRole('heading', { name: 'Prompt', exact: true })).toBeVisible();
+  await expect(root).toHaveAttribute('data-theme', 'light');
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await expect(page.getByRole('dialog', { name: 'Settings' })).toHaveCSS('background-color', 'rgb(255, 255, 255)');
+});
+
+test('settings and prompt snippets preserve dark surfaces for a dark system theme', async ({ page }) => {
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await loadApp(page);
+
+  await page.getByRole('button', { name: 'Settings' }).click();
+  const settingsDrawer = page.getByRole('dialog', { name: 'Settings' });
+  await expect(settingsDrawer).toHaveCSS('background-color', 'rgb(24, 24, 27)');
+  await expect(settingsDrawer.getByLabel('API URL', { exact: true })).toHaveCSS('background-color', 'rgb(9, 9, 11)');
+  await expect(settingsDrawer.getByLabel('Sync interval hours')).toHaveCSS('background-color', 'rgb(9, 9, 11)');
+  await expect(settingsDrawer.getByLabel('Timeout seconds')).toHaveCSS('background-color', 'rgb(9, 9, 11)');
+  await expect(settingsDrawer.getByLabel('Assistant vision engine')).toHaveCSS('background-color', 'rgb(9, 9, 11)');
+  await expect(settingsDrawer.getByRole('heading', { name: 'R2 Backup' })).toHaveCSS('color', 'rgb(228, 228, 231)');
+  await settingsDrawer.getByRole('button', { name: 'Test Prompt Optimizer' }).click();
+  await expect(page.getByTestId('prompt-optimizer-health-result')).toHaveCSS('background-color', 'rgba(16, 185, 129, 0.1)');
+  await expect.poll(() => page.evaluate(() => window.localStorage.getItem('gpt-image-panel-theme'))).toBeNull();
+  await settingsDrawer.getByRole('button', { name: 'Close settings' }).click();
+
+  await page.getByRole('button', { name: 'Prompt snippets' }).click();
+  const promptsDrawer = page.getByRole('dialog', { name: 'Prompt Snippets' });
+  await expect(promptsDrawer).toHaveCSS('background-color', 'rgb(24, 24, 27)');
+  await expect(promptsDrawer.getByLabel('Search snippets')).toHaveCSS('background-color', 'rgb(9, 9, 11)');
+  await expect(promptsDrawer.getByRole('heading', { name: 'Prompt Snippets' })).toHaveCSS('color', 'rgb(244, 244, 245)');
+  await expect.poll(() => page.evaluate(() => window.localStorage.getItem('gpt-image-panel-theme'))).toBeNull();
+});
+
+test('settings and prompt snippets fit a mobile viewport without horizontal overflow', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.emulateMedia({ colorScheme: 'light' });
+  await loadApp(page);
+
+  await page.getByRole('button', { name: 'Settings' }).click();
+  const settingsDrawer = page.getByRole('dialog', { name: 'Settings' });
+  await settingsDrawer.getByRole('button', { name: 'Test Prompt Optimizer' }).click();
+  const healthResult = page.getByTestId('prompt-optimizer-health-result');
+  await expect(healthResult).toBeVisible();
+  await expect(healthResult).toHaveCSS('background-color', 'rgb(236, 253, 245)');
+  expect(await settingsDrawer.evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true);
+  expect(await healthResult.evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true);
+  const settingsBox = await settingsDrawer.boundingBox();
+  expect(settingsBox?.x ?? -1).toBeGreaterThanOrEqual(0);
+  expect((settingsBox?.x ?? 0) + (settingsBox?.width ?? 0)).toBeLessThanOrEqual(390);
+  expect((settingsBox?.y ?? 0) + (settingsBox?.height ?? 0)).toBeLessThanOrEqual(844);
+  await page.screenshot({ path: '/tmp/gpt-image-settings-light-mobile.png' });
+  await settingsDrawer.getByRole('button', { name: 'Close settings' }).click();
+
+  await page.getByRole('button', { name: 'Prompt snippets' }).click();
+  const promptsDrawer = page.getByRole('dialog', { name: 'Prompt Snippets' });
+  expect(await promptsDrawer.evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true);
+  expect(
+    await promptsDrawer.locator('button').evaluateAll((buttons) =>
+      buttons.filter((button) => getComputedStyle(button).visibility !== 'hidden').every((button) => button.scrollWidth <= button.clientWidth + 1)
+    )
+  ).toBe(true);
+  await expect.poll(async () => {
+    const box = await promptsDrawer.boundingBox();
+    return (box?.y ?? 0) + (box?.height ?? 0);
+  }).toBeLessThanOrEqual(844);
+  const promptsBox = await promptsDrawer.boundingBox();
+  expect(promptsBox?.x ?? -1).toBeGreaterThanOrEqual(0);
+  expect((promptsBox?.x ?? 0) + (promptsBox?.width ?? 0)).toBeLessThanOrEqual(390);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: '/tmp/gpt-image-prompts-light-mobile.png' });
+});
+
 test('main workspace hierarchy stays ordered and touch-safe across viewports', async ({ page }) => {
   await loadApp(page);
   const headings = ['Prompt', 'AI Assistant', 'Preview', 'Gallery'];
