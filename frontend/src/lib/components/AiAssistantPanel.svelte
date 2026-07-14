@@ -223,7 +223,7 @@
   }
 </script>
 
-<section data-testid="ai-assistant-panel" class="rounded-2xl border border-stone-200 bg-white/80 p-4 shadow-sm shadow-stone-200/60 sm:p-5 dark:border-zinc-800 dark:bg-zinc-900/60 dark:shadow-none">
+<section data-testid="ai-assistant-panel" class="app-section px-1 py-1 sm:px-0">
   <div class="mb-4 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
     <div>
       <h2 class="text-sm font-semibold text-stone-950 dark:text-zinc-100">{$t.aiAssistant.title}</h2>

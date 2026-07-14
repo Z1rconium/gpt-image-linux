@@ -63,7 +63,7 @@
   });
 </script>
 
-<section class="rounded-2xl border border-stone-200 bg-white/80 p-4 shadow-sm shadow-stone-200/60 sm:p-5 dark:border-zinc-800 dark:bg-zinc-900/60 dark:shadow-none">
+<section class="app-section px-1 py-1 sm:px-0">
   <div class="mb-4 flex items-center justify-between gap-3">
     <div class="min-w-0">
       <h2 class="text-sm font-semibold text-stone-950 dark:text-zinc-100">{$t.preview.title}</h2>
@@ -83,7 +83,7 @@
   </div>
 
   {#if error}
-    <div class="rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">{error}</div>
+    <div class="status-error px-4 py-3 text-sm">{error}</div>
   {/if}
 
   <div class={`mt-4 flex min-h-[360px] items-center justify-center overflow-hidden rounded-xl border border-stone-200 dark:border-zinc-800 ${selectedImageUrl ? 'bg-stone-100 dark:bg-zinc-950' : 'preview-empty'}`}>
@@ -138,27 +138,12 @@
   </div>
 
   {#if job}
-    <div class="mt-4 grid grid-cols-2 gap-2 text-xs text-stone-500 dark:text-zinc-500 sm:grid-cols-5">
-      <div class="rounded-lg border border-stone-200 bg-stone-50/80 px-3 py-2 dark:border-zinc-800 dark:bg-zinc-950/50">
-        <div class="text-stone-400 dark:text-zinc-600">{$t.common.status}</div>
-        <div class="mt-1 text-stone-700 dark:text-zinc-300">{statusLabel(job.status, $t.statuses)}</div>
-      </div>
-      <div class="rounded-lg border border-stone-200 bg-stone-50/80 px-3 py-2 dark:border-zinc-800 dark:bg-zinc-950/50">
-        <div class="text-stone-400 dark:text-zinc-600">{$t.common.completedAt}</div>
-        <div class="mt-1 whitespace-nowrap text-stone-700 dark:text-zinc-300">{formatBeijingTime(job.completed_at)}</div>
-      </div>
-      <div class="rounded-lg border border-stone-200 bg-stone-50/80 px-3 py-2 dark:border-zinc-800 dark:bg-zinc-950/50">
-        <div class="text-stone-400 dark:text-zinc-600">{$t.common.size}</div>
-        <div class="mt-1 text-stone-700 dark:text-zinc-300">{previewSize}</div>
-      </div>
-      <div class="rounded-lg border border-stone-200 bg-stone-50/80 px-3 py-2 dark:border-zinc-800 dark:bg-zinc-950/50">
-        <div class="text-stone-400 dark:text-zinc-600">{$t.common.model}</div>
-        <div class="mt-1 truncate text-stone-700 dark:text-zinc-300">{job.model || '-'}</div>
-      </div>
-      <div class="rounded-lg border border-stone-200 bg-stone-50/80 px-3 py-2 dark:border-zinc-800 dark:bg-zinc-950/50">
-        <div class="text-stone-400 dark:text-zinc-600">{$t.common.duration}</div>
-        <div class="mt-1 text-stone-700 dark:text-zinc-300">{job.duration || '-'}</div>
-      </div>
-    </div>
+    <dl class="mt-4 grid grid-cols-2 gap-x-5 gap-y-3 border-t border-stone-200 pt-4 text-xs dark:border-zinc-800 sm:grid-cols-5">
+      <div><dt class="text-stone-500 dark:text-zinc-400">{$t.common.status}</dt><dd class="mt-1 text-stone-800 dark:text-zinc-200">{statusLabel(job.status, $t.statuses)}</dd></div>
+      <div><dt class="text-stone-500 dark:text-zinc-400">{$t.common.completedAt}</dt><dd class="mt-1 whitespace-nowrap text-stone-800 dark:text-zinc-200">{formatBeijingTime(job.completed_at)}</dd></div>
+      <div><dt class="text-stone-500 dark:text-zinc-400">{$t.common.size}</dt><dd class="mt-1 text-stone-800 dark:text-zinc-200">{previewSize}</dd></div>
+      <div class="min-w-0"><dt class="text-stone-500 dark:text-zinc-400">{$t.common.model}</dt><dd class="mt-1 truncate text-stone-800 dark:text-zinc-200">{job.model || '-'}</dd></div>
+      <div><dt class="text-stone-500 dark:text-zinc-400">{$t.common.duration}</dt><dd class="mt-1 text-stone-800 dark:text-zinc-200">{job.duration || '-'}</dd></div>
+    </dl>
   {/if}
 </section>

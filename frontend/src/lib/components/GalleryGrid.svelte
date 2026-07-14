@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
   import type { GalleryEntry, GalleryResponse } from '$lib/api/types';
+  import GalleryFilterToolbar from '$lib/components/gallery/GalleryFilterToolbar.svelte';
+  import GalleryPagination from '$lib/components/gallery/GalleryPagination.svelte';
   import { t } from '$lib/i18n';
   import type { GalleryFilters, GalleryOperationStatus } from '$lib/stores/gallery';
   import { displayImageSize, formatBytes, imageUrl, thumbnailUrl } from '$lib/utils/format';
@@ -53,7 +55,6 @@
     );
 
   let importInput: HTMLInputElement;
-  let pageInput = '1';
   let failedThumbnailIds = new Set<string>();
   const thumbnailRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const thumbnailRetryCounts = new Map<string, number>();
@@ -61,7 +62,6 @@
   $: images = gallery?.images || [];
   $: currentPage = gallery?.page || 1;
   $: totalPages = Math.max(gallery?.total_pages || 1, 1);
-  $: pageInput = String(currentPage);
   $: initialLoading = loading && images.length === 0;
   $: busy = loading || Boolean(operationStatus);
   $: selectedAllFiltered = selectionTokenCount > 0;
@@ -101,38 +101,6 @@
     event.preventDefault();
     event.stopPropagation();
     action();
-  }
-
-  function clampPage(page: number) {
-    return Math.min(Math.max(page, 1), totalPages);
-  }
-
-  function commitPageInput() {
-    const value = pageInput.trim();
-    const requestedPage = /^\d+$/.test(value) ? Number.parseInt(value, 10) : Number.NaN;
-    if (!Number.isFinite(requestedPage)) {
-      pageInput = String(currentPage);
-      return;
-    }
-
-    const nextPage = clampPage(requestedPage);
-    pageInput = String(nextPage);
-    if (nextPage !== currentPage) onPage(nextPage);
-  }
-
-  function handlePageInputKeydown(event: KeyboardEvent) {
-    if (event.key !== 'Enter') return;
-    event.preventDefault();
-    commitPageInput();
-  }
-
-  function handlePageInputBlur() {
-    commitPageInput();
-  }
-
-  function handleSearchInput(event: Event) {
-    const value = (event.currentTarget as HTMLInputElement).value;
-    onFilter('prompt', value);
   }
 
   function galleryImageSrc(image: GalleryEntry) {
@@ -212,7 +180,7 @@
   });
 </script>
 
-<section class="rounded-2xl border border-stone-200 bg-white/80 p-4 shadow-sm shadow-stone-200/60 sm:p-5 dark:border-zinc-800 dark:bg-zinc-900/60 dark:shadow-none">
+<section class="app-section px-1 py-1 sm:px-0">
   <div class="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
     <div>
       <h2 class="text-sm font-semibold text-stone-950 dark:text-zinc-100">{$t.gallery.title}</h2>
@@ -253,81 +221,7 @@
     </div>
   </div>
 
-  <div class="mb-4 rounded-xl border border-stone-200 bg-stone-50/75 p-2.5 dark:border-zinc-800 dark:bg-zinc-950/35">
-    <div class="mb-2 flex items-center justify-between gap-3 px-1">
-      <div class="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-stone-500 dark:text-zinc-400">
-        <span class="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>
-        {$t.gallery.filters}
-      </div>
-      {#if hasFilters}
-        <button type="button" class="control-focus rounded-md px-2 py-1 text-xs font-medium text-emerald-700 hover:bg-emerald-500/10 hover:text-emerald-800 dark:text-emerald-300 dark:hover:text-emerald-200" on:click={onResetFilters}>{$t.gallery.resetFilters}</button>
-      {/if}
-    </div>
-
-    <div class="grid gap-2">
-      <div class="grid gap-2 xl:grid-cols-[minmax(220px,1.6fr)_minmax(160px,1fr)_minmax(160px,1fr)_minmax(140px,0.9fr)]">
-        <input
-          type="search"
-          name="gallery_prompt"
-          value={filters.prompt}
-          placeholder={$t.gallery.filterPrompt}
-          autocomplete="off"
-          aria-label={$t.gallery.filterPrompt}
-          class="control-focus h-10 min-w-0 rounded-lg border border-stone-200 bg-white px-3 text-sm text-stone-900 shadow-sm shadow-stone-200/40 focus:border-emerald-500 dark:border-zinc-800 dark:bg-zinc-900/80 dark:text-zinc-100 dark:shadow-none"
-          on:input={handleSearchInput}
-        />
-        <select value={filters.model} aria-label={$t.common.model} class="control-focus form-select min-w-0 border-stone-200 bg-white shadow-sm shadow-stone-200/40 focus:border-emerald-500 dark:border-zinc-800 dark:bg-zinc-900/80 dark:text-zinc-100 dark:shadow-none" on:change={(event) => onFilter('model', event.currentTarget.value)}>
-          <option value="">{$t.gallery.allModels}</option>
-          {#each gallery?.filter_options.models || [] as model}
-            <option value={model}>{model}</option>
-          {/each}
-        </select>
-        <select value={filters.preset} aria-label={$t.common.preset} class="control-focus form-select min-w-0 border-stone-200 bg-white shadow-sm shadow-stone-200/40 focus:border-emerald-500 dark:border-zinc-800 dark:bg-zinc-900/80 dark:text-zinc-100 dark:shadow-none" on:change={(event) => onFilter('preset', event.currentTarget.value)}>
-          <option value="">{$t.gallery.allPresets}</option>
-          {#each gallery?.filter_options.presets || [] as preset}
-            <option value={preset}>{preset}</option>
-          {/each}
-        </select>
-        <select value={filters.size} aria-label={$t.common.size} class="control-focus form-select min-w-0 border-stone-200 bg-white shadow-sm shadow-stone-200/40 focus:border-emerald-500 dark:border-zinc-800 dark:bg-zinc-900/80 dark:text-zinc-100 dark:shadow-none" on:change={(event) => onFilter('size', event.currentTarget.value)}>
-          <option value="">{$t.gallery.allSizes}</option>
-          {#each gallery?.filter_options.sizes || [] as size}
-            <option value={size}>{size}</option>
-          {/each}
-        </select>
-      </div>
-
-      <div class="grid gap-2 xl:grid-cols-[minmax(0,1fr)_minmax(210px,0.45fr)]">
-        <div class="grid min-w-0 grid-cols-[1fr_auto_1fr] items-center rounded-lg border border-stone-200 bg-white shadow-sm shadow-stone-200/40 dark:border-zinc-800 dark:bg-zinc-900/80 dark:shadow-none" role="group" aria-label={$t.gallery.dateRange}>
-          <label class="sr-only" for="gallery-date-from">{$t.gallery.dateFrom}</label>
-          <input
-            id="gallery-date-from"
-            type="date"
-            value={filters.dateFrom}
-            aria-label={$t.gallery.dateFrom}
-            placeholder={$t.gallery.dateFrom}
-            class="control-focus h-10 min-w-0 border-0 bg-transparent px-2 text-sm text-stone-900 focus:border-emerald-500 dark:text-zinc-100"
-            on:change={(event) => onFilter('dateFrom', event.currentTarget.value)}
-          />
-          <span class="px-1 text-xs font-medium text-stone-400 dark:text-zinc-600" aria-hidden="true">-</span>
-          <label class="sr-only" for="gallery-date-to">{$t.gallery.dateTo}</label>
-          <input
-            id="gallery-date-to"
-            type="date"
-            value={filters.dateTo}
-            aria-label={$t.gallery.dateTo}
-            placeholder={$t.gallery.dateTo}
-            class="control-focus h-10 min-w-0 border-0 bg-transparent px-2 text-sm text-stone-900 focus:border-emerald-500 dark:text-zinc-100"
-            on:change={(event) => onFilter('dateTo', event.currentTarget.value)}
-          />
-        </div>
-
-        <label class={`control-focus flex h-10 min-w-0 items-center justify-center gap-2 rounded-lg border px-3 text-sm font-medium shadow-sm shadow-stone-200/40 transition-colors dark:shadow-none ${filters.favorite ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-700 dark:text-emerald-200' : 'border-stone-200 bg-white text-stone-700 hover:bg-stone-100 dark:border-zinc-800 dark:bg-zinc-900/80 dark:text-zinc-300 dark:hover:bg-zinc-800'}`}>
-          <input type="checkbox" class="control-focus accent-emerald-500" checked={filters.favorite} on:change={(event) => onFilter('favorite', event.currentTarget.checked)} />
-          <span class="whitespace-nowrap">{$t.gallery.favorites}</span>
-        </label>
-      </div>
-    </div>
-  </div>
+  <GalleryFilterToolbar {gallery} {filters} {onFilter} onReset={onResetFilters} />
 
   {#if selectionMode}
     <div class="mb-4 flex flex-col gap-3 rounded-xl border border-emerald-500/30 bg-emerald-500/5 p-3 sm:flex-row sm:items-center sm:justify-between">
@@ -496,31 +390,6 @@
       </div>
     </div>
 
-    <div class="mt-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-      <button type="button" disabled={loading || !gallery?.has_prev} class="control-focus rounded-lg border border-stone-300 px-3 py-2 text-xs text-stone-700 hover:bg-stone-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" on:click={() => onPage(clampPage(currentPage - 1), 'prev')}>
-        {$t.gallery.previous}
-      </button>
-      <label class="flex items-center justify-center gap-2 text-xs text-stone-500 dark:text-zinc-500">
-        <span>{$t.gallery.pageInputPrefix}</span>
-        <input
-          type="number"
-          min="1"
-          max={totalPages}
-          inputmode="numeric"
-          value={pageInput}
-          disabled={loading}
-          aria-label={$t.gallery.jumpPageLabel}
-          title={$t.gallery.jumpPageHint(totalPages)}
-          class="control-focus h-9 w-16 rounded-lg border border-stone-200 bg-stone-50 px-2 text-center text-sm text-stone-900 focus:border-emerald-500 disabled:opacity-50 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-100"
-          on:input={(event) => (pageInput = event.currentTarget.value)}
-          on:keydown={handlePageInputKeydown}
-          on:blur={handlePageInputBlur}
-        />
-        <span>{$t.gallery.pageInputSuffix(totalPages)}</span>
-      </label>
-      <button type="button" disabled={loading || !gallery?.has_next} class="control-focus rounded-lg border border-stone-300 px-3 py-2 text-xs text-stone-700 hover:bg-stone-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" on:click={() => onPage(clampPage(currentPage + 1), 'next')}>
-        {$t.gallery.next}
-      </button>
-    </div>
+    <GalleryPagination {currentPage} {totalPages} hasPrevious={Boolean(gallery?.has_prev)} hasNext={Boolean(gallery?.has_next)} {loading} {onPage} />
   {/if}
 </section>

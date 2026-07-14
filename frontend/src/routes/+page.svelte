@@ -2,20 +2,12 @@
   import { onMount } from 'svelte';
   import AccessGate from '$lib/components/AccessGate.svelte';
   import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
-  import EditPreviewModal from '$lib/components/EditPreviewModal.svelte';
   import EditSourcePicker from '$lib/components/EditSourcePicker.svelte';
   import GalleryGrid from '$lib/components/GalleryGrid.svelte';
   import Header from '$lib/components/Header.svelte';
-  import ImagePromptDialog from '$lib/components/ImagePromptDialog.svelte';
-  import JobHistoryDrawer from '$lib/components/JobHistoryDrawer.svelte';
-  import Lightbox from '$lib/components/Lightbox.svelte';
   import PreviewPanel from '$lib/components/PreviewPanel.svelte';
   import AiAssistantPanel from '$lib/components/AiAssistantPanel.svelte';
   import PromptForm from '$lib/components/PromptForm.svelte';
-  import PromptOptimizerAssistant from '$lib/components/PromptOptimizerAssistant.svelte';
-  import PromptSnippetsDrawer from '$lib/components/PromptSnippetsDrawer.svelte';
-  import SettingsDrawer from '$lib/components/SettingsDrawer.svelte';
-  import SizeDialog from '$lib/components/SizeDialog.svelte';
   import ToastHost from '$lib/components/ToastHost.svelte';
   import { apiFetch } from '$lib/api/client';
   import { language, t } from '$lib/i18n';
@@ -41,7 +33,6 @@
   import { confirmStore } from '$lib/stores/confirm';
   import { editSourceStore, MAX_EDIT_SOURCE_IMAGES } from '$lib/stores/editSource';
   import { galleryActivityStore, galleryStore } from '$lib/stores/gallery';
-  import { readGalleryUrlState, writeGalleryUrlState } from '$lib/stores/galleryUrlState';
   import { jobsStore } from '$lib/stores/jobs';
   import { lightboxStore } from '$lib/stores/lightbox';
   import { DEFAULT_PROMPT_MODEL, initialPromptFormState, previewStore, type PromptFormState } from '$lib/stores/preview';
@@ -51,6 +42,8 @@
   import { versionStore } from '$lib/stores/version';
   import { copyText, displayImageSize, imageUrl } from '$lib/utils/format';
   import { buildPromptOptimizeRequest } from '$lib/utils/promptOptimizer';
+  import { createLazyComponent } from '$lib/utils/lazyComponent';
+  import { createUrlSyncScheduler, readPageUrl, writePageUrl, type JobsTab } from '$lib/utils/pageUrlSync';
   import {
     galleryEntryToPromptForm,
     galleryEntryToPromptOnly,
@@ -60,7 +53,50 @@
     normalizeSubmissionQuantity
   } from '$lib/utils/promptForm';
 
-  type JobsTab = 'running' | 'history';
+  type LazyPanel = 'settings' | 'jobs' | 'snippets' | 'imagePrompt' | 'lightbox' | 'size' | 'editPreview' | 'optimizer';
+
+  const lazyPanels = {
+    settings: createLazyComponent(
+      () => import('$lib/components/SettingsDrawer.svelte'),
+      () => import('$lib/components/SettingsDrawer.svelte?lazy-retry')
+    ),
+    jobs: createLazyComponent(
+      () => import('$lib/components/JobHistoryDrawer.svelte'),
+      () => import('$lib/components/JobHistoryDrawer.svelte?lazy-retry')
+    ),
+    snippets: createLazyComponent(
+      () => import('$lib/components/PromptSnippetsDrawer.svelte'),
+      () => import('$lib/components/PromptSnippetsDrawer.svelte?lazy-retry')
+    ),
+    imagePrompt: createLazyComponent(
+      () => import('$lib/components/ImagePromptDialog.svelte'),
+      () => import('$lib/components/ImagePromptDialog.svelte?lazy-retry')
+    ),
+    lightbox: createLazyComponent(
+      () => import('$lib/components/Lightbox.svelte'),
+      () => import('$lib/components/Lightbox.svelte?lazy-retry')
+    ),
+    size: createLazyComponent(
+      () => import('$lib/components/SizeDialog.svelte'),
+      () => import('$lib/components/SizeDialog.svelte?lazy-retry')
+    ),
+    editPreview: createLazyComponent(
+      () => import('$lib/components/EditPreviewModal.svelte'),
+      () => import('$lib/components/EditPreviewModal.svelte?lazy-retry')
+    ),
+    optimizer: createLazyComponent(
+      () => import('$lib/components/PromptOptimizerAssistant.svelte'),
+      () => import('$lib/components/PromptOptimizerAssistant.svelte?lazy-retry')
+    )
+  } satisfies Record<LazyPanel, ReturnType<typeof createLazyComponent>>;
+  const settingsPanel = lazyPanels.settings;
+  const jobsPanel = lazyPanels.jobs;
+  const snippetsPanel = lazyPanels.snippets;
+  const imagePromptPanel = lazyPanels.imagePrompt;
+  const lightboxPanel = lazyPanels.lightbox;
+  const sizePanel = lazyPanels.size;
+  const editPreviewPanel = lazyPanels.editPreview;
+  const optimizerPanel = lazyPanels.optimizer;
 
   let jobsTab: JobsTab = 'running';
   let form: PromptFormState = { ...initialPromptFormState };
@@ -70,12 +106,6 @@
   let lastActivePresetId = '';
   let lastActivePresetDefaultModel = DEFAULT_PROMPT_MODEL;
   let lastActivePresetDefaultResponseFormat: ResponseFormatDefault = initialPromptFormState.responseFormat;
-  let urlSyncReady = false;
-  let applyingUrlState = false;
-  let urlSyncQueued = false;
-  let queuedUrlSyncMode: 'replace' | 'push' = 'replace';
-  let urlSyncTimer: ReturnType<typeof setTimeout> | null = null;
-  let requestedUrlSyncMode: 'replace' | 'push' | null = null;
   let lightboxLookupSeq = 0;
   let lightboxAiMetadataSeq = 0;
   let lightboxAiController: AbortController | null = null;
@@ -84,6 +114,20 @@
   let jobDiagnoses: Record<string, AssistantJobDiagnoseResponse> = {};
   let lastActivePresetApiPath: ApiPath = initialPromptFormState.apiPath;
   let optimizingPrompt = false;
+  let loadingPanel: LazyPanel | null = null;
+  let lazyLoadSequence = 0;
+  const panelFocusTargets: Partial<Record<LazyPanel, HTMLElement>> = {};
+  const urlSync = createUrlSyncScheduler((mode) => {
+    writePageUrl(
+      {
+        page: $galleryStore.page,
+        filters: $galleryStore.filters,
+        imageId: $lightboxStore.image?.id || null,
+        jobsTab: $uiStore.jobsOpen ? jobsTab : null
+      },
+      mode
+    );
+  });
 
   $: activeJobsCount = $jobsStore.jobs.length;
   $: lightboxImages = $galleryStore.gallery?.images || [];
@@ -131,11 +175,12 @@
       r2BackupSettings.has_secret_access_key
   );
   $: syncFormDefaultsToActivePreset($settingsStore.settings);
+  $: if (optimizerAssistantEnabled) void ensurePanel('optimizer', false);
 
   async function loadInitialData() {
     await Promise.all([settingsStore.loadSettings(), jobsStore.loadJobs(), applyUrlStateToApp()]);
-    urlSyncReady = true;
-    syncUrlState();
+    urlSync.setReady();
+    urlSync.flush();
     jobsStore.startJobsEvents();
   }
 
@@ -156,62 +201,54 @@
     showToast(errorMessage(error, fallback), 'error');
   }
 
-  function syncAfterGalleryMutation(mode: 'replace' | 'push' = 'replace', debounceMs = 0) {
-    requestUrlSync(mode);
-    queueUrlSync(mode, debounceMs);
-  }
-
-  function syncUrlState(mode: 'replace' | 'push' = 'replace') {
-    if (!urlSyncReady || applyingUrlState || typeof window === 'undefined') return;
-
-    const url = new URL(window.location.href);
-    writeGalleryUrlState(url.searchParams, $galleryStore.page, $galleryStore.filters);
-
-    if ($lightboxStore.image) url.searchParams.set('image', $lightboxStore.image.id);
-    else url.searchParams.delete('image');
-
-    if ($uiStore.jobsOpen) url.searchParams.set('jobs', jobsTab);
-    else url.searchParams.delete('jobs');
-
-    const nextUrl = `${url.pathname}${url.search}${url.hash}`;
-    const currentUrl = `${window.location.pathname}${window.location.search}${window.location.hash}`;
-    if (nextUrl === currentUrl) return;
-    window.history[mode === 'push' ? 'pushState' : 'replaceState']({}, '', nextUrl);
-  }
-
-  function requestUrlSync(mode: 'replace' | 'push' = 'replace') {
-    if (mode === 'push') requestedUrlSyncMode = 'push';
-    else if (!requestedUrlSyncMode) requestedUrlSyncMode = 'replace';
-  }
-
-  function queueUrlSync(mode: 'replace' | 'push' = 'replace', debounceMs = 0) {
-    if (urlSyncTimer) {
-      clearTimeout(urlSyncTimer);
-      urlSyncTimer = null;
+  async function ensurePanel(panel: LazyPanel, showLoading = true, onRetry?: () => void) {
+    const sequence = ++lazyLoadSequence;
+    if (showLoading) loadingPanel = panel;
+    try {
+      await lazyPanels[panel].load();
+      return true;
+    } catch {
+      lazyPanels[panel].reset();
+      showToast($t.common.loadFeatureFailed, 'error', {
+        actionLabel: $t.common.retry,
+        onAction: onRetry || (() => void ensurePanel(panel))
+      });
+      return false;
+    } finally {
+      if (sequence === lazyLoadSequence && loadingPanel === panel) loadingPanel = null;
     }
-    if (debounceMs > 0 && mode !== 'push') {
-      urlSyncTimer = setTimeout(() => {
-        urlSyncTimer = null;
-        queueUrlSync(mode);
-      }, debounceMs);
-      return;
-    }
-    if (mode === 'push') queuedUrlSyncMode = 'push';
-    if (requestedUrlSyncMode === 'push') queuedUrlSyncMode = 'push';
-    if (urlSyncQueued) return;
-    urlSyncQueued = true;
+  }
+
+  function prefetchPanel(panel: LazyPanel) {
+    void lazyPanels[panel].prefetch();
+  }
+
+  function rememberPanelFocus(panel: LazyPanel) {
+    if (panelFocusTargets[panel] || typeof document === 'undefined') return;
+    const active = document.activeElement;
+    if (active instanceof HTMLElement) panelFocusTargets[panel] = active;
+  }
+
+  function restorePanelFocus(panel: LazyPanel) {
+    const target = panelFocusTargets[panel];
+    delete panelFocusTargets[panel];
     queueMicrotask(() => {
-      urlSyncQueued = false;
-      const nextMode = queuedUrlSyncMode;
-      queuedUrlSyncMode = 'replace';
-      requestedUrlSyncMode = null;
-      syncUrlState(nextMode);
+      if (target?.isConnected) target.focus();
     });
   }
 
-  function parseJobsTab(value: string | null): JobsTab | null {
-    if (value === 'history' || value === 'running') return value;
-    return null;
+  async function openUiPanel<K extends keyof typeof $uiStore>(panel: LazyPanel, key: K) {
+    rememberPanelFocus(panel);
+    if (await ensurePanel(panel, true, () => void openUiPanel(panel, key))) setUi(key, true as (typeof $uiStore)[K]);
+  }
+
+  function closeUiPanel<K extends keyof typeof $uiStore>(panel: LazyPanel, key: K) {
+    setUi(key, false as (typeof $uiStore)[K]);
+    restorePanelFocus(panel);
+  }
+
+  function syncAfterGalleryMutation(mode: 'replace' | 'push' = 'replace', debounceMs = 0) {
+    urlSync.schedule(mode, debounceMs);
   }
 
   async function syncLightboxFromUrl(imageId: string | null | undefined) {
@@ -220,6 +257,8 @@
       lightboxStore.close();
       return;
     }
+
+    if (!(await ensurePanel('lightbox'))) return;
 
     const existing = $galleryStore.gallery?.images.find((image) => image.id === nextImageId);
     if (existing) {
@@ -242,10 +281,12 @@
     }
   }
 
-  function openLightbox(image: GalleryEntry) {
+  async function openLightbox(image: GalleryEntry) {
+    rememberPanelFocus('lightbox');
+    if (!(await ensurePanel('lightbox'))) return;
     lightboxStore.open(image);
     void loadLightboxAiMetadata(image.id);
-    queueUrlSync('push');
+    urlSync.schedule('push');
   }
 
   function closeLightbox() {
@@ -254,7 +295,8 @@
     lightboxAiController?.abort();
     lightboxAiController = null;
     lightboxAiMetadata = null;
-    queueUrlSync('replace');
+    urlSync.schedule('replace');
+    restorePanelFocus('lightbox');
   }
 
   async function loadLightboxAiMetadata(imageId: string) {
@@ -348,7 +390,7 @@
     if (nextIndex >= 0 && nextIndex < images.length) {
       lightboxStore.open(images[nextIndex]);
       void loadLightboxAiMetadata(images[nextIndex].id);
-      queueUrlSync('replace');
+      urlSync.schedule('replace');
       return;
     }
 
@@ -363,7 +405,7 @@
       if (nextImage) {
         lightboxStore.open(nextImage);
         void loadLightboxAiMetadata(nextImage.id);
-        queueUrlSync('replace');
+        urlSync.schedule('replace');
       }
     } catch (error) {
       showError(error);
@@ -372,7 +414,9 @@
     }
   }
 
-  function openJobsDrawer(tab: JobsTab = jobsTab) {
+  async function openJobsDrawer(tab: JobsTab = jobsTab) {
+    rememberPanelFocus('jobs');
+    if (!(await ensurePanel('jobs'))) return;
     jobsTab = tab;
     setUi('jobsOpen', true);
     if (tab === 'history' && !$jobsStore.historyLoaded && !$jobsStore.historyLoading) {
@@ -380,31 +424,31 @@
     } else if (tab === 'history' && $jobsStore.historyNeedsRefresh && !$jobsStore.historyLoading) {
       void jobsStore.refreshHistoryIfLoaded();
     }
-    requestUrlSync();
-    queueUrlSync();
+    urlSync.schedule();
   }
 
   function closeJobsDrawer() {
-    setUi('jobsOpen', false);
-    requestUrlSync();
-    queueUrlSync();
+    closeUiPanel('jobs', 'jobsOpen');
+    urlSync.schedule();
   }
 
-  function openPromptSnippetsDrawer() {
+  async function openPromptSnippetsDrawer() {
+    rememberPanelFocus('snippets');
+    if (!(await ensurePanel('snippets'))) return;
     setUi('promptSnippetsOpen', true);
     void loadPromptSnippets();
   }
 
   function closePromptSnippetsDrawer() {
-    setUi('promptSnippetsOpen', false);
+    closeUiPanel('snippets', 'promptSnippetsOpen');
   }
 
-  function openImagePromptDialog() {
-    setUi('imagePromptOpen', true);
+  async function openImagePromptDialog() {
+    await openUiPanel('imagePrompt', 'imagePromptOpen');
   }
 
   function closeImagePromptDialog() {
-    setUi('imagePromptOpen', false);
+    closeUiPanel('imagePrompt', 'imagePromptOpen');
   }
 
   function setJobsTab(tab: JobsTab) {
@@ -414,22 +458,20 @@
     } else if (tab === 'history' && $jobsStore.historyNeedsRefresh && !$jobsStore.historyLoading) {
       void jobsStore.refreshHistoryIfLoaded();
     }
-    requestUrlSync();
-    queueUrlSync();
+    urlSync.schedule();
   }
 
   async function applyUrlStateToApp() {
     if (typeof window === 'undefined') return;
     const url = new URL(window.location.href);
-    const state = readGalleryUrlState(url.searchParams);
-    const nextJobsTab = parseJobsTab(url.searchParams.get('jobs'));
-    const imageId = url.searchParams.get('image');
+    const { gallery: state, jobsTab: nextJobsTab, imageId } = readPageUrl(url);
 
-    applyingUrlState = true;
+    urlSync.setApplying(true);
     try {
       galleryStore.setPageAndFilters(state.page, state.filters);
       jobsTab = nextJobsTab || 'running';
-      setUi('jobsOpen', Boolean(nextJobsTab));
+      if (nextJobsTab && (await ensurePanel('jobs'))) setUi('jobsOpen', true);
+      else setUi('jobsOpen', false);
 
       if (nextJobsTab === 'history' && !$jobsStore.historyLoaded && !$jobsStore.historyLoading) {
         void jobsStore.loadJobHistory();
@@ -438,10 +480,9 @@
       await galleryStore.loadGallery(state.page);
       await syncLightboxFromUrl(imageId);
     } finally {
-      applyingUrlState = false;
+      urlSync.setApplying(false);
     }
-    requestUrlSync();
-    queueUrlSync();
+    urlSync.schedule();
   }
 
   function setUi<K extends keyof typeof $uiStore>(key: K, value: (typeof $uiStore)[K]) {
@@ -918,18 +959,19 @@
     editSourceStore.handleFile(event, previewStore.setError);
   }
 
-  function openEditPreview(sourceId: string) {
+  async function openEditPreview(sourceId: string) {
+    rememberPanelFocus('editPreview');
     const upload = $editSourceStore.files.find((source) => source.id === sourceId);
     if (upload) {
       editPreviewUrl = upload.previewUrl;
       editPreviewLabel = upload.previewLabel;
-      setUi('editPreviewOpen', true);
+      if (await ensurePanel('editPreview')) setUi('editPreviewOpen', true);
       return;
     }
     if ($editSourceStore.selectedGalleryImageId === sourceId && $editSourceStore.galleryPreviewUrl) {
       editPreviewUrl = $editSourceStore.galleryPreviewUrl;
       editPreviewLabel = $editSourceStore.galleryPreviewLabel || $editSourceStore.galleryLabel;
-      setUi('editPreviewOpen', true);
+      if (await ensurePanel('editPreview')) setUi('editPreviewOpen', true);
     }
   }
 
@@ -1176,10 +1218,22 @@
       }
     };
     window.addEventListener('keydown', keydown);
+
+    const prefetchCommonPanels = () => {
+      prefetchPanel('settings');
+      prefetchPanel('jobs');
+      prefetchPanel('snippets');
+    };
+    const idleHandle =
+      typeof window.requestIdleCallback === 'function'
+        ? window.requestIdleCallback(prefetchCommonPanels, { timeout: 3000 })
+        : window.setTimeout(prefetchCommonPanels, 1800);
     return () => {
       window.removeEventListener('popstate', popstate);
       window.removeEventListener('keydown', keydown);
-      if (urlSyncTimer) clearTimeout(urlSyncTimer);
+      if (typeof idleHandle === 'number' && 'cancelIdleCallback' in window) window.cancelIdleCallback(idleHandle);
+      else window.clearTimeout(idleHandle);
+      urlSync.destroy();
       jobsStore.cleanup();
       galleryStore.cleanup();
       previewStore.cleanup();
@@ -1211,21 +1265,30 @@
   onOpenPromptSnippets={openPromptSnippetsDrawer}
   onOpenImagePrompt={openImagePromptDialog}
   onOpenJobs={openJobsDrawer}
-  onOpenSettings={() => setUi('settingsOpen', true)}
+  onOpenSettings={() => void openUiPanel('settings', 'settingsOpen')}
+  onPrefetchPromptSnippets={() => prefetchPanel('snippets')}
+  onPrefetchImagePrompt={() => prefetchPanel('imagePrompt')}
+  onPrefetchJobs={() => prefetchPanel('jobs')}
+  onPrefetchSettings={() => prefetchPanel('settings')}
 />
 
 <ConfirmDialog request={$confirmStore.request} />
 
-<ImagePromptDialog
-  open={$uiStore.imagePromptOpen}
-  available={aiAssistantAvailable}
-  onClose={closeImagePromptDialog}
-  onApply={applyImagePrompt}
-  onSave={saveImagePrompt}
-  onCopy={copyImagePrompt}
-/>
+{#if $imagePromptPanel.component}
+  <svelte:component
+    this={$imagePromptPanel.component}
+    open={$uiStore.imagePromptOpen}
+    available={aiAssistantAvailable}
+    onClose={closeImagePromptDialog}
+    onApply={applyImagePrompt}
+    onSave={saveImagePrompt}
+    onCopy={copyImagePrompt}
+  />
+{/if}
 
-<SettingsDrawer
+{#if $settingsPanel.component}
+<svelte:component
+  this={$settingsPanel.component}
   open={$uiStore.settingsOpen}
   settings={$settingsStore.settings}
   saving={$settingsActivityStore.saving}
@@ -1237,7 +1300,7 @@
   promptOptimizerHealthChecking={$settingsActivityStore.promptOptimizerHealthChecking}
   aiAssistantHealth={$settingsActivityStore.aiAssistantHealth}
   aiAssistantHealthChecking={$settingsActivityStore.aiAssistantHealthChecking}
-  onClose={() => setUi('settingsOpen', false)}
+  onClose={() => closeUiPanel('settings', 'settingsOpen')}
   onSave={saveSettings}
   onCreate={createPreset}
   onActivate={activatePreset}
@@ -1254,8 +1317,11 @@
   onLoadOverallConfig={loadOverallConfig}
   onSaveOverallConfig={saveOverallConfig}
 />
+{/if}
 
-<PromptSnippetsDrawer
+{#if $snippetsPanel.component}
+<svelte:component
+  this={$snippetsPanel.component}
   open={$uiStore.promptSnippetsOpen}
   snippets={$promptSnippetsStore.snippets}
   loading={$promptSnippetsStore.loading}
@@ -1269,8 +1335,11 @@
   onUse={usePromptSnippet}
   onCopy={copyPromptSnippet}
 />
+{/if}
 
-<JobHistoryDrawer
+{#if $jobsPanel.component}
+<svelte:component
+  this={$jobsPanel.component}
   open={$uiStore.jobsOpen}
   activeTab={jobsTab}
   jobs={$jobsStore.jobs}
@@ -1297,8 +1366,9 @@
   diagnoses={jobDiagnoses}
   onDiagnoseJob={diagnoseJob}
 />
+{/if}
 
-<main id="main-content" tabindex="-1" class="mx-auto max-w-5xl space-y-6 px-4 py-6 pb-28 sm:px-6 sm:pb-32">
+<main id="main-content" tabindex="-1" class:optimizer-gutter={optimizerAssistantEnabled} class="mx-auto max-w-5xl space-y-6 px-4 py-6 pb-28 sm:px-6 sm:pb-32">
   <ToastHost toast={$toastStore} />
 
   <PromptForm
@@ -1313,7 +1383,7 @@
     onPlanEdit={planEdit}
     onOptimize={optimizePrompt}
     onAppendPromptTag={appendPromptTag}
-    onOpenSize={() => setUi('sizeDialogOpen', true)}
+    onOpenSize={() => void openUiPanel('size', 'sizeDialogOpen')}
   >
     <EditSourcePicker
       slot="edit-source"
@@ -1404,7 +1474,9 @@
   />
 </main>
 
-<PromptOptimizerAssistant
+{#if $optimizerPanel.component}
+<svelte:component
+  this={$optimizerPanel.component}
   enabled={optimizerAssistantEnabled}
   currentPrompt={form.prompt}
   apiPath={form.apiPath}
@@ -1413,8 +1485,11 @@
   quality={form.quality}
   onApplyPrompt={applyOptimizedPrompt}
 />
+{/if}
 
-<Lightbox
+{#if $lightboxPanel.component}
+<svelte:component
+  this={$lightboxPanel.component}
   open={Boolean($lightboxStore.image)}
   image={$lightboxStore.image}
   onClose={closeLightbox}
@@ -1436,12 +1511,25 @@
   onNavigatePrevious={() => navigateLightbox(-1)}
   onNavigateNext={() => navigateLightbox(1)}
 />
+{/if}
 
-<EditPreviewModal
+{#if $editPreviewPanel.component}
+<svelte:component
+  this={$editPreviewPanel.component}
   open={$uiStore.editPreviewOpen}
   url={editPreviewUrl}
   label={editPreviewLabel}
-  onClose={() => setUi('editPreviewOpen', false)}
+  onClose={() => closeUiPanel('editPreview', 'editPreviewOpen')}
 />
+{/if}
 
-<SizeDialog open={$uiStore.sizeDialogOpen} value={form.size} onApply={(nextSize) => (form = { ...form, size: nextSize })} onClose={() => setUi('sizeDialogOpen', false)} />
+{#if $sizePanel.component}
+  <svelte:component this={$sizePanel.component} open={$uiStore.sizeDialogOpen} value={form.size} onApply={(nextSize: string) => (form = { ...form, size: nextSize })} onClose={() => closeUiPanel('size', 'sizeDialogOpen')} />
+{/if}
+
+{#if loadingPanel}
+  <div class="lazy-panel-status" role="status" aria-live="polite">
+    <span class="spinner" aria-hidden="true"></span>
+    <span>{$t.common.loadingFeature}</span>
+  </div>
+{/if}

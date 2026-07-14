@@ -23,6 +23,9 @@
   import { swipeClose } from '$lib/actions/swipeClose';
   import { confirmStore } from '$lib/stores/confirm';
   import { RESPONSE_FORMAT_OPTIONS, normalizeResponseFormat } from '$lib/utils/promptForm';
+  import AiAssistantSettingsSection from '$lib/components/settings/AiAssistantSettingsSection.svelte';
+  import PromptOptimizerSettingsSection from '$lib/components/settings/PromptOptimizerSettingsSection.svelte';
+  import R2SettingsSection from '$lib/components/settings/R2SettingsSection.svelte';
 
   const MASKED_API_KEY_VALUE = '********';
 
@@ -703,169 +706,42 @@
             <span class="mt-1.5 block text-xs text-zinc-500">{$t.settings.webhookUrlHint}</span>
           </label>
 
-          <section class="border-t border-zinc-800 pt-4">
-            <div class="mb-3 flex items-center justify-between gap-3">
-              <div>
-                <h3 class="text-sm font-semibold text-zinc-200">{$t.settings.r2Backup}</h3>
-                <p class="mt-1 text-xs text-zinc-500">{$t.settings.r2BackupHint}</p>
-              </div>
-              <label class="flex items-center gap-2 text-xs font-medium text-zinc-300">
-                <input bind:checked={r2BackupEnabled} type="checkbox" class="control-focus accent-emerald-500" />
-                {$t.settings.r2BackupEnabled}
-              </label>
-            </div>
-            <div class="space-y-4">
-              <label class="block">
-                <span class="mb-1.5 block text-xs font-medium text-zinc-400">{$t.settings.r2EndpointUrl}</span>
-                <input bind:value={r2EndpointUrl} class="control-focus w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2.5 font-mono text-sm text-zinc-100 focus:border-emerald-500" placeholder="https://ACCOUNT_ID.r2.cloudflarestorage.com" />
-              </label>
-              <label class="block">
-                <span class="mb-1.5 block text-xs font-medium text-zinc-400">{$t.settings.r2BucketName}</span>
-                <input bind:value={r2BucketName} class="control-focus w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2.5 font-mono text-sm text-zinc-100 focus:border-emerald-500" />
-              </label>
-              <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                <label class="block">
-                  <span class="mb-1.5 block text-xs font-medium text-zinc-400">{$t.settings.r2Region}</span>
-                  <input bind:value={r2Region} class="control-focus w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2.5 font-mono text-sm text-zinc-100 focus:border-emerald-500" placeholder="auto" />
-                </label>
-                <label class="block">
-                  <span class="mb-1.5 block text-xs font-medium text-zinc-400">{$t.settings.r2KeyPrefix}</span>
-                  <input bind:value={r2KeyPrefix} class="control-focus w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2.5 font-mono text-sm text-zinc-100 focus:border-emerald-500" placeholder="gallery/" />
-                </label>
-              </div>
-              <label class="block">
-                <span class="mb-1.5 block text-xs font-medium text-zinc-400">{$t.settings.r2SyncIntervalHours}</span>
-                <input bind:value={r2SyncIntervalHours} type="number" min="0" step="1" class="control-focus w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2.5 font-mono text-sm text-zinc-100 focus:border-emerald-500" on:blur={normalizeR2SyncIntervalHours} />
-                <span class="mt-1.5 block text-xs text-zinc-500">{$t.settings.r2SyncIntervalHint}</span>
-              </label>
-              <label class="block">
-                <span class="mb-1.5 block text-xs font-medium text-zinc-400">{$t.settings.r2AccessKeyId}</span>
-                <input bind:value={r2AccessKeyId} type={r2AccessKeyIdInputType} class="control-focus w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2.5 font-mono text-sm text-zinc-100 focus:border-emerald-500" />
-                <span class="mt-1.5 block text-xs text-zinc-500">{$t.settings.r2SecretHint}</span>
-              </label>
-              <label class="block">
-                <span class="mb-1.5 block text-xs font-medium text-zinc-400">{$t.settings.r2SecretAccessKey}</span>
-                <input bind:value={r2SecretAccessKey} type={r2SecretAccessKeyInputType} class="control-focus w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2.5 font-mono text-sm text-zinc-100 focus:border-emerald-500" />
-                <span class="mt-1.5 block text-xs text-zinc-500">{$t.settings.r2SecretHint}</span>
-              </label>
-              <button
-                type="button"
-                disabled={r2HealthChecking}
-                class="control-focus w-full rounded-lg border border-zinc-700 px-3 py-2.5 text-sm font-semibold text-zinc-200 transition-colors hover:border-zinc-600 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50"
-                on:click={checkR2Health}
-              >
-                {r2HealthChecking ? $t.settings.r2HealthChecking : $t.settings.r2HealthCheck}
-              </button>
-              {#if r2Health}
-                <div class={`rounded-lg border p-3 text-xs ${healthPanelClass(r2Health.status)}`}>
-                  <div class="flex items-center justify-between gap-3">
-                    <span class="font-semibold">{$t.settings.r2HealthStatus}</span>
-                    <span class={`rounded-full border px-2 py-0.5 text-[11px] font-semibold ${healthBadgeClass(r2Health.status)}`}>
-                      {healthStatusLabel(r2Health.status)}
-                    </span>
-                  </div>
-                  <div class="mt-2 space-y-1.5">
-                    {#each r2Health.checks as check}
-                      <div class="rounded-md border border-zinc-800 bg-zinc-950/50 p-2 text-zinc-300">
-                        <div class="flex items-center justify-between gap-2">
-                          <span class="font-mono text-[11px] text-zinc-500">{check.name}</span>
-                          <span class={`rounded border px-1.5 py-0.5 text-[10px] font-semibold ${healthBadgeClass(check.status)}`}>
-                            {healthStatusLabel(check.status)}
-                          </span>
-                        </div>
-                        <div class="mt-1 leading-relaxed text-zinc-400">{check.message}</div>
-                      </div>
-                    {/each}
-                  </div>
-                </div>
-              {/if}
-            </div>
-          </section>
+          <R2SettingsSection
+            bind:enabled={r2BackupEnabled}
+            bind:endpointUrl={r2EndpointUrl}
+            bind:bucketName={r2BucketName}
+            bind:region={r2Region}
+            bind:keyPrefix={r2KeyPrefix}
+            bind:syncIntervalHours={r2SyncIntervalHours}
+            bind:accessKeyId={r2AccessKeyId}
+            bind:secretAccessKey={r2SecretAccessKey}
+            accessKeyInputType={r2AccessKeyIdInputType}
+            secretKeyInputType={r2SecretAccessKeyInputType}
+            health={r2Health}
+            healthChecking={r2HealthChecking}
+            onNormalizeInterval={normalizeR2SyncIntervalHours}
+            onCheck={checkR2Health}
+          />
 
-          <section class="border-t border-zinc-800 pt-4">
-            <div class="mb-3 flex items-center justify-between gap-3">
-              <div>
-                <h3 class="text-sm font-semibold text-zinc-200">{$t.settings.promptOptimizer}</h3>
-                <p class="mt-1 text-xs text-zinc-500">{$t.settings.promptOptimizerHint}</p>
-              </div>
-              <label class="flex items-center gap-2 text-xs font-medium text-zinc-300">
-                <input bind:checked={promptOptimizerEnabled} type="checkbox" class="control-focus accent-emerald-500" />
-                {$t.settings.promptOptimizerEnabled}
-              </label>
-            </div>
-            <div class="space-y-4">
-              <label class="block">
-                <span class="mb-1.5 block text-xs font-medium text-zinc-400">{$t.settings.promptOptimizerApiUrl}</span>
-                <input bind:value={promptOptimizerApiUrl} class="control-focus w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2.5 font-mono text-sm text-zinc-100 focus:border-emerald-500" placeholder="https://api.openai.com/v1/chat/completions" />
-              </label>
-              <label class="block">
-                <span class="mb-1.5 block text-xs font-medium text-zinc-400">{$t.settings.promptOptimizerModel}</span>
-                <input bind:value={promptOptimizerModel} class="control-focus w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2.5 font-mono text-sm text-zinc-100 focus:border-emerald-500" placeholder="gpt-4o-mini" />
-              </label>
-              <label class="block">
-                <span class="mb-1.5 block text-xs font-medium text-zinc-400">{$t.settings.promptOptimizerTimeout}</span>
-                <input
-                  bind:value={promptOptimizerTimeoutSeconds}
-                  type="number"
-                  min="1"
-                  step="1"
-                  inputmode="numeric"
-                  class="control-focus w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2.5 font-mono text-sm text-zinc-100 focus:border-emerald-500"
-                  on:blur={normalizePromptOptimizerTimeout}
-                />
-              </label>
-              <label class="block">
-                <span class="mb-1.5 block text-xs font-medium text-zinc-400">{$t.settings.promptOptimizerApiKey}</span>
-                <input bind:value={promptOptimizerApiKey} type={promptOptimizerApiKeyInputType} class="control-focus w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2.5 font-mono text-sm text-zinc-100 focus:border-emerald-500" />
-                <span class="mt-1.5 block text-xs text-zinc-500">{$t.settings.apiKeyHint}</span>
-              </label>
-              <button
-                type="button"
-                class="control-focus w-full rounded-lg border border-zinc-700 px-3 py-2.5 text-sm font-semibold text-zinc-200 transition-colors hover:border-zinc-600 hover:bg-zinc-800"
-                on:click={openSystemPromptEditor}
-              >
-                {$t.settings.editSystemPrompt}
-              </button>
-              <button
-                type="button"
-                disabled={promptOptimizerHealthChecking}
-                class="control-focus w-full rounded-lg border border-emerald-500/40 px-3 py-2.5 text-sm font-semibold text-emerald-200 transition-colors hover:bg-emerald-500/10 disabled:cursor-not-allowed disabled:opacity-50"
-                on:click={checkPromptOptimizerHealth}
-              >
-                {promptOptimizerHealthChecking ? $t.settings.promptOptimizerHealthChecking : $t.settings.promptOptimizerHealthCheck}
-              </button>
-            </div>
-          </section>
+          <PromptOptimizerSettingsSection
+            bind:enabled={promptOptimizerEnabled}
+            bind:apiUrl={promptOptimizerApiUrl}
+            bind:model={promptOptimizerModel}
+            bind:timeoutSeconds={promptOptimizerTimeoutSeconds}
+            bind:apiKey={promptOptimizerApiKey}
+            apiKeyInputType={promptOptimizerApiKeyInputType}
+            healthChecking={promptOptimizerHealthChecking}
+            onNormalizeTimeout={normalizePromptOptimizerTimeout}
+            onOpenSystemPrompt={openSystemPromptEditor}
+            onCheck={checkPromptOptimizerHealth}
+          />
 
-          <section class="border-t border-zinc-800 pt-4">
-            <div class="mb-3 flex items-center justify-between gap-3">
-              <div>
-                <h3 class="text-sm font-semibold text-zinc-200">{$t.settings.aiAssistant}</h3>
-                <p class="mt-1 text-xs text-zinc-500">{$t.settings.aiAssistantHint}</p>
-              </div>
-              <label class="flex items-center gap-2 text-xs font-medium text-zinc-300">
-                <input bind:checked={aiAssistantEnabled} type="checkbox" class="control-focus accent-emerald-500" />
-                {$t.settings.aiAssistantEnabled}
-              </label>
-            </div>
-            <div class="space-y-4">
-              <div class="rounded-lg border border-zinc-800 bg-zinc-950/60 p-3 text-xs text-zinc-500">
-                {$t.settings.aiAssistantSharedConfigHint}
-              </div>
-              <label class="block">
-                <span class="mb-1.5 block text-xs font-medium text-zinc-400">{$t.settings.aiAssistantVisionModel}</span>
-                <input bind:value={aiAssistantVisionModel} class="control-focus w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2.5 font-mono text-sm text-zinc-100 focus:border-emerald-500" placeholder="gpt-4o-mini" />
-              </label>
-              <button
-                type="button"
-                disabled={aiAssistantHealthChecking}
-                class="control-focus w-full rounded-lg border border-emerald-500/40 px-3 py-2.5 text-sm font-semibold text-emerald-200 transition-colors hover:bg-emerald-500/10 disabled:cursor-not-allowed disabled:opacity-50"
-                on:click={checkAiAssistantHealth}
-              >
-                {aiAssistantHealthChecking ? $t.settings.aiAssistantHealthChecking : $t.settings.aiAssistantHealthCheck}
-              </button>
-            </div>
-          </section>
+          <AiAssistantSettingsSection
+            bind:enabled={aiAssistantEnabled}
+            bind:visionModel={aiAssistantVisionModel}
+            healthChecking={aiAssistantHealthChecking}
+            onCheck={checkAiAssistantHealth}
+          />
         </div>
       </div>
 

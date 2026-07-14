@@ -868,6 +868,65 @@ test('theme follows system preference, toggles, and persists after reload', asyn
   await expect(page.getByRole('button', { name: 'Switch to dark mode' })).toBeVisible();
 });
 
+test('main workspace hierarchy stays ordered and touch-safe across viewports', async ({ page }) => {
+  await loadApp(page);
+  const headings = ['Prompt', 'AI Assistant', 'Preview', 'Gallery'];
+  const desktopTops: number[] = [];
+  for (const name of headings) {
+    const box = await page.getByRole('heading', { name, exact: true }).boundingBox();
+    desktopTops.push(box?.y ?? -1);
+  }
+  expect(desktopTops).toEqual([...desktopTops].sort((a, b) => a - b));
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: '/tmp/gpt-image-workspace-desktop.png', fullPage: true });
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await expect.poll(() => page.evaluate(() => {
+    const trigger = document.querySelector<HTMLElement>('[data-testid="prompt-optimizer-assistant-trigger"]');
+    if (!trigger) return ['optimizer trigger missing'];
+    const triggerRect = trigger.getBoundingClientRect();
+    return Array.from(document.querySelectorAll<HTMLElement>('main input, main select, main textarea, main button, main a'))
+      .filter((element) => element.offsetParent !== null)
+      .filter((element) => {
+        const rect = element.getBoundingClientRect();
+        return !(rect.right <= triggerRect.left || rect.left >= triggerRect.right || rect.bottom <= triggerRect.top || rect.top >= triggerRect.bottom);
+      })
+      .map((element) => element.getAttribute('aria-label') || element.textContent?.trim().slice(0, 40) || element.tagName);
+  })).toEqual([]);
+  const galleryActions = page.locator('.gallery-icon-action');
+  for (let index = 0; index < Math.min(await galleryActions.count(), 6); index += 1) {
+    const box = await galleryActions.nth(index).boundingBox();
+    expect(box?.width ?? 0).toBeGreaterThanOrEqual(44);
+    expect(box?.height ?? 0).toBeGreaterThanOrEqual(44);
+  }
+  await page.screenshot({ path: '/tmp/gpt-image-workspace-mobile.png', fullPage: true });
+});
+
+test('lazy settings module retries after a first-load failure and reopens instantly', async ({ page }) => {
+  const settingsModulePattern = /SettingsDrawer/;
+  await mockApi(page);
+  await page.route(settingsModulePattern, async (route) => {
+    await route.abort('failed');
+  });
+  await page.goto('/');
+  await expect(page.getByRole('heading', { name: 'Prompt', exact: true })).toBeVisible();
+
+  const settingsButton = page.getByRole('button', { name: 'Settings' });
+  await settingsButton.click();
+  await expect(page.getByText('This panel could not be loaded.')).toBeVisible();
+  await page.unroute(settingsModulePattern);
+  await page.getByRole('button', { name: 'Retry' }).click();
+
+  const drawer = page.getByRole('dialog', { name: 'Settings' });
+  await expect(drawer).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(drawer).toBeHidden();
+  await expect(settingsButton).toBeFocused();
+  await settingsButton.click();
+  await expect(drawer).toBeVisible();
+});
+
 test('settings drawer traps focus and key form controls have accessible names', async ({ page }) => {
   await loadApp(page);
 
@@ -1549,8 +1608,11 @@ test('reverse prompt header and dialog stay within a mobile viewport', async ({ 
     await expect(action).toBeVisible();
     const box = await action.boundingBox();
     expect(box?.x ?? -1).toBeGreaterThanOrEqual(0);
+    expect(box?.width ?? 0).toBeGreaterThanOrEqual(44);
+    expect(box?.height ?? 0).toBeGreaterThanOrEqual(44);
     expect((box?.x ?? 0) + (box?.width ?? 0)).toBeLessThanOrEqual(390);
   }
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 
   await headerActions[0].click();
   const dialog = page.getByRole('dialog', { name: 'Reverse prompt' });

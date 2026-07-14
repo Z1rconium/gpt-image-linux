@@ -42,7 +42,7 @@
   $: if (form.outputFormat === 'png' && form.outputCompression !== '') form = { ...form, outputCompression: '' };
 </script>
 
-<section class="rounded-2xl border border-stone-200 bg-white/80 p-4 shadow-sm shadow-stone-200/60 sm:p-5 dark:border-zinc-800 dark:bg-zinc-900/60 dark:shadow-none">
+<section class="app-surface p-4 sm:p-5">
   <div class="mb-4 flex items-start justify-between gap-4">
     <div>
       <h2 class="text-sm font-semibold text-stone-950 dark:text-zinc-100">{$t.promptForm.title}</h2>
@@ -78,7 +78,7 @@
           spellcheck="false"
           aria-label={$t.common.prompt}
           placeholder={$t.promptForm.placeholder}
-          class="control-focus h-full min-h-[13rem] w-full flex-1 resize-y rounded-xl border border-stone-200 bg-stone-50 px-4 py-3 pb-8 text-sm leading-6 text-stone-900 focus:border-emerald-500 lg:resize-none dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-100"
+          class="ui-field h-full min-h-[13rem] flex-1 resize-y px-4 py-3 pb-8 leading-6 lg:resize-none"
           use:plainTextInput
         ></textarea>
         <div class="pointer-events-none absolute bottom-3 right-4 text-xs text-stone-500 dark:text-zinc-500">{promptLen}/4000</div>
@@ -166,18 +166,18 @@
   <div class="mt-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
     <slot name="edit-source" />
     <div class="flex gap-2">
-      <button type="button" disabled={loading} class="control-focus rounded-xl bg-stone-900 px-4 py-3 text-sm font-semibold text-white hover:bg-stone-700 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600" on:click={onEdit}>
+      <button type="button" disabled={loading} class="ui-button-secondary px-4" on:click={onEdit}>
         {$t.promptForm.edits}
       </button>
       <button
         type="button"
         disabled={loading || editPlanning || !editPlannerEnabled || !form.prompt.trim()}
-        class="control-focus rounded-xl border border-cyan-500/35 px-4 py-3 text-sm font-semibold text-cyan-700 hover:bg-cyan-500/10 disabled:cursor-not-allowed disabled:border-stone-300 disabled:text-stone-400 disabled:opacity-60 dark:text-cyan-200 dark:disabled:border-zinc-700 dark:disabled:text-zinc-500"
+        class="ui-button-secondary px-4"
         on:click={onPlanEdit}
       >
         {editPlanning ? $t.promptForm.planningEdit : $t.promptForm.planEdit}
       </button>
-      <button type="button" disabled={loading} class="control-focus rounded-xl bg-emerald-600 px-4 py-3 text-sm font-semibold text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50" on:click={onGenerate}>
+      <button type="button" disabled={loading} class="ui-button-primary px-4" on:click={onGenerate}>
         {$t.promptForm.generate}
       </button>
     </div>

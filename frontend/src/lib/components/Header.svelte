@@ -15,6 +15,10 @@
   export let onOpenImagePrompt: () => void = () => {};
   export let onOpenJobs: () => void = () => {};
   export let onOpenSettings: () => void = () => {};
+  export let onPrefetchPromptSnippets: () => void = () => {};
+  export let onPrefetchImagePrompt: () => void = () => {};
+  export let onPrefetchJobs: () => void = () => {};
+  export let onPrefetchSettings: () => void = () => {};
 
   $: versionTitle = hasVersionUpdate
     ? $t.header.versionUpdateTitle(version, latestVersion)
@@ -36,8 +40,8 @@
       >
         {$t.language.button}
       </button>
-      <div class="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-emerald-400 to-cyan-500">
-        <span class="text-sm font-black text-zinc-950">I</span>
+      <div class="flex h-8 w-8 items-center justify-center rounded-md bg-emerald-600" aria-hidden="true">
+        <span class="text-sm font-bold text-white">I</span>
       </div>
       <div class="min-w-0">
         <div class="flex flex-wrap items-center gap-2">
@@ -90,6 +94,8 @@
         aria-label={$t.header.reversePrompt}
         aria-controls="image-prompt-dialog"
         aria-expanded={imagePromptOpen}
+        on:mouseenter={onPrefetchImagePrompt}
+        on:focus={onPrefetchImagePrompt}
         on:click={() => onOpenImagePrompt()}
       >
         <span class="text-sm font-semibold leading-none">{$t.header.reversePromptShort}</span>
@@ -101,6 +107,8 @@
         aria-label={$t.header.promptSnippets}
         aria-controls="prompt-snippets-drawer"
         aria-expanded={promptSnippetsOpen}
+        on:mouseenter={onPrefetchPromptSnippets}
+        on:focus={onPrefetchPromptSnippets}
         on:click={() => onOpenPromptSnippets()}
       >
         <span class="text-sm font-semibold leading-none">{$t.header.prompts}</span>
@@ -112,6 +120,8 @@
         aria-label={$t.header.jobHistory}
         aria-controls="jobs-drawer"
         aria-expanded={jobsOpen}
+        on:mouseenter={onPrefetchJobs}
+        on:focus={onPrefetchJobs}
         on:click={() => onOpenJobs()}
       >
         <span class="text-sm font-semibold leading-none">{$t.header.jobs}</span>
@@ -128,6 +138,8 @@
         aria-label={$t.common.settings}
         aria-controls="settings-drawer"
         aria-expanded={settingsOpen}
+        on:mouseenter={onPrefetchSettings}
+        on:focus={onPrefetchSettings}
         on:click={() => onOpenSettings()}
       >
         <span class="text-sm font-semibold leading-none">{$t.header.settingsShort}</span>

@@ -395,7 +395,7 @@
     bind:this={triggerButton}
     data-testid="prompt-optimizer-assistant-trigger"
     class:cursor-grabbing={dragging}
-    class="control-focus fixed bottom-4 right-4 z-40 inline-flex touch-none select-none items-center gap-2 rounded-full border border-emerald-500/30 bg-emerald-600 px-4 py-3 text-sm font-semibold text-white shadow-[0_18px_36px_-24px_rgba(16,185,129,0.6)] transition-transform hover:bg-emerald-500 active:scale-[0.98] sm:bottom-6 sm:right-6"
+    class="control-focus fixed bottom-4 right-3 z-40 inline-flex h-11 w-11 touch-none select-none items-center justify-center gap-2 rounded-lg border border-emerald-500/30 bg-emerald-600 px-0 text-sm font-semibold text-white shadow-[0_18px_36px_-24px_rgba(16,185,129,0.6)] transition-transform hover:bg-emerald-500 active:scale-[0.98] sm:bottom-6 sm:right-6 sm:w-auto sm:rounded-full sm:px-4"
     aria-haspopup="dialog"
     aria-expanded={open}
     aria-label={$t.promptOptimizerAssistant.open}
@@ -416,7 +416,7 @@
       <path d="M8 8.5 9.5 5 11 8.5 14.5 10 11 11.5 9.5 15 8 11.5 4.5 10 8 8.5Z"></path>
       <path d="M15.5 13.5 16.5 11l1 2.5 2.5 1-2.5 1-1 2.5-1-2.5-2.5-1 2.5-1Z"></path>
     </svg>
-    <span class="whitespace-nowrap">{$t.promptOptimizerAssistant.open}</span>
+    <span class="hidden whitespace-nowrap sm:inline">{$t.promptOptimizerAssistant.open}</span>
   </button>
 {/if}
 

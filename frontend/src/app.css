@@ -29,6 +29,86 @@
   .form-select::-ms-expand {
     display: none;
   }
+
+  .app-surface {
+    border: 1px solid var(--border-default);
+    border-radius: 8px;
+    background: var(--surface-primary);
+  }
+
+  .app-section {
+    border-top: 1px solid var(--border-subtle);
+    padding-top: 1.25rem;
+  }
+
+  .ui-field {
+    @apply control-focus w-full px-3 text-sm disabled:cursor-not-allowed disabled:opacity-50;
+    min-height: 40px;
+    border: 1px solid var(--border-default);
+    border-radius: 6px;
+    background: var(--field-bg);
+    color: var(--text-primary);
+  }
+
+  .ui-button {
+    @apply control-focus inline-flex items-center justify-center px-3 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50;
+    min-height: 40px;
+    border-radius: 6px;
+  }
+
+  .ui-button-primary {
+    @apply ui-button;
+    background: var(--accent-solid);
+    color: var(--accent-contrast);
+  }
+
+  .ui-button-primary:hover:not(:disabled) {
+    background: var(--accent-solid-hover);
+  }
+
+  .ui-button-secondary {
+    @apply ui-button;
+    border: 1px solid var(--border-default);
+    background: var(--surface-primary);
+    color: var(--text-secondary);
+  }
+
+  .ui-button-secondary:hover:not(:disabled) {
+    background: var(--surface-hover);
+    color: var(--text-primary);
+  }
+
+  .ui-button-danger {
+    @apply ui-button;
+    border: 1px solid var(--danger-border);
+    background: transparent;
+    color: var(--danger-text);
+  }
+
+  .ui-button-danger:hover:not(:disabled) {
+    background: var(--danger-soft);
+  }
+
+  .ui-icon-button {
+    @apply control-focus inline-flex items-center justify-center transition-colors disabled:cursor-not-allowed disabled:opacity-50;
+    width: 44px;
+    min-width: 44px;
+    min-height: 44px;
+    border-radius: 6px;
+    color: var(--text-muted);
+  }
+
+  .ui-icon-button:hover:not(:disabled) {
+    background: var(--surface-hover);
+    color: var(--text-primary);
+  }
+
+  .status-error {
+    border: 1px solid var(--danger-border);
+    border-radius: 6px;
+    background: var(--danger-soft);
+    color: var(--danger-text);
+  }
 }
 
 :root {
@@ -36,7 +116,22 @@
   --app-bg: #fafaf9;
   --app-fg: #111827;
   --app-muted: #57534e;
-  --app-panel: rgba(255, 255, 255, 0.8);
+  --surface-primary: #ffffff;
+  --surface-secondary: #f5f5f4;
+  --surface-hover: #f5f5f4;
+  --field-bg: #fafaf9;
+  --border-default: #d6d3d1;
+  --border-subtle: #e7e5e4;
+  --text-primary: #1c1917;
+  --text-secondary: #44403c;
+  --text-muted: #57534e;
+  --accent-solid: #059669;
+  --accent-solid-hover: #047857;
+  --accent-contrast: #ffffff;
+  --danger-soft: #fef2f2;
+  --danger-border: #fca5a5;
+  --danger-text: #b91c1c;
+  --app-panel: #ffffff;
   --app-panel-strong: #f5f5f4;
   --app-panel-border: #d6d3d1;
   --app-scrollbar-track: #e7e5e4;
@@ -53,8 +148,23 @@ html.dark {
   color-scheme: dark;
   --app-bg: #09090b;
   --app-fg: #f4f4f5;
-  --app-muted: #71717a;
-  --app-panel: rgba(24, 24, 27, 0.6);
+  --app-muted: #a1a1aa;
+  --surface-primary: #18181b;
+  --surface-secondary: #09090b;
+  --surface-hover: #27272a;
+  --field-bg: #09090b;
+  --border-default: #3f3f46;
+  --border-subtle: #27272a;
+  --text-primary: #f4f4f5;
+  --text-secondary: #d4d4d8;
+  --text-muted: #a1a1aa;
+  --accent-solid: #10b981;
+  --accent-solid-hover: #34d399;
+  --accent-contrast: #052e24;
+  --danger-soft: rgba(127, 29, 29, 0.22);
+  --danger-border: #991b1b;
+  --danger-text: #fecaca;
+  --app-panel: #18181b;
   --app-panel-strong: #09090b;
   --app-panel-border: #27272a;
   --app-scrollbar-track: #18181b;
@@ -72,10 +182,10 @@ html.dark {
 }
 
 body {
-  font-family: Inter, system-ui, sans-serif;
-  background:
-    radial-gradient(circle at top, rgba(16, 185, 129, 0.08), transparent 35%),
-    linear-gradient(180deg, rgba(255, 255, 255, 0.72), rgba(245, 245, 244, 0.96));
+  margin: 0;
+  min-width: 320px;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: var(--app-bg);
   color: var(--app-fg);
   transition:
     background-color 0.2s ease,
@@ -109,19 +219,17 @@ html.dark .skip-link {
 }
 
 html.dark body {
-  background:
-    radial-gradient(circle at top, rgba(16, 185, 129, 0.1), transparent 32%),
-    linear-gradient(180deg, rgba(9, 9, 11, 0.98), rgba(9, 9, 11, 1));
+  background: var(--app-bg);
 }
 
 textarea::placeholder,
 input::placeholder {
-  color: #78716c;
+  color: #57534e;
 }
 
 html.dark textarea::placeholder,
 html.dark input::placeholder {
-  color: #52525b;
+  color: #a1a1aa;
 }
 
 ::-webkit-scrollbar {
@@ -145,8 +253,8 @@ html.dark input::placeholder {
 .spinner {
   width: 20px;
   height: 20px;
-  border: 2px solid rgba(255, 255, 255, 0.3);
-  border-top-color: #fff;
+  border: 2px solid var(--border-default);
+  border-top-color: var(--accent-solid);
   border-radius: 50%;
   animation: spin 0.7s linear infinite;
   display: inline-block;
@@ -179,6 +287,24 @@ html.dark input::placeholder {
   -webkit-backdrop-filter: blur(2px);
 }
 
+.lazy-panel-status {
+  position: fixed;
+  right: 1rem;
+  bottom: max(1rem, env(safe-area-inset-bottom));
+  z-index: 90;
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  gap: 0.625rem;
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+  background: var(--surface-primary);
+  color: var(--text-secondary);
+  padding: 0.625rem 0.875rem;
+  font-size: 0.8125rem;
+  box-shadow: 0 12px 28px rgba(15, 23, 42, 0.16);
+}
+
 .gallery-card {
   transition:
     transform 0.2s,
@@ -187,8 +313,8 @@ html.dark input::placeholder {
 
 .gallery-icon-action {
   display: inline-flex;
-  height: 30px;
-  min-width: 0;
+  height: 44px;
+  min-width: 44px;
   align-items: center;
   justify-content: center;
   border-width: 1px;
@@ -331,9 +457,8 @@ html.dark .gallery-icon-action[aria-pressed='true'] {
     padding-top: env(safe-area-inset-top);
   }
 
-  .mobile-touch-target {
-    min-width: 44px;
-    min-height: 44px;
+  .optimizer-gutter {
+    padding-right: max(4.5rem, calc(4rem + env(safe-area-inset-right)));
   }
 
   .mobile-drawer-root,
@@ -404,6 +529,11 @@ html.dark .gallery-icon-action[aria-pressed='true'] {
     backdrop-filter: none;
     -webkit-backdrop-filter: none;
   }
+}
+
+.mobile-touch-target {
+  min-width: 44px;
+  min-height: 44px;
 }
 
 @media (prefers-reduced-motion: reduce) {
