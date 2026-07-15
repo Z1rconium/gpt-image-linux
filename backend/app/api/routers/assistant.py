@@ -1,9 +1,11 @@
 import asyncio
+import contextvars
 import json
 import logging
 import os
 import re
 from contextlib import asynccontextmanager, suppress
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -54,7 +56,31 @@ When a widely recognizable named character, mascot, or public figure is clearly 
 Use high information density. Faithfully preserve spatial relationships, scale, pose, framing, and visual emphasis.
 The prompt field must contain only the single prompt in the requested language. Do not put analysis, reasoning, a title, Markdown, source attribution, or meta-language such as \"this image\" in that field.
 Do not invent unseen brands, artist names, exact camera or lens settings, or background stories. Use neutral descriptions for details that cannot be determined confidently.
+When preview metadata says source_has_alpha is true, preserve transparency in the reconstruction and do not infer an opaque matte background.
 Do not create a separate negative prompt. Keep safety warnings out of the prompt and return them only in the warnings field."""
+
+
+@dataclass(frozen=True)
+class AssistantRuntime:
+    api_url: str
+    api_key: str
+    api_path: str
+    endpoint: str
+    model: str
+    timeout_seconds: int
+
+
+@dataclass
+class AssistantRuntimeHolder:
+    runtime: AssistantRuntime | None = None
+
+
+_batch_assistant_runtime: contextvars.ContextVar[AssistantRuntimeHolder | None] = contextvars.ContextVar(
+    "batch_assistant_runtime", default=None
+)
+_batch_target_language: contextvars.ContextVar[Literal["en", "zh-CN"]] = contextvars.ContextVar(
+    "batch_target_language", default="en"
+)
 
 AI_ANALYZE_JOB_KIND = "ai_analyze"
 GALLERY_SELECTION_TOKEN_KIND = "batch_selection"
@@ -231,7 +257,7 @@ def _assistant_settings(draft: AIAssistantSettingsRequest | None = None) -> dict
     return settings
 
 
-def _resolve_runtime(*, vision: bool = False, settings: dict | None = None) -> tuple[str, str, str, str, int]:
+def _resolve_runtime(*, vision: bool = False, settings: dict | None = None) -> AssistantRuntime:
     settings = presets.effective_ai_assistant_settings(settings if settings is not None else _assistant_settings())
     if not settings.get("enabled"):
         raise HTTPException(status_code=400, detail="AI Assistant is not enabled")
@@ -243,7 +269,7 @@ def _resolve_runtime(*, vision: bool = False, settings: dict | None = None) -> t
         raise HTTPException(status_code=400, detail="Prompt Optimizer API key is not configured for AI Assistant")
     api_path = assistant_client.normalize_assistant_api_path(settings.get("api_path"))
     try:
-        assistant_client.validate_assistant_endpoint(api_url, api_path)
+        endpoint = assistant_client.validate_assistant_endpoint(api_url, api_path)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     model_key = "vision_model" if vision else "model"
@@ -251,7 +277,11 @@ def _resolve_runtime(*, vision: bool = False, settings: dict | None = None) -> t
     if not model:
         raise HTTPException(status_code=400, detail="AI Assistant model is not configured")
     timeout_seconds = int(settings.get("timeout_seconds") or 60)
-    return api_url, api_key, api_path, model, timeout_seconds
+    return AssistantRuntime(api_url, api_key, api_path, endpoint, model, timeout_seconds)
+
+
+async def _resolve_runtime_async(*, vision: bool = False, settings: dict | None = None) -> AssistantRuntime:
+    return await asyncio.to_thread(_resolve_runtime, vision=vision, settings=settings)
 
 
 async def _assistant_json(
@@ -260,25 +290,27 @@ async def _assistant_json(
     user_prompt: str,
     schema: dict[str, Any],
     vision: bool = False,
-    image: dict[str, str] | None = None,
+    image: dict[str, str | int | bool] | None = None,
     max_tokens: int = 900,
     temperature: float = 0.2,
+    runtime: AssistantRuntime | None = None,
 ) -> tuple[dict[str, Any], str, int]:
-    api_url, api_key, api_path, model, timeout_seconds = _resolve_runtime(vision=vision)
+    runtime = runtime or await _resolve_runtime_async(vision=vision)
     try:
-        async with _assistant_request_limit(timeout_seconds):
+        async with _assistant_request_limit(runtime.timeout_seconds):
             data, model_used, duration_ms = await assistant_client.request_assistant_json(
-                api_url=api_url,
-                api_key=api_key,
-                api_path=api_path,
-                model=model,
+                api_url=runtime.api_url,
+                api_key=runtime.api_key,
+                api_path=runtime.api_path,
+                model=runtime.model,
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
                 schema=schema,
                 image=image,
-                timeout_seconds=timeout_seconds,
+                timeout_seconds=runtime.timeout_seconds,
                 max_tokens=max_tokens,
                 temperature=temperature,
+                prevalidated_endpoint=runtime.endpoint,
             )
             return _truncate_assistant_data(data), model_used, duration_ms
     except assistant_client.AssistantTimeoutError as e:
@@ -295,7 +327,8 @@ async def assistant_health(req: AIAssistantSettingsRequest | None = Body(default
     settings = presets.effective_ai_assistant_settings(_assistant_settings(req))
     model = str(settings.get("model") or "").strip() or "gpt-4o-mini"
     try:
-        api_url, api_key, api_path, model, timeout_seconds = _resolve_runtime(settings=settings)
+        runtime = await _resolve_runtime_async(settings=settings)
+        model = runtime.model
     except HTTPException as e:
         return AssistantHealthResponse(
             status="error",
@@ -307,11 +340,11 @@ async def assistant_health(req: AIAssistantSettingsRequest | None = Body(default
 
     try:
         result = await assistant_client.probe_assistant_endpoint(
-            api_url=api_url,
-            api_key=api_key,
-            api_path=api_path,
+            api_url=runtime.api_url,
+            api_key=runtime.api_key,
+            api_path=runtime.api_path,
             model=model,
-            timeout_seconds=timeout_seconds,
+            timeout_seconds=runtime.timeout_seconds,
         )
     except assistant_client.AssistantTimeoutError as e:
         return AssistantHealthResponse(
@@ -667,17 +700,6 @@ async def _read_image_prompt_upload(image: UploadFile) -> bytes:
     if not image_bytes:
         raise HTTPException(status_code=400, detail="Uploaded image is empty")
 
-    filename = image.filename or "image"
-    content_type = resolve_upload_content_type(image)
-    try:
-        await asyncio.to_thread(
-            storage.validate_image_bytes,
-            bytes(image_bytes),
-            filename=filename,
-            content_type=content_type,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
     return bytes(image_bytes)
 
 
@@ -686,31 +708,36 @@ async def prompt_from_uploaded_image(
     image: UploadFile = File(...),
     target_language: Literal["en", "zh-CN"] = Form("en"),
 ):
-    _resolve_runtime(vision=True)
+    runtime = await _resolve_runtime_async(vision=True)
     image_bytes = await _read_image_prompt_upload(image)
     try:
         preview = await asyncio.to_thread(
             assistant_client.prepare_vision_preview_bytes,
             image_bytes,
+            filename=image.filename or "image",
+            content_type=resolve_upload_content_type(image),
         )
     except assistant_client.AssistantError as e:
         raise HTTPException(status_code=400 if e.status == 400 else 502, detail=str(e)) from e
+    finally:
+        del image_bytes
 
     data, model, duration_ms = await _assistant_json(
         system_prompt=_image_prompt_system_prompt(target_language),
         user_prompt=json.dumps(
             {
                 "target_language": target_language,
-                "preview": {key: preview[key] for key in ("bytes", "width", "height")},
+                "preview": {key: preview[key] for key in ("bytes", "width", "height", "source_has_alpha")},
             },
             ensure_ascii=False,
             sort_keys=True,
         ),
         schema={"prompt": "string", "warnings": ["string"]},
         vision=True,
-        image=preview,  # type: ignore[arg-type]
+        image=preview,
         max_tokens=700,
         temperature=0.2,
+        runtime=runtime,
     )
     prompt = _clamp_text(data.get("prompt"), 4000)
     if not prompt:
@@ -723,7 +750,7 @@ async def prompt_from_uploaded_image(
     )
 
 
-async def _gallery_entry_and_preview(image_id: str) -> tuple[Any, dict[str, str]]:
+async def _gallery_entry_and_preview(image_id: str) -> tuple[Any, dict[str, Any]]:
     entry = await asyncio.to_thread(storage.get_gallery_entry, image_id)
     if not entry:
         raise HTTPException(status_code=404, detail="Gallery entry not found")
@@ -745,17 +772,23 @@ async def _assistant_vision_json(
     wait_for_slot: bool = False,
     max_tokens: int = 900,
     temperature: float = 0.2,
-) -> tuple[Any, dict[str, str], dict[str, Any], str, int]:
-    _api_url, _api_key, _api_path, _model, timeout_seconds = _resolve_runtime(vision=True)
-    async with _assistant_request_limit(timeout_seconds, wait_for_slot=wait_for_slot):
-        entry, preview = await _gallery_entry_and_preview(image_id)
-        api_url, api_key, api_path, model, timeout_seconds = _resolve_runtime(vision=True)
+    runtime: AssistantRuntime | None = None,
+) -> tuple[Any, dict[str, Any], dict[str, Any], str, int]:
+    if runtime is None:
+        runtime_holder = _batch_assistant_runtime.get()
+        if runtime_holder is not None:
+            runtime_holder.runtime = runtime_holder.runtime or await _resolve_runtime_async(vision=True)
+            runtime = runtime_holder.runtime
+        else:
+            runtime = await _resolve_runtime_async(vision=True)
+    async with _assistant_request_limit(runtime.timeout_seconds, wait_for_slot=wait_for_slot):
         try:
+            entry, preview = await _gallery_entry_and_preview(image_id)
             data, model_used, duration_ms = await assistant_client.request_assistant_json(
-                api_url=api_url,
-                api_key=api_key,
-                api_path=api_path,
-                model=model,
+                api_url=runtime.api_url,
+                api_key=runtime.api_key,
+                api_path=runtime.api_path,
+                model=runtime.model,
                 system_prompt=system_prompt,
                 user_prompt=_gallery_vision_user_prompt(
                     entry,
@@ -763,10 +796,11 @@ async def _assistant_vision_json(
                     include_stored_prompt=include_stored_prompt,
                 ),
                 schema=schema,
-                image=preview,  # type: ignore[arg-type]
-                timeout_seconds=timeout_seconds,
+                image=preview,
+                timeout_seconds=runtime.timeout_seconds,
                 max_tokens=max_tokens,
                 temperature=temperature,
+                prevalidated_endpoint=runtime.endpoint,
             )
         except assistant_client.AssistantTimeoutError as e:
             raise HTTPException(status_code=504, detail=str(e)) from e
@@ -784,7 +818,7 @@ def _gallery_vision_user_prompt(entry: Any, preview: dict[str, Any], *, include_
         "size": entry.size,
         "model": entry.model,
         "api_path": entry.api_path,
-        "preview": {key: preview[key] for key in ("bytes", "width", "height")},
+        "preview": {key: preview[key] for key in ("bytes", "width", "height", "source_has_alpha")},
     }
     if include_stored_prompt:
         payload["stored_prompt"] = entry.prompt
@@ -822,12 +856,16 @@ async def _analyze_gallery_image(
     *,
     persist: bool,
     wait_for_slot: bool = False,
+    target_language: Literal["en", "zh-CN"] | None = None,
+    runtime: AssistantRuntime | None = None,
 ) -> AssistantGalleryImageResponse:
+    target_language = target_language or _batch_target_language.get()
     _entry, _preview, data, model, duration_ms = await _assistant_vision_json(
         image_id,
         system_prompt=(
             "You analyze a local gallery image. Return a concise description, a useful reverse-engineered "
-            "generation prompt, and structured visual metadata."
+            "generation prompt, and structured visual metadata. "
+            + _image_prompt_system_prompt(target_language)
         ),
         schema={
             "description": "string",
@@ -844,12 +882,15 @@ async def _analyze_gallery_image(
         wait_for_slot=wait_for_slot,
         max_tokens=900,
         temperature=0.2,
+        runtime=runtime,
     )
     description, prompt, analysis = _prepare_gallery_ai_metadata(
         description=data.get("description"),
         prompt=data.get("prompt"),
         analysis=data.get("analysis"),
     )
+    if not prompt:
+        raise HTTPException(status_code=502, detail="AI Assistant returned an empty image prompt")
     if persist:
         await asyncio.to_thread(
             storage.upsert_gallery_ai_metadata,
@@ -890,19 +931,28 @@ async def _describe_gallery_image(image_id: str) -> AssistantGalleryImageRespons
     )
 
 
-async def _prompt_gallery_image(image_id: str) -> AssistantGalleryImageResponse:
+async def _prompt_gallery_image(
+    image_id: str,
+    *,
+    target_language: Literal["en", "zh-CN"] | None = None,
+    runtime: AssistantRuntime | None = None,
+) -> AssistantGalleryImageResponse:
     _entry, _preview, data, model, duration_ms = await _assistant_vision_json(
         image_id,
-        system_prompt=_image_prompt_system_prompt(),
+        system_prompt=_image_prompt_system_prompt(target_language),
         schema={"prompt": "string", "warnings": ["string"]},
         include_stored_prompt=False,
         max_tokens=550,
         temperature=0.2,
+        runtime=runtime,
     )
+    prompt = _clamp_text(data.get("prompt"), 4000)
+    if not prompt:
+        raise HTTPException(status_code=502, detail="AI Assistant returned an empty image prompt")
     return AssistantGalleryImageResponse(
         image_id=image_id,
         description="",
-        prompt=_clamp_text(data.get("prompt"), 4000),
+        prompt=prompt,
         analysis={},
         warnings=_warnings(data.get("warnings")),
         model=model,
@@ -915,10 +965,18 @@ async def _analyze_gallery_image_with_lease_renewal(
     *,
     job_id: str,
     lease_owner: str,
+    target_language: Literal["en", "zh-CN"] | None = None,
+    runtime: AssistantRuntime | None = None,
 ) -> AssistantGalleryImageResponse:
     stop_event = asyncio.Event()
     analyze_task = asyncio.create_task(
-        _analyze_gallery_image(image_id, persist=True, wait_for_slot=True)
+        _analyze_gallery_image(
+            image_id,
+            persist=True,
+            wait_for_slot=True,
+            target_language=target_language,
+            runtime=runtime,
+        )
     )
     renewer = asyncio.create_task(_renew_ai_analyze_job_lease(job_id, lease_owner, stop_event))
     try:
@@ -979,6 +1037,7 @@ async def batch_analyze_gallery(req: AssistantGalleryBatchRequest):
             "filters": filters,
             "checkpoint": None,
             "snapshot": snapshot.get("boundary"),
+            "target_language": req.target_language,
         }
         job_requested_count = requested_count
         missing_count = 0
@@ -994,10 +1053,10 @@ async def batch_analyze_gallery(req: AssistantGalleryBatchRequest):
         requested_ids = [image_id for image_id in ids if image_id in found_ids]
         if not requested_ids:
             raise HTTPException(status_code=404, detail="Gallery entries not found")
-        payload = {"ids": requested_ids}
+        payload = {"ids": requested_ids, "target_language": req.target_language}
         job_requested_count = len(ids)
         missing_count = max(0, len(ids) - len(requested_ids))
-    _resolve_runtime(vision=True)
+    await _resolve_runtime_async(vision=True)
     job = await asyncio.to_thread(
         storage.reserve_gallery_job_capacity,
         job=_build_ai_analyze_job(
@@ -1028,13 +1087,21 @@ async def describe_gallery_image(image_id: str):
 
 
 @router.post("/api/assistant/gallery/{image_id}/prompt", response_model=AssistantGalleryImageResponse)
-async def prompt_gallery_image(image_id: str):
-    return await _prompt_gallery_image(image_id)
+async def prompt_gallery_image(
+    image_id: str,
+    target_language: Literal["en", "zh-CN"] = "en",
+):
+    runtime = await _resolve_runtime_async(vision=True)
+    return await _prompt_gallery_image(image_id, target_language=target_language, runtime=runtime)
 
 
 @router.post("/api/assistant/gallery/{image_id}/analyze", response_model=AssistantGalleryImageResponse)
-async def analyze_gallery_image(image_id: str):
-    return await _analyze_gallery_image(image_id, persist=True)
+async def analyze_gallery_image(
+    image_id: str,
+    target_language: Literal["en", "zh-CN"] = "en",
+):
+    runtime = await _resolve_runtime_async(vision=True)
+    return await _analyze_gallery_image(image_id, persist=True, target_language=target_language, runtime=runtime)
 
 
 def _ai_analyze_payload(job: dict[str, Any]) -> dict[str, Any]:
@@ -1258,6 +1325,11 @@ async def _run_ai_analyze_job(job: dict[str, Any]) -> None:
     job_id = str(job["job_id"])
     lease_owner = str(job.get("lease_owner") or "")
     payload = job.get("payload") or {}
+    target_language = payload.get("target_language")
+    if target_language not in {"en", "zh-CN"}:
+        target_language = "en"
+    _batch_assistant_runtime.set(AssistantRuntimeHolder())
+    _batch_target_language.set(target_language)
     requested_count = int(job.get("requested_count") or len(_ai_analyze_ids_from_payload(payload)))
     processed = int(job.get("processed_count") or 0)
     analyzed = int(job.get("exported_count") or 0)

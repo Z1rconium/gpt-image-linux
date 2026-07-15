@@ -1,5 +1,6 @@
-import { writable } from 'svelte/store';
+import { get, writable } from 'svelte/store';
 import { apiFetch } from '$lib/api/client';
+import { language } from '$lib/i18n';
 import type {
   AssistantEditPlanRequest,
   AssistantEditPlanResponse,
@@ -280,7 +281,7 @@ function createAssistantStore() {
     beginGalleryLoading(imageId);
     try {
       return await apiFetch<AssistantGalleryImageResponse>(
-        `/api/assistant/gallery/${encodeURIComponent(imageId)}/prompt`,
+        `/api/assistant/gallery/${encodeURIComponent(imageId)}/prompt?target_language=${encodeURIComponent(get(language))}`,
         { method: 'POST', signal: requestSignal },
         'reverse prompting gallery image with AI Assistant'
       );
@@ -295,7 +296,7 @@ function createAssistantStore() {
     beginGalleryLoading(imageId);
     try {
       return await apiFetch<AssistantGalleryImageResponse>(
-        `/api/assistant/gallery/${encodeURIComponent(imageId)}/analyze`,
+        `/api/assistant/gallery/${encodeURIComponent(imageId)}/analyze?target_language=${encodeURIComponent(get(language))}`,
         { method: 'POST', signal: requestSignal },
         'analyzing gallery image with AI Assistant'
       );

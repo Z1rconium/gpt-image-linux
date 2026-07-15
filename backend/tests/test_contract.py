@@ -2069,7 +2069,8 @@ def test_ai_assistant_gallery_metadata_and_analysis_flow(client, monkeypatch):
 
     async def fake_request_assistant_json(**kwargs):
         if "preview" in kwargs["user_prompt"]:
-            assert kwargs["image"]["mime_type"] == "image/jpeg"
+            assert kwargs["image"]["mime_type"] == "image/png"
+            assert kwargs["image"]["source_has_alpha"] is True
             assert kwargs["image"]["bytes"] <= config.AI_ASSISTANT_IMAGE_MAX_BYTES
             schema = kwargs["schema"]
             if "analysis" not in schema and "description" in schema:
@@ -2168,7 +2169,8 @@ def test_ai_assistant_uploaded_image_prompt_is_bounded_language_aware_and_not_pe
     assert all(len(warning) == 500 for warning in body["warnings"])
     assert storage.get_gallery_count() == gallery_count
 
-    assert seen["image"]["mime_type"] == "image/jpeg"
+    assert seen["image"]["mime_type"] == "image/png"
+    assert seen["image"]["source_has_alpha"] is True
     assert seen["image"]["bytes"] <= config.AI_ASSISTANT_IMAGE_MAX_BYTES
     assert json.loads(seen["user_prompt"])["target_language"] == "zh-CN"
     assert "Write the prompt in Simplified Chinese" in seen["system_prompt"]
@@ -2242,6 +2244,30 @@ def test_ai_assistant_uploaded_image_prompt_rejects_pixel_and_request_size_limit
     assert "too large" in byte_limited.json()["detail"]
 
 
+def test_ai_assistant_uploaded_image_prompt_rejects_decompression_bomb_warning(client, monkeypatch):
+    from PIL import Image
+
+    settings = client.get("/api/settings").json()
+    configured = client.post("/api/settings", json=_assistant_runtime_payload(settings))
+    assert configured.status_code == 200
+
+    image = io.BytesIO()
+    Image.new("RGB", (5, 4)).save(image, format="PNG")
+    monkeypatch.setattr(config, "MAX_IMAGE_PIXELS", 16)
+
+    async def unexpected_request(**kwargs):
+        raise AssertionError("decompression-bomb upload must not reach the AI Assistant")
+
+    monkeypatch.setattr(assistant_router.assistant_client, "request_assistant_json", unexpected_request)
+    response = client.post(
+        "/api/assistant/image/prompt",
+        files={"image": ("pixel-warning.png", image.getvalue(), "image/png")},
+    )
+
+    assert response.status_code == 400
+    assert "fully decodable" in response.json()["detail"]
+
+
 def test_ai_assistant_uploaded_image_prompt_validates_language_and_maps_upstream_errors(client, monkeypatch):
     settings = client.get("/api/settings").json()
     configured = client.post("/api/settings", json=_assistant_runtime_payload(settings))
@@ -2264,6 +2290,53 @@ def test_ai_assistant_uploaded_image_prompt_validates_language_and_maps_upstream
     )
     assert upstream_failure.status_code == 502
     assert "vision upstream failed" in upstream_failure.json()["detail"]
+
+
+def test_ai_assistant_uploaded_image_prompt_rejects_animations(client, monkeypatch):
+    from PIL import Image
+
+    settings = client.get("/api/settings").json()
+    assert client.post("/api/settings", json=_assistant_runtime_payload(settings)).status_code == 200
+    animated = io.BytesIO()
+    Image.new("RGB", (1, 1), "red").save(
+        animated,
+        format="GIF",
+        save_all=True,
+        append_images=[Image.new("RGB", (1, 1), "blue")],
+    )
+
+    async def unexpected_request(**kwargs):
+        raise AssertionError("animated upload must not reach the AI Assistant")
+
+    monkeypatch.setattr(assistant_router.assistant_client, "request_assistant_json", unexpected_request)
+    response = client.post(
+        "/api/assistant/image/prompt",
+        files={"image": ("animated.gif", animated.getvalue(), "image/gif")},
+    )
+    assert response.status_code == 400
+    assert "Animated images are not supported" in response.json()["detail"]
+
+
+def test_ai_assistant_gallery_prompt_language_and_empty_prompt_do_not_persist(client, monkeypatch):
+    settings = client.get("/api/settings").json()
+    assert client.post("/api/settings", json=_assistant_runtime_payload(settings)).status_code == 200
+    assert _fake_gallery_entry("assistant-empty-prompt", "", "1024x1024", "assistant-empty-prompt.png")
+    seen_system_prompts: list[str] = []
+
+    async def empty_prompt(**kwargs):
+        seen_system_prompts.append(kwargs["system_prompt"])
+        return ({"description": "square", "prompt": "", "warnings": []}, "vision-model", 3)
+
+    monkeypatch.setattr(assistant_router.assistant_client, "request_assistant_json", empty_prompt)
+    prompt_response = client.post("/api/assistant/gallery/assistant-empty-prompt/prompt?target_language=zh-CN")
+    analyze_response = client.post("/api/assistant/gallery/assistant-empty-prompt/analyze?target_language=zh-CN")
+    metadata = client.get("/api/assistant/gallery/assistant-empty-prompt/metadata")
+
+    assert prompt_response.status_code == 502
+    assert analyze_response.status_code == 502
+    assert metadata.status_code == 200
+    assert metadata.json()["prompt"] == ""
+    assert all("Write the prompt in Simplified Chinese" in prompt for prompt in seen_system_prompts)
 
 
 def test_ai_assistant_gallery_batch_analysis_jobs_and_limits(client, monkeypatch):

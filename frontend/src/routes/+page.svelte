@@ -1012,7 +1012,7 @@
       progress: 0
     });
     try {
-      const job = await assistantStore.batchAnalyzeGallery(batchBody);
+      const job = await assistantStore.batchAnalyzeGallery({ ...batchBody, target_language: $language });
       let currentJob = job;
       while (currentJob.status === 'queued' || currentJob.status === 'running') {
         galleryActivityStore.setOperationStatus({

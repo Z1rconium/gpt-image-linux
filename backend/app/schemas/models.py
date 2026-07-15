@@ -170,6 +170,11 @@ class SettingsRequest(StrictRequestModel):
         )
 
 
+class ImageUploadLimitsResponse(BaseModel):
+    max_file_size_bytes: int
+    max_image_pixels: int
+
+
 class SettingsResponse(BaseModel):
     active_preset_id: str
     api_url: str
@@ -188,6 +193,7 @@ class SettingsResponse(BaseModel):
     prompt_optimizer: "PromptOptimizerSettingsResponse" = Field(default_factory=lambda: PromptOptimizerSettingsResponse())
     ai_assistant: "AIAssistantSettingsResponse" = Field(default_factory=lambda: AIAssistantSettingsResponse())
     r2_backup: "R2BackupSettingsResponse" = Field(default_factory=lambda: R2BackupSettingsResponse())
+    image_upload_limits: ImageUploadLimitsResponse
 
 
 class PresetHealthCheck(BaseModel):
@@ -836,7 +842,7 @@ class GalleryBatchRequest(StrictRequestModel):
 
 
 class AssistantGalleryBatchRequest(GalleryBatchRequest):
-    pass
+    target_language: Literal["en", "zh-CN"] = "en"
 
 
 class AssistantGalleryBatchJobStatus(BaseModel):

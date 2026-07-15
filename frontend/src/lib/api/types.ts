@@ -42,6 +42,12 @@ export type SettingsResponse = {
   prompt_optimizer: PromptOptimizerSettings;
   ai_assistant: AIAssistantSettings;
   r2_backup: R2BackupSettings;
+  image_upload_limits: ImageUploadLimits;
+};
+
+export type ImageUploadLimits = {
+  max_file_size_bytes: number;
+  max_image_pixels: number;
 };
 
 export type PromptOptimizerSettings = {
@@ -350,6 +356,7 @@ export type AssistantGalleryMetadataResponse = {
 export type AssistantGalleryBatchRequest = {
   ids?: string[] | null;
   selection_token?: string | null;
+  target_language?: 'en' | 'zh-CN';
 };
 
 export type AssistantGalleryBatchJobStatus = {

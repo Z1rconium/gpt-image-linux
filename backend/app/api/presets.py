@@ -374,6 +374,10 @@ def build_settings_response() -> SettingsResponse:
         prompt_optimizer=build_prompt_optimizer_settings_response(optimizer_raw),
         ai_assistant=build_ai_assistant_settings_response(assistant_raw),
         r2_backup=build_r2_backup_settings_response(get_r2_backup_settings()),
+        image_upload_limits={
+            "max_file_size_bytes": config.MAX_FILE_SIZE_MB * 1024 * 1024,
+            "max_image_pixels": config.MAX_IMAGE_PIXELS,
+        },
     )
 
 

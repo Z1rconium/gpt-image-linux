@@ -4,6 +4,7 @@
   import { language, t } from '$lib/i18n';
   import type { AssistantImagePromptResponse } from '$lib/api/types';
   import { assistantStore, isAbortError } from '$lib/stores/assistant';
+  import { settingsStore } from '$lib/stores/settings';
 
   type MaybePromise = void | Promise<void>;
 
@@ -14,8 +15,8 @@
   export let onSave: (prompt: string) => MaybePromise = () => {};
   export let onCopy: (prompt: string) => MaybePromise = () => {};
 
-  const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
-  const MAX_IMAGE_PIXELS = 100_000_000;
+  const FALLBACK_MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
+  const FALLBACK_MAX_IMAGE_PIXELS = 100_000_000;
   const SAFE_IMAGE_EXTENSIONS = /\.(avif|bmp|gif|heic|heif|ico|jpe?g|png|tiff?|webp)$/i;
 
   let input: HTMLInputElement | null = null;
@@ -28,6 +29,15 @@
   let requestController: AbortController | null = null;
   let selectionSequence = 0;
   let wasOpen = false;
+
+  $: maxUploadBytes = $settingsStore.settings?.image_upload_limits.max_file_size_bytes || FALLBACK_MAX_UPLOAD_BYTES;
+  $: maxImagePixels = $settingsStore.settings?.image_upload_limits.max_image_pixels || FALLBACK_MAX_IMAGE_PIXELS;
+  $: maxUploadSize = formatUploadSize(maxUploadBytes);
+
+  function formatUploadSize(bytes: number) {
+    const megabytes = bytes / (1024 * 1024);
+    return `${Number.isInteger(megabytes) ? megabytes : megabytes.toFixed(1)} MB`;
+  }
 
   $: if (open !== wasOpen) {
     wasOpen = open;
@@ -88,7 +98,7 @@
       const width = image.naturalWidth;
       const height = image.naturalHeight;
       if (sequence !== selectionSequence) return;
-      if (!width || !height || width * height > MAX_IMAGE_PIXELS) {
+      if (!width || !height || width * height > maxImagePixels) {
         throw new Error($t.imagePrompt.pixelLimit);
       }
     } catch (caught) {
@@ -115,8 +125,8 @@
       error = $t.imagePrompt.formatError;
       return;
     }
-    if (file.size > MAX_UPLOAD_BYTES) {
-      error = $t.imagePrompt.fileTooLarge;
+    if (file.size > maxUploadBytes) {
+      error = $t.imagePrompt.fileTooLarge(maxUploadSize);
       return;
     }
 
@@ -216,7 +226,7 @@
           >
             <span class="text-sm font-semibold text-stone-800 dark:text-zinc-200">{$t.imagePrompt.choose}</span>
             <span class="mt-2 text-xs text-stone-500 dark:text-zinc-500">{$t.imagePrompt.dropHint}</span>
-            <span class="mt-4 text-[11px] text-stone-400 dark:text-zinc-600">{$t.imagePrompt.fileHint}</span>
+            <span class="mt-4 text-[11px] text-stone-400 dark:text-zinc-600">{$t.imagePrompt.fileHint(maxUploadSize)}</span>
           </button>
         {:else}
           <div class="grid gap-4 lg:grid-cols-[minmax(0,1fr)_240px]">

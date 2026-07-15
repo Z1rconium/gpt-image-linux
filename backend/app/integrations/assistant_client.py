@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import time
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +18,7 @@ from ..core.api_paths import (
     RESPONSES_API_PATH,
     build_upstream_url,
 )
-from ..repositories.image_files import validate_image_bytes
+from ..repositories.image_files import configure_pillow_image_limits, validate_image_header_bytes
 from .session_pool import TIMEOUT_PROMPT_OPTIMIZER, get_pool
 from .upstream_client import UpstreamApiError, classify_probe_status, read_limited_text_response
 
@@ -27,6 +28,10 @@ except ImportError:  # pragma: no cover - Pillow is a runtime dependency
     Image = None
     ImageOps = None
     UnidentifiedImageError = OSError
+
+DecompressionBombWarning = (
+    getattr(Image, "DecompressionBombWarning", Warning) if Image is not None else Warning
+)
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +74,7 @@ def _build_chat_payload(
     model: str,
     system_prompt: str,
     user_prompt: str,
-    image: dict[str, str] | None,
+    image: dict[str, str | int | bool] | None,
     max_tokens: int,
     temperature: float,
 ) -> dict[str, Any]:
@@ -105,7 +110,7 @@ def _build_responses_payload(
     model: str,
     system_prompt: str,
     user_prompt: str,
-    image: dict[str, str] | None,
+    image: dict[str, str | int | bool] | None,
     max_tokens: int,
     temperature: float,
 ) -> dict[str, Any]:
@@ -205,13 +210,14 @@ async def request_assistant_json(
     system_prompt: str,
     user_prompt: str,
     schema: dict[str, Any],
-    image: dict[str, str] | None = None,
+    image: dict[str, str | int | bool] | None = None,
     timeout_seconds: float | None = None,
     max_tokens: int = 900,
     temperature: float = 0.2,
+    prevalidated_endpoint: str | None = None,
 ) -> tuple[dict[str, Any], str, int]:
     normalized_api_path = normalize_assistant_api_path(api_path)
-    endpoint = validate_assistant_endpoint(api_url, normalized_api_path)
+    endpoint = prevalidated_endpoint or validate_assistant_endpoint(api_url, normalized_api_path)
     timeout_seconds = float(timeout_seconds or config.PROMPT_OPTIMIZER_TIMEOUT_SECONDS)
     model = str(model or config.PROMPT_OPTIMIZER_MODEL).strip() or config.PROMPT_OPTIMIZER_MODEL
     system = "\n\n".join([system_prompt.strip(), _json_schema_instruction(schema)])
@@ -324,57 +330,124 @@ async def probe_assistant_endpoint(
         }
 
 
-def _prepare_vision_preview(opener, *, decode_error: str, byte_limit_error: str) -> dict[str, str | int]:
-    if Image is None or ImageOps is None:
-        raise AssistantError("Pillow is required for AI Assistant image analysis", status=400)
-    width = 0
-    height = 0
-    data = b""
-    try:
-        with opener() as image:
-            image = ImageOps.exif_transpose(image)
-            if image.mode not in {"RGB", "L"}:
-                image = image.convert("RGB")
-            image.thumbnail(
-                (config.AI_ASSISTANT_IMAGE_MAX_SIDE, config.AI_ASSISTANT_IMAGE_MAX_SIDE)
+def _image_has_alpha(image) -> bool:
+    return "A" in image.getbands() or (image.mode == "P" and "transparency" in image.info)
+
+
+def _fit_preview(image, *, has_alpha: bool, byte_limit_error: str) -> tuple[bytes, str]:
+    scale = 1.0
+    while True:
+        candidate = image.copy()
+        if scale < 1.0:
+            candidate.thumbnail(
+                (max(1, int(image.width * scale)), max(1, int(image.height * scale))),
+                Image.Resampling.LANCZOS,
             )
-            output = io.BytesIO()
+        output = io.BytesIO()
+        if has_alpha:
+            candidate.save(output, format="PNG", optimize=True, compress_level=9)
+            mime_type = "image/png"
+        else:
+            if candidate.mode not in {"RGB", "L"}:
+                candidate = candidate.convert("RGB")
             quality = 85
             while True:
                 output.seek(0)
                 output.truncate(0)
-                image.save(output, format="JPEG", quality=quality, optimize=True)
-                data = output.getvalue()
-                if len(data) <= config.AI_ASSISTANT_IMAGE_MAX_BYTES or quality <= 45:
+                candidate.save(output, format="JPEG", quality=quality, optimize=True)
+                if output.tell() <= config.AI_ASSISTANT_IMAGE_MAX_BYTES or quality <= 45:
                     break
                 quality -= 10
-            width, height = image.size
-    except (OSError, UnidentifiedImageError) as e:
-        raise AssistantError(decode_error, status=400) from e
+            mime_type = "image/jpeg"
+        data = output.getvalue()
+        if len(data) <= config.AI_ASSISTANT_IMAGE_MAX_BYTES:
+            return data, mime_type
+        if min(candidate.size) <= 1:
+            raise AssistantError(byte_limit_error, status=400)
+        scale *= 0.75
 
-    if len(data) > config.AI_ASSISTANT_IMAGE_MAX_BYTES:
-        raise AssistantError(byte_limit_error, status=400)
-    validate_image_bytes(data, filename="assistant-preview.jpg", content_type="image/jpeg")
+
+def _prepare_vision_preview(
+    opener,
+    *,
+    header: bytes,
+    filename: str,
+    content_type: str,
+    decode_error: str,
+    byte_limit_error: str,
+) -> dict[str, str | int | bool]:
+    if Image is None or ImageOps is None:
+        raise AssistantError("Pillow is required for AI Assistant image analysis", status=400)
+    try:
+        expected_format = validate_image_header_bytes(header, filename=filename, content_type=content_type)
+        configure_pillow_image_limits()
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DecompressionBombWarning)
+            with opener() as image:
+                if str(getattr(image, "format", "")).lower().replace("jpg", "jpeg") != expected_format:
+                    raise ValueError("Image decoder format does not match image data")
+                image.verify()
+            with opener() as image:
+                if getattr(image, "is_animated", False):
+                    raise AssistantError("Animated images are not supported for AI analysis", status=400)
+                if str(getattr(image, "format", "")).lower().replace("jpg", "jpeg") != expected_format:
+                    raise ValueError("Image decoder format does not match image data")
+                if expected_format == "jpeg":
+                    image.draft("RGB", (config.AI_ASSISTANT_IMAGE_MAX_SIDE, config.AI_ASSISTANT_IMAGE_MAX_SIDE))
+                image.load()
+                image = ImageOps.exif_transpose(image)
+                source_has_alpha = _image_has_alpha(image)
+                image.thumbnail((config.AI_ASSISTANT_IMAGE_MAX_SIDE, config.AI_ASSISTANT_IMAGE_MAX_SIDE))
+                data, mime_type = _fit_preview(image, has_alpha=source_has_alpha, byte_limit_error=byte_limit_error)
+                width, height = image.size
+    except AssistantError:
+        raise
+    except (
+        OSError,
+        UnidentifiedImageError,
+        SyntaxError,
+        ValueError,
+        DecompressionBombWarning,
+        getattr(Image, "DecompressionBombError", OSError),
+    ) as e:
+        raise AssistantError(decode_error, status=400) from e
     return {
         "b64": base64.b64encode(data).decode("ascii"),
-        "mime_type": "image/jpeg",
+        "mime_type": mime_type,
         "bytes": len(data),
         "width": width,
         "height": height,
+        "source_has_alpha": source_has_alpha,
     }
 
 
-def prepare_vision_preview(path: Path) -> dict[str, str | int]:
+def prepare_vision_preview(path: Path) -> dict[str, str | int | bool]:
+    try:
+        with path.open("rb") as file:
+            header = file.read(512)
+    except OSError as e:
+        raise AssistantError("Gallery image could not be decoded for AI analysis", status=400) from e
     return _prepare_vision_preview(
         lambda: Image.open(path),
+        header=header,
+        filename=path.name,
+        content_type="",
         decode_error="Gallery image could not be decoded for AI analysis",
         byte_limit_error="Gallery image preview exceeds AI Assistant byte limit",
     )
 
 
-def prepare_vision_preview_bytes(image_bytes: bytes) -> dict[str, str | int]:
+def prepare_vision_preview_bytes(
+    image_bytes: bytes,
+    *,
+    filename: str = "",
+    content_type: str = "",
+) -> dict[str, str | int | bool]:
     return _prepare_vision_preview(
         lambda: Image.open(io.BytesIO(image_bytes)),
-        decode_error="Uploaded image could not be decoded for AI analysis",
+        header=image_bytes[:512],
+        filename=filename,
+        content_type=content_type,
+        decode_error="Image data must be a fully decodable supported raster image",
         byte_limit_error="Uploaded image preview exceeds AI Assistant byte limit",
     )
