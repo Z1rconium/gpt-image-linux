@@ -1,11 +1,6 @@
 import { writable } from 'svelte/store';
 import { apiFetch } from '$lib/api/client';
-import type {
-  PromptSnippet,
-  PromptSnippetCreateInput,
-  PromptSnippetListResponse,
-  PromptSnippetUpdateInput
-} from '$lib/api/types';
+import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetListResponse, PromptSnippetUpdateInput } from '$lib/api/types/snippets';
 
 export type PromptSnippetsState = {
   snippets: PromptSnippet[];

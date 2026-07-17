@@ -4,7 +4,7 @@ import { t } from '$lib/i18n';
 import { confirmStore } from '$lib/stores/confirm';
 import { createGalleryActions } from '$lib/stores/galleryActions';
 import type { ToastOptions, ToastVariant } from '$lib/stores/ui';
-import type { GalleryEntry, GalleryResponse, GallerySelectionTokenResponse } from '$lib/api/types';
+import type { GalleryEntry, GalleryResponse, GallerySelectionTokenResponse } from '$lib/api/types/gallery';
 
 export type GalleryFilters = {
   prompt: string;

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { tick } from 'svelte';
-  import type { AssistantJobDiagnoseResponse, GenerateJobStatus } from '$lib/api/types';
+import type { AssistantJobDiagnoseResponse } from '$lib/api/types/assistant';
+import type { GenerateJobStatus } from '$lib/api/types/jobs';
   import { t } from '$lib/i18n';
   import { formatBeijingTime, jobFailureMessage, operationLabel, stageLabel, statusLabel } from '$lib/utils/format';
   import { isActiveJobStatus, isFailureJobStatus } from '$lib/utils/jobs';

@@ -1,25 +1,7 @@
 import { get, writable } from 'svelte/store';
 import { apiFetch } from '$lib/api/client';
 import { language } from '$lib/i18n';
-import type {
-  AssistantEditPlanRequest,
-  AssistantEditPlanResponse,
-  AssistantGalleryBatchJobStatus,
-  AssistantGalleryBatchRequest,
-  AssistantGalleryImageResponse,
-  AssistantGalleryMetadataResponse,
-  AssistantImagePromptResponse,
-  AssistantJobDiagnoseRequest,
-  AssistantJobDiagnoseResponse,
-  AssistantPromptCheckRequest,
-  AssistantPromptCheckResponse,
-  AssistantPromptRewriteRequest,
-  AssistantPromptRewriteResponse,
-  AssistantPromptVariantsRequest,
-  AssistantPromptVariantsResponse,
-  AssistantRecommendParamsRequest,
-  AssistantRecommendParamsResponse
-} from '$lib/api/types';
+import type { AssistantEditPlanRequest, AssistantEditPlanResponse, AssistantGalleryBatchJobStatus, AssistantGalleryBatchRequest, AssistantGalleryImageResponse, AssistantGalleryMetadataResponse, AssistantImagePromptResponse, AssistantJobDiagnoseRequest, AssistantJobDiagnoseResponse, AssistantPromptCheckRequest, AssistantPromptCheckResponse, AssistantPromptRewriteRequest, AssistantPromptRewriteResponse, AssistantPromptVariantsRequest, AssistantPromptVariantsResponse, AssistantRecommendParamsRequest, AssistantRecommendParamsResponse } from '$lib/api/types/assistant';
 
 export type AssistantState = {
   promptLoading: boolean;

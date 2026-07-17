@@ -4,13 +4,8 @@
   import { language, t } from '$lib/i18n';
   import { assistantStore } from '$lib/stores/assistant';
   import { initialPromptFormState, type PromptFormState } from '$lib/stores/preview';
-  import type {
-    ApiPath,
-    AssistantPromptCheckResponse,
-    AssistantPromptVariant,
-    AssistantRecommendParamsResponse,
-    PromptOptimizeResponse
-  } from '$lib/api/types';
+import type { AssistantPromptCheckResponse, AssistantPromptVariant, AssistantRecommendParamsResponse, PromptOptimizeResponse } from '$lib/api/types/assistant';
+import type { ApiPath } from '$lib/api/types/common';
   import { buildPromptOptimizeRequest } from '$lib/utils/promptOptimizer';
 
   type ResultMode = 'rewrite' | 'quickOptimize' | 'check' | 'variants' | 'params';

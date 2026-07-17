@@ -2,19 +2,7 @@ import { get, writable } from 'svelte/store';
 import { apiFetch } from '$lib/api/client';
 import { t } from '$lib/i18n';
 import { confirmStore } from '$lib/stores/confirm';
-import type {
-  AIAssistantSettingsInput,
-  AssistantHealthResponse,
-  OverallConfigResponse,
-  OverallConfigUpdateRequest,
-  PresetHealthResponse,
-  PromptOptimizerHealthResponse,
-  PromptOptimizerSystemPromptResponse,
-  R2BackupSettingsInput,
-  R2HealthResponse,
-  SettingsInput,
-  SettingsResponse
-} from '$lib/api/types';
+import type { AIAssistantSettingsInput, AssistantHealthResponse, OverallConfigResponse, OverallConfigUpdateRequest, PresetHealthResponse, PromptOptimizerHealthResponse, PromptOptimizerSystemPromptResponse, R2BackupSettingsInput, R2HealthResponse, SettingsInput, SettingsResponse } from '$lib/api/types/settings';
 import type { ToastVariant } from '$lib/stores/ui';
 
 type ShowToast = (message: string, variant?: ToastVariant) => void;

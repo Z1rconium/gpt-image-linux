@@ -14,7 +14,12 @@ from datetime import datetime, timedelta, timezone
 
 from ..core import settings as config
 from ..core.observability import metrics
-from ..repositories import storage
+from ..repositories.coordination import (
+    acquire_sse_slot,
+    count_active_sse_slots,
+    refresh_sse_slot,
+    release_sse_slot,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -51,7 +56,7 @@ class SSELimiter:
         )
         try:
             acquired, reason = await asyncio.to_thread(
-                storage.acquire_sse_slot,
+                acquire_sse_slot,
                 client_ip=lease.client_ip,
                 connection_id=lease.connection_id,
                 lease_expires_at=self._lease_expires_at(),
@@ -71,7 +76,7 @@ class SSELimiter:
     async def refresh(self, lease: SSELease) -> bool:
         try:
             refreshed = await asyncio.to_thread(
-                storage.refresh_sse_slot,
+                refresh_sse_slot,
                 connection_id=lease.connection_id,
                 lease_expires_at=self._lease_expires_at(),
             )
@@ -97,7 +102,7 @@ class SSELimiter:
         connection_id = lease.connection_id if isinstance(lease, SSELease) else str(lease)
         try:
             released = await asyncio.to_thread(
-                storage.release_sse_slot,
+                release_sse_slot,
                 connection_id,
             )
         except Exception:
@@ -111,7 +116,7 @@ class SSELimiter:
 
     def _count_active_slots(self, client_ip: str | None = None) -> int:
         try:
-            return storage.count_active_sse_slots(client_ip)
+            return count_active_sse_slots(client_ip)
         except Exception:
             return 0
 

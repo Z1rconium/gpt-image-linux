@@ -10,7 +10,7 @@ from ..app_state import FRONTEND_BUILD_DIR, app
 from ..csp import frontend_index_response
 from ...core import settings as config
 from ...core.utils import utc_now
-from ...schemas.models import LatestVersionResponse, VersionResponse
+from ...schemas.access import LatestVersionResponse, VersionResponse
 
 
 logger = logging.getLogger(__name__)

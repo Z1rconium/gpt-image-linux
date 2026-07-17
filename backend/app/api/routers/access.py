@@ -7,7 +7,7 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from ..app_state import app
 from ...core import security as auth
 from ...core import settings as config
-from ...schemas.models import AccessRequest, AccessStatusResponse
+from ...schemas.access import AccessRequest, AccessStatusResponse
 
 
 router = APIRouter()

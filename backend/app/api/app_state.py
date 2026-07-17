@@ -11,7 +11,19 @@ from fastapi import FastAPI
 from ..core import security as auth
 from ..core import settings as config
 from ..core import overall_config
-from ..repositories import storage
+from ..repositories.coordination import (
+    acquire_background_lease,
+    complete_background_lease,
+    list_gallery_job_ids_with_files,
+    release_background_lease,
+)
+from ..repositories.db import close_database_connections, verify_storage_writable
+from ..repositories.gallery.mutations import (
+    backfill_missing_gallery_bytes,
+    sync_gallery_with_image_files,
+)
+from ..repositories.settings import sync_overall_config_env_values
+from ..repositories.thumbnail_jobs import cleanup_auxiliary_state
 
 
 logger = logging.getLogger(__name__)
@@ -51,7 +63,7 @@ def cleanup_stale_gallery_export_files():
         return
 
     try:
-        known_export_ids = storage.list_gallery_job_ids_with_files("export")
+        known_export_ids = list_gallery_job_ids_with_files("export")
     except Exception:
         logger.warning("Failed to load gallery export job records before temp cleanup", exc_info=True)
         return
@@ -73,13 +85,14 @@ def cleanup_stale_gallery_export_files():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    from . import jobs, presets
+    from . import presets
+    from ..services import job_events, job_scheduler
 
     app.state.worker_id = f"{os.getpid()}-{id(app)}"
     Path(config.IMAGES_DIR).mkdir(parents=True, exist_ok=True)
     Path(config.THUMBNAILS_DIR).mkdir(parents=True, exist_ok=True)
     Path(config.DATA_DIR).mkdir(parents=True, exist_ok=True)
-    rows = storage.sync_overall_config_env_values(overall_config.current_env_snapshot())
+    rows = sync_overall_config_env_values(overall_config.current_env_snapshot())
     overall_config.apply_rows_to_config(
         rows,
         include_restart_required=True,
@@ -101,22 +114,22 @@ async def lifespan(app: FastAPI):
 
     startup_maintenance_owner = f"startup-maintenance:{app.state.worker_id}"
     run_startup_maintenance = await asyncio.to_thread(
-        storage.acquire_background_lease,
+        acquire_background_lease,
         name="startup_maintenance",
         owner=startup_maintenance_owner,
         lease_expires_at=_lease_expires_at(STARTUP_MAINTENANCE_LEASE_SECONDS),
         completed_ttl_seconds=STARTUP_MAINTENANCE_COMPLETED_TTL_SECONDS,
     )
     if not run_startup_maintenance:
-        storage.verify_storage_writable()
+        verify_storage_writable()
         logger.info("Skipping startup maintenance; another worker already owns it")
     else:
         try:
             cleanup_stale_edit_source_files()
             cleanup_stale_gallery_export_files()
-            storage.verify_storage_writable()
+            verify_storage_writable()
         except Exception:
-            storage.release_background_lease(
+            release_background_lease(
                 name="startup_maintenance",
                 owner=startup_maintenance_owner,
             )
@@ -125,8 +138,8 @@ async def lifespan(app: FastAPI):
     logger.info("Image jobs resume through SQLite unit leases")
     if run_startup_maintenance:
         try:
-            removed_gallery_entries = storage.sync_gallery_with_image_files()
-            cleaned_auxiliary = storage.cleanup_auxiliary_state()
+            removed_gallery_entries = sync_gallery_with_image_files()
+            cleaned_auxiliary = cleanup_auxiliary_state()
             if removed_gallery_entries:
                 logger.info(
                     "Removed %s stale gallery entries for missing image files",
@@ -135,7 +148,7 @@ async def lifespan(app: FastAPI):
             if any(cleaned_auxiliary.values()):
                 logger.info("Cleaned stale auxiliary rows: %s", cleaned_auxiliary)
         except Exception:
-            storage.release_background_lease(
+            release_background_lease(
                 name="startup_maintenance",
                 owner=startup_maintenance_owner,
             )
@@ -144,7 +157,7 @@ async def lifespan(app: FastAPI):
     async def _background_backfill_gallery_bytes():
         await asyncio.sleep(1.0)
         try:
-            updated = await asyncio.to_thread(storage.backfill_missing_gallery_bytes)
+            updated = await asyncio.to_thread(backfill_missing_gallery_bytes)
             if updated:
                 logger.info(
                     "Backfilled byte sizes for %s legacy gallery entry record(s)",
@@ -156,7 +169,7 @@ async def lifespan(app: FastAPI):
             logger.warning("Failed to backfill legacy gallery byte sizes", exc_info=True)
         finally:
             await asyncio.to_thread(
-                storage.complete_background_lease,
+                complete_background_lease,
                 name="startup_maintenance",
                 owner=startup_maintenance_owner,
             )
@@ -179,40 +192,40 @@ async def lifespan(app: FastAPI):
     app.state.generate_job_last_persist_at = {}
     app.state.image_unit_dispatcher_kick = asyncio.Event()
     app.state.image_unit_dispatcher_task = asyncio.create_task(
-        jobs.run_image_unit_dispatcher(app.state.worker_id)
+        job_scheduler.run_image_unit_dispatcher(app.state.worker_id)
     )
     app.state.gallery_export_lock = asyncio.Lock()
     app.state.gallery_job_subscribers = {"export": {}, "export_direct": {}, "sync": {}, "import": {}, "ai_analyze": {}}
     app.state.gallery_job_sse_poller_tasks = {}
-    from .routers import gallery as gallery_router
-    from .routers import assistant as assistant_router
+    from ..services import gallery_jobs, gallery_maintenance
+    from ..services import assistant_batch
     app.state.thumbnail_dispatcher_kick = asyncio.Event()
     app.state.thumbnail_dispatcher_task = asyncio.create_task(
-        gallery_router.run_thumbnail_dispatcher(app.state.worker_id)
+        gallery_maintenance.run_thumbnail_dispatcher(app.state.worker_id)
     )
     app.state.gallery_export_dispatcher_task = asyncio.create_task(
-        gallery_router.run_gallery_export_dispatcher(app.state.worker_id)
+        gallery_jobs.run_gallery_export_dispatcher(app.state.worker_id)
     )
     app.state.gallery_sync_dispatcher_task = asyncio.create_task(
-        gallery_router.run_gallery_sync_dispatcher(app.state.worker_id)
+        gallery_jobs.run_gallery_sync_dispatcher(app.state.worker_id)
     )
     app.state.gallery_import_dispatcher_task = asyncio.create_task(
-        gallery_router.run_gallery_import_dispatcher(app.state.worker_id)
+        gallery_jobs.run_gallery_import_dispatcher(app.state.worker_id)
     )
     app.state.gallery_export_gc_task = asyncio.create_task(
-        gallery_router.gc_gallery_export_jobs(app.state.worker_id)
+        gallery_maintenance.gc_gallery_export_jobs(app.state.worker_id)
     )
     app.state.gallery_file_gc_task = asyncio.create_task(
-        gallery_router.run_gallery_file_gc(app.state.worker_id)
+        gallery_maintenance.run_gallery_file_gc(app.state.worker_id)
     )
     app.state.gallery_r2_scheduled_sync_task = asyncio.create_task(
-        gallery_router.run_gallery_r2_scheduled_sync(app.state.worker_id)
+        gallery_maintenance.run_gallery_r2_scheduled_sync(app.state.worker_id)
     )
     app.state.gallery_ai_analyze_dispatcher_task = asyncio.create_task(
-        assistant_router.run_ai_analyze_dispatcher(app.state.worker_id)
+        assistant_batch.run_ai_analyze_dispatcher(app.state.worker_id)
     )
     app.state.access_failures: OrderedDict[str, tuple[int, float]] = OrderedDict()
-    jobs.reconcile_active_generate_jobs_from_storage()
+    job_events.reconcile_active_generate_jobs_from_storage()
     try:
         yield
     finally:
@@ -297,7 +310,7 @@ async def lifespan(app: FastAPI):
             await asyncio.gather(*awaitables, return_exceptions=True)
         from ..integrations.session_pool import close_pool
         await close_pool()
-        storage.close_database_connections()
+        close_database_connections()
 
 
 app = FastAPI(title="GPT Image Panel", lifespan=lifespan)

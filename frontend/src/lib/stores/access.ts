@@ -1,7 +1,7 @@
 import { get, writable } from 'svelte/store';
 import { apiFetch, setUnauthorizedHandler } from '$lib/api/client';
 import { t } from '$lib/i18n';
-import type { AccessStatus } from '$lib/api/types';
+import type { AccessStatus } from '$lib/api/types/access';
 
 export type AccessState = {
   authenticated: boolean;

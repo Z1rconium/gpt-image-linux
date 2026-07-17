@@ -1,4 +1,4 @@
-import type { GenerateJobStatus } from '$lib/api/types';
+import type { GenerateJobStatus } from '$lib/api/types/jobs';
 import { isFailureJobStatus } from '$lib/utils/jobs';
 
 function safeAssetUrl(url?: string | null) {

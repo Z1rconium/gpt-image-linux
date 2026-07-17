@@ -5,7 +5,8 @@
   import { plainTextInput } from '$lib/actions/plainTextInput';
   import { apiFetch } from '$lib/api/client';
   import { language, t } from '$lib/i18n';
-  import type { ApiPath, PromptOptimizeResponse } from '$lib/api/types';
+import type { PromptOptimizeResponse } from '$lib/api/types/assistant';
+import type { ApiPath } from '$lib/api/types/common';
   import { initialPromptFormState, type PromptFormState } from '$lib/stores/preview';
   import { buildPromptOptimizeRequest } from '$lib/utils/promptOptimizer';
 

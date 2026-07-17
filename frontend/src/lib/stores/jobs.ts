@@ -4,7 +4,7 @@ import { openJsonEventSource } from '$lib/api/events';
 import { t } from '$lib/i18n';
 import { filenameFromImageUrl, jobFailureMessage } from '$lib/utils/format';
 import { isActiveJobStatus } from '$lib/utils/jobs';
-import type { GenerateJobResponse, GenerateJobStatus } from '$lib/api/types';
+import type { GenerateJobResponse, GenerateJobStatus } from '$lib/api/types/jobs';
 import type { PreviewState } from '$lib/stores/preview';
 
 export type JobsState = {

@@ -35,10 +35,16 @@ from ...core.api_paths import (
     normalize_default_model,
     normalize_default_response_format,
 )
-from ...integrations import upstream_client as proxy
-from ...integrations import r2_sync
-from ...repositories import storage as storage_repo
-from ...schemas.models import (
+from ...integrations.upstream import generation as proxy
+from ...integrations.r2.client import probe_r2_settings
+from ...repositories.settings import (
+    list_overall_config_values,
+    save_ai_assistant_settings,
+    save_overall_config_overrides,
+    save_prompt_optimizer_settings,
+    save_r2_backup_settings,
+)
+from ...schemas.settings import (
     OverallConfigItem,
     OverallConfigResponse,
     OverallConfigUpdateRequest,
@@ -107,13 +113,13 @@ def _serialize_overall_config(
 
 @router.get("/api/settings/overall-config", response_model=OverallConfigResponse)
 async def get_overall_config():
-    rows = await asyncio.to_thread(storage_repo.list_overall_config_values)
+    rows = await asyncio.to_thread(list_overall_config_values)
     return _serialize_overall_config(rows)
 
 
 @router.put("/api/settings/overall-config", response_model=OverallConfigResponse)
 async def update_overall_config(req: OverallConfigUpdateRequest):
-    current_rows = await asyncio.to_thread(storage_repo.list_overall_config_values)
+    current_rows = await asyncio.to_thread(list_overall_config_values)
     updates: dict[str, str | None] = {}
     seen_names: set[str] = set()
     for item in req.updates:
@@ -160,7 +166,7 @@ async def update_overall_config(req: OverallConfigUpdateRequest):
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
 
-    rows = await asyncio.to_thread(storage_repo.save_overall_config_overrides, updates)
+    rows = await asyncio.to_thread(save_overall_config_overrides, updates)
     overall_config.apply_rows_to_config(rows)
     restart_required_names = [
         name
@@ -221,20 +227,17 @@ async def update_settings(req: SettingsRequest):
         )
         current_optimizer = get_prompt_optimizer_settings()
         updated_optimizer = apply_prompt_optimizer_settings(current_optimizer, req.prompt_optimizer)
-        from ...repositories import storage as storage_repo
-        await asyncio.to_thread(storage_repo.save_prompt_optimizer_settings, updated_optimizer)
+        await asyncio.to_thread(save_prompt_optimizer_settings, updated_optimizer)
     if req.ai_assistant is not None:
         from ..presets import get_ai_assistant_settings
-        from ...repositories import storage as storage_repo
         current_assistant = get_ai_assistant_settings()
         updated_assistant = apply_ai_assistant_settings(current_assistant, req.ai_assistant)
-        await asyncio.to_thread(storage_repo.save_ai_assistant_settings, updated_assistant)
+        await asyncio.to_thread(save_ai_assistant_settings, updated_assistant)
     if req.r2_backup is not None:
         from ..presets import get_r2_backup_settings
-        from ...repositories import storage as storage_repo
         current_r2 = get_r2_backup_settings()
         updated_r2 = apply_r2_backup_settings(current_r2, req.r2_backup)
-        await asyncio.to_thread(storage_repo.save_r2_backup_settings, updated_r2)
+        await asyncio.to_thread(save_r2_backup_settings, updated_r2)
     return await asyncio.to_thread(build_settings_response)
 
 
@@ -250,7 +253,7 @@ async def check_r2_settings_health(req: R2BackupSettingsRequest):
 
     current = await asyncio.to_thread(get_r2_backup_settings)
     draft = apply_r2_backup_settings(current, req)
-    result = await asyncio.to_thread(r2_sync.probe_r2_settings, draft)
+    result = await asyncio.to_thread(probe_r2_settings, draft)
     return R2HealthResponse(**result)
 
 

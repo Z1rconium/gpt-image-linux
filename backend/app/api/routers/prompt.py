@@ -19,13 +19,13 @@ from ...integrations.prompt_optimizer_client import (
     save_prompt_optimizer_system_prompt,
     validate_optimizer_endpoint,
 )
-from ...schemas.models import (
+from ...schemas.assistant import (
     PromptOptimizeRequest,
     PromptOptimizeResponse,
-    PromptOptimizerHealthResponse,
     PromptOptimizerSystemPromptRequest,
     PromptOptimizerSystemPromptResponse,
 )
+from ...schemas.settings import PromptOptimizerHealthResponse
 
 logger = logging.getLogger(__name__)
 

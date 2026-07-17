@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { GalleryResponse } from '$lib/api/types';
+import type { GalleryResponse } from '$lib/api/types/gallery';
   import { t } from '$lib/i18n';
   import type { GalleryFilters } from '$lib/stores/gallery';
 

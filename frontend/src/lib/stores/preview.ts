@@ -2,7 +2,9 @@ import { get, writable } from 'svelte/store';
 import { apiFetch } from '$lib/api/client';
 import { t } from '$lib/i18n';
 import { MAX_EDIT_SOURCE_IMAGES, editSourceCount, editSourceStore, type EditSourceState } from '$lib/stores/editSource';
-import type { ApiPath, GenerateJobResponse, GenerateJobStatus, GenerateRequestBody, ResponseFormatDefault } from '$lib/api/types';
+import type { ApiPath, ResponseFormatDefault } from '$lib/api/types/common';
+import type { GenerateRequestBody } from '$lib/api/types/generation';
+import type { GenerateJobResponse, GenerateJobStatus } from '$lib/api/types/jobs';
 
 export type PreviewState = {
   loading: boolean;

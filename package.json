@@ -4,9 +4,9 @@
     "frontend:build": "npm --prefix frontend run build",
     "frontend:check": "npm --prefix frontend run check",
     "backend:dev": "granian --interface asgi backend.app.main:app --host 0.0.0.0 --port 9090 --reload",
-    "test:contract": "python3 -m pytest backend/tests/test_contract.py -q",
+    "test:contract": ".venv/bin/python -m pytest backend/tests/test_*_contract.py -q",
     "test:e2e": "npm --prefix frontend run test:e2e",
     "test:e2e:perf": "npm --prefix frontend run test:e2e:perf",
-    "test:perf": "RUN_PERFORMANCE_TESTS=true python3 -m pytest backend/tests/test_performance.py -q"
+    "test:perf": "RUN_PERFORMANCE_TESTS=true .venv/bin/python -m pytest backend/tests/test_performance.py -q"
   }
 }

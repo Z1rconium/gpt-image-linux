@@ -1,4 +1,6 @@
-import type { ApiPath, GalleryEntry, GenerateJobStatus, ResponseFormatDefault } from '$lib/api/types';
+import type { ApiPath, ResponseFormatDefault } from '$lib/api/types/common';
+import type { GalleryEntry } from '$lib/api/types/gallery';
+import type { GenerateJobStatus } from '$lib/api/types/jobs';
 import { DEFAULT_PROMPT_MODEL, DEFAULT_QUANTITY, initialPromptFormState, type PromptFormState } from '$lib/stores/preview';
 
 const GENERATION_API_PATHS: ApiPath[] = ['/v1/images/generations', '/v1/responses', '/v1/chat/completions'];

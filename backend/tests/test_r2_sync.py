@@ -4,8 +4,11 @@ import pytest
 
 from backend.app.core import settings as config
 from backend.app.core.validators import is_private_ip, normalize_r2_endpoint_url
-from backend.app.integrations import r2_sync
-from backend.app.repositories import storage
+from backend.app.integrations.r2 import client as r2_client
+from backend.app.integrations.r2 import config as r2_config
+from backend.app.integrations.r2 import sync as r2_algorithm
+from backend.app.repositories import db as db_repo
+from backend.app.repositories.gallery import sync_state as gallery_sync_state
 
 
 PNG_BYTES = b"\x89PNG\r\n\x1a\nfake"
@@ -117,13 +120,9 @@ def storage_runtime(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "THUMBNAILS_DIR", str(images / "thumbs"))
     monkeypatch.setattr(config, "DATA_DIR", str(data))
     monkeypatch.setattr(config, "DATABASE_FILE", str(data / "app.sqlite3"))
-    storage.close_database_connections()
-    storage._db_initialized = False
-    storage._dirs_initialized = False
+    db_repo.close_database_connections()
     yield
-    storage.close_database_connections()
-    storage._db_initialized = False
-    storage._dirs_initialized = False
+    db_repo.close_database_connections()
 
 
 def write_image(image_dir: Path, filename: str, data: bytes = PNG_BYTES):
@@ -133,9 +132,9 @@ def write_image(image_dir: Path, filename: str, data: bytes = PNG_BYTES):
 
 
 def insert_gallery_row(image_id: str, filename: str, *, byte_size: int, sha256: str):
-    storage._ensure_database()
-    with storage._connect() as conn:
-        with storage._transaction(conn):
+    db_repo._ensure_database()
+    with db_repo._connect() as conn:
+        with db_repo._transaction(conn):
             conn.execute(
                 """
                 INSERT INTO gallery_entries (
@@ -150,13 +149,13 @@ def insert_gallery_row(image_id: str, filename: str, *, byte_size: int, sha256: 
 def test_r2_sync_state_filters_incremental_candidates(storage_runtime):
     insert_gallery_row("image-a", "a.png", byte_size=4, sha256="sha-a")
 
-    assert storage.count_gallery_r2_sync_rows(key_prefix="gallery/") == 1
+    assert gallery_sync_state.count_gallery_r2_sync_rows(key_prefix="gallery/") == 1
     assert [
         row["filename"]
-        for row in storage.iter_gallery_r2_sync_rows(key_prefix="gallery/")
+        for row in gallery_sync_state.iter_gallery_r2_sync_rows(key_prefix="gallery/")
     ] == ["a.png"]
 
-    storage.mark_gallery_r2_sync_state(
+    gallery_sync_state.mark_gallery_r2_sync_state(
         [
             {
                 "filename": "a.png",
@@ -168,23 +167,23 @@ def test_r2_sync_state_filters_incremental_candidates(storage_runtime):
         ]
     )
 
-    assert storage.count_gallery_r2_sync_rows(key_prefix="gallery/") == 0
-    assert list(storage.iter_gallery_r2_sync_rows(key_prefix="gallery/")) == []
-    with storage._connect() as conn:
+    assert gallery_sync_state.count_gallery_r2_sync_rows(key_prefix="gallery/") == 0
+    assert list(gallery_sync_state.iter_gallery_r2_sync_rows(key_prefix="gallery/")) == []
+    with db_repo._connect() as conn:
         state = conn.execute(
             "SELECT etag, last_remote_seen_at FROM r2_sync_state WHERE filename = ?",
             ("a.png",),
         ).fetchone()
     assert state["etag"] == "etag-a"
     assert state["last_remote_seen_at"]
-    assert storage.count_gallery_r2_sync_rows(key_prefix="other/") == 1
-    assert storage.count_gallery_r2_sync_rows(
+    assert gallery_sync_state.count_gallery_r2_sync_rows(key_prefix="other/") == 1
+    assert gallery_sync_state.count_gallery_r2_sync_rows(
         key_prefix="gallery/",
         full_reconcile=True,
     ) == 1
 
-    with storage._connect() as conn:
-        with storage._transaction(conn):
+    with db_repo._connect() as conn:
+        with db_repo._transaction(conn):
             conn.execute(
                 """
                 UPDATE gallery_entries
@@ -194,7 +193,7 @@ def test_r2_sync_state_filters_incremental_candidates(storage_runtime):
                 ("sha-b", "image-a"),
             )
 
-    rows = list(storage.iter_gallery_r2_sync_rows(key_prefix="gallery/"))
+    rows = list(gallery_sync_state.iter_gallery_r2_sync_rows(key_prefix="gallery/"))
     assert len(rows) == 1
     assert rows[0]["filename"] == "a.png"
     assert rows[0]["sha256"] == "sha-b"
@@ -205,14 +204,14 @@ def test_r2_sync_rows_support_start_after_checkpoint(storage_runtime):
     insert_gallery_row("image-b", "b.png", byte_size=4, sha256="sha-b")
     insert_gallery_row("image-c", "c.png", byte_size=4, sha256="sha-c")
 
-    assert storage.count_gallery_r2_sync_rows(
+    assert gallery_sync_state.count_gallery_r2_sync_rows(
         key_prefix="gallery/",
         full_reconcile=True,
         start_after_filename="a.png",
     ) == 2
     assert [
         row["filename"]
-        for row in storage.iter_gallery_r2_sync_rows(
+        for row in gallery_sync_state.iter_gallery_r2_sync_rows(
             key_prefix="gallery/",
             full_reconcile=True,
             start_after_filename="a.png",
@@ -223,7 +222,7 @@ def test_r2_sync_rows_support_start_after_checkpoint(storage_runtime):
 def test_r2_health_probe_success_and_cleanup_warning():
     client = FakeS3Client(fail_delete=True)
 
-    health = r2_sync.probe_r2_settings(
+    health = r2_client.probe_r2_settings(
         r2_settings(),
         client_factory=lambda _effective: client,
     )
@@ -305,7 +304,7 @@ def test_r2_sync_uploads_only_missing_and_leaves_bucket_only_keys(image_dir):
     write_image(image_dir, "b.png", b"bbbb")
     client = FakeS3Client(keys={"gallery/a.png", "gallery/bucket-only.png"})
 
-    result = r2_sync.sync_gallery_to_r2(
+    result = r2_algorithm.sync_gallery_to_r2(
         r2_settings(),
         [
             {"id": "a", "filename": "a.png", "bytes": len(PNG_BYTES), "sha256": "sha-a"},
@@ -335,7 +334,7 @@ def test_r2_sync_dry_run_counts_pending_without_uploading(image_dir):
     client = FakeS3Client(keys={"gallery/a.png"})
     progress: list[dict] = []
 
-    result = r2_sync.sync_gallery_to_r2(
+    result = r2_algorithm.sync_gallery_to_r2(
         r2_settings(),
         [
             {"id": "a", "filename": "a.png", "bytes": len(PNG_BYTES), "sha256": "sha-a"},
@@ -361,7 +360,7 @@ def test_r2_sync_skips_missing_local_files(image_dir):
     write_image(image_dir, "present.png")
     client = FakeS3Client()
 
-    result = r2_sync.sync_gallery_to_r2(
+    result = r2_algorithm.sync_gallery_to_r2(
         r2_settings(),
         [
             {"id": "present", "filename": "present.png", "bytes": len(PNG_BYTES)},
@@ -381,8 +380,8 @@ def test_r2_sync_upload_failure_raises_with_counts_preserved(image_dir):
     write_image(image_dir, "bad.png")
     client = FakeS3Client(fail_upload_keys={"gallery/bad.png"})
 
-    with pytest.raises(r2_sync.R2SyncError) as exc_info:
-        r2_sync.sync_gallery_to_r2(
+    with pytest.raises(r2_config.R2SyncError) as exc_info:
+        r2_algorithm.sync_gallery_to_r2(
             r2_settings(),
             [{"id": "bad", "filename": "bad.png", "bytes": len(PNG_BYTES)}],
             total_count=1,

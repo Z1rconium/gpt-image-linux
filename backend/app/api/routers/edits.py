@@ -8,8 +8,12 @@ from fastapi import APIRouter, Depends, Form, HTTPException, Request, UploadFile
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from ..edit_limits import MAX_EDIT_SOURCE_IMAGES
-from ..gallery_archive import max_upload_bytes
-from ..jobs import EditImageSource, build_edit_request_from_form, queue_edit_job
+from ...services.gallery_archive_shared import max_upload_bytes
+from ...services.job_queue import (
+    EditImageSource,
+    build_edit_request_from_form,
+    queue_edit_job,
+)
 from ..uploads import (
     IMAGE_UPLOAD_CONTENT_TYPES,
     is_image_upload,
@@ -17,8 +21,9 @@ from ..uploads import (
     validate_upload_image_bytes,
 )
 from ...core import settings as config
-from ...repositories import storage
-from ...schemas.models import EditRequest, GenerateJobResponse
+from ...repositories.gallery.queries import get_gallery_entry
+from ...repositories.image_files import safe_image_path, validate_image_file
+from ...schemas.generation import EditRequest, GenerateJobResponse
 
 
 router = APIRouter()
@@ -82,7 +87,7 @@ def validate_edit_source_header(
 
 def validate_edit_source_file(path: Path, filename: str, content_type: str):
     try:
-        storage.validate_image_file(
+        validate_image_file(
             path,
             filename=filename,
             content_type=content_type,
@@ -227,11 +232,11 @@ async def read_upload_edit_sources(request: Request) -> list[EditImageSource]:
 
 
 async def read_gallery_edit_source(image_id: str) -> EditImageSource:
-    entry = await asyncio.to_thread(storage.get_gallery_entry, image_id)
+    entry = await asyncio.to_thread(get_gallery_entry, image_id)
     if not entry:
         raise HTTPException(status_code=404, detail="Gallery entry not found")
 
-    path = await asyncio.to_thread(storage.safe_image_path, entry.filename)
+    path = await asyncio.to_thread(safe_image_path, entry.filename)
     if not path or not path.exists():
         raise HTTPException(status_code=404, detail="Gallery image file not found")
 

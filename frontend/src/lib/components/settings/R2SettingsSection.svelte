@@ -1,5 +1,6 @@
 <script lang="ts">
-  import type { PresetHealthStatus, R2HealthResponse } from '$lib/api/types';
+import type { PresetHealthStatus } from '$lib/api/types/common';
+import type { R2HealthResponse } from '$lib/api/types/settings';
   import { t } from '$lib/i18n';
 
   export let enabled = false;

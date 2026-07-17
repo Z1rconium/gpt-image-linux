@@ -18,8 +18,14 @@ from ..core.validators import (
     normalize_webhook_url,
     resolve_env_var_ref,
 )
-from ..repositories import storage
-from ..schemas.models import (
+from ..repositories.settings import (
+    load_ai_assistant_settings,
+    load_prompt_optimizer_settings,
+    load_r2_backup_settings,
+    load_settings,
+    save_settings,
+)
+from ..schemas.settings import (
     AIAssistantSettingsResponse,
     ApiPresetResponse,
     PromptOptimizerSettingsResponse,
@@ -194,7 +200,7 @@ def normalize_ai_assistant_settings(raw: dict | None) -> dict:
 
 
 def persist_api_settings():
-    storage.save_settings(
+    save_settings(
         {
             "active_preset_id": getattr(app.state, "active_preset_id", "default"),
             "upstream_socks5_proxy": get_upstream_socks5_proxy(raw=True),
@@ -208,7 +214,7 @@ def persist_api_settings():
 
 
 def load_api_settings():
-    data = storage.load_settings()
+    data = load_settings()
     presets = data["presets"]
     app.state.api_presets = presets
     app.state.active_preset_id = data["active_preset_id"]
@@ -417,7 +423,7 @@ def build_ai_assistant_settings_response(raw: dict | None) -> AIAssistantSetting
 
 
 def build_r2_backup_settings_response(raw: dict | None) -> R2BackupSettingsResponse:
-    settings = storage.load_r2_backup_settings() if raw is None else raw
+    settings = load_r2_backup_settings() if raw is None else raw
     access_key_fields = secret_response_fields(
         str(settings.get("access_key_id") or ""),
         "access_key_id",
@@ -492,11 +498,11 @@ def resolve_ai_assistant_api_key(raw: dict | None) -> str:
 
 
 def get_prompt_optimizer_settings() -> dict:
-    return storage.load_prompt_optimizer_settings()
+    return load_prompt_optimizer_settings()
 
 
 def get_ai_assistant_settings() -> dict:
-    return storage.load_ai_assistant_settings()
+    return load_ai_assistant_settings()
 
 
 def effective_ai_assistant_settings(raw: dict | None = None) -> dict:
@@ -518,7 +524,7 @@ def effective_ai_assistant_settings(raw: dict | None = None) -> dict:
 
 
 def get_r2_backup_settings() -> dict:
-    return storage.load_r2_backup_settings()
+    return load_r2_backup_settings()
 
 
 def apply_prompt_optimizer_settings(
@@ -559,7 +565,7 @@ def apply_ai_assistant_settings(current: dict | None, req_assistant: object) -> 
 
 
 def apply_r2_backup_settings(current: dict | None, req_r2: object) -> dict:
-    current = storage.load_r2_backup_settings() if current is None else dict(current)
+    current = load_r2_backup_settings() if current is None else dict(current)
     if req_r2 is None:
         return current
     if hasattr(req_r2, "enabled") and req_r2.enabled is not None:

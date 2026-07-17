@@ -1,4 +1,5 @@
-import type { ApiPath, PromptOptimizeRequest } from '$lib/api/types';
+import type { PromptOptimizeRequest } from '$lib/api/types/assistant';
+import type { ApiPath } from '$lib/api/types/common';
 import type { Language } from '$lib/i18n';
 import type { PromptFormState } from '$lib/stores/preview';
 

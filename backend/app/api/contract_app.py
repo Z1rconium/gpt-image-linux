@@ -4,8 +4,7 @@ from .app_state import FRONTEND_BUILD_DIR, app
 from .body_limit import BodyLimitMiddleware
 from .middleware import register_exception_handlers, register_middleware
 from .routers import routers
-from ..integrations import upstream_client as proxy
-from ..repositories import storage
+from ..integrations.upstream import generation as proxy
 
 
 register_middleware(app)

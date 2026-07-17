@@ -7,7 +7,10 @@ import pytest
 
 from backend.app.core import settings as config
 from backend.app.core.observability import metrics
-from backend.app.repositories import storage
+from backend.app.repositories import db as db_repo
+from backend.app.repositories import image_jobs as image_jobs_repo
+from backend.app.repositories.gallery import mutations as gallery_mutations
+from backend.app.repositories.gallery import queries as gallery_queries
 
 
 pytestmark = pytest.mark.skipif(
@@ -28,11 +31,9 @@ def _configure_runtime(tmp_path: Path):
     config.DATABASE_FILE = str(data_dir / "app.sqlite3")
     config.DEFAULT_UPSTREAM_SOCKS5_PROXY = ""
 
-    storage.close_database_connections()
-    storage._db_initialized = False
-    storage._dirs_initialized = False
+    db_repo.close_database_connections()
     metrics.reset()
-    storage.verify_storage_writable()
+    db_repo.verify_storage_writable()
 
 
 def _seed_gallery_rows(row_count: int):
@@ -40,7 +41,7 @@ def _seed_gallery_rows(row_count: int):
     sizes = ("1024x1024", "1536x1024", "1024x1536")
     models = ("gpt-image-2", "gpt-image-1")
     presets = ("Default", "Studio", "Draft")
-    with storage._connect() as conn:
+    with db_repo._connect() as conn:
         for start in range(0, row_count, 5_000):
             rows = [
                 {
@@ -60,13 +61,13 @@ def _seed_gallery_rows(row_count: int):
                 }
                 for index in range(start, min(start + 5_000, row_count))
             ]
-            with storage._transaction(conn):
-                storage._insert_gallery_entries_on_conn(conn, rows)
+            with db_repo._transaction(conn):
+                gallery_mutations._insert_gallery_entries_on_conn(conn, rows)
 
 
 def _seed_job_rows(row_count: int):
     for index in range(row_count):
-        storage.upsert_generate_job(
+        image_jobs_repo.upsert_generate_job(
             {
                 "job_id": f"job-{index:04d}",
                 "status": "success",
@@ -101,7 +102,7 @@ def test_gallery_page_query_baseline(tmp_path, row_count, record_property):
     _seed_gallery_rows(row_count)
 
     def query():
-        page = storage.get_gallery_page(
+        page = gallery_queries.get_gallery_page(
             page=1,
             page_size=9,
             filters={"prompt": "benchmark prompt 4"},
@@ -155,7 +156,7 @@ def test_gallery_large_query_baselines(
     cursor = None
     direction = "next"
     if case_name == "lightweight_cursor_page":
-        first_page = storage.get_gallery_page(
+        first_page = gallery_queries.get_gallery_page(
             page=1,
             page_size=9,
             filters=filters,
@@ -166,7 +167,7 @@ def test_gallery_large_query_baselines(
         cursor = first_page.next_cursor
 
     def query():
-        gallery_page = storage.get_gallery_page(
+        gallery_page = gallery_queries.get_gallery_page(
             page=page,
             page_size=9,
             filters=filters,
@@ -194,7 +195,7 @@ def test_gallery_deep_page_anchor_cache_100k(tmp_path, record_property):
     _seed_gallery_rows(100_000)
 
     started_at = time.perf_counter()
-    first_page = storage.get_gallery_page(
+    first_page = gallery_queries.get_gallery_page(
         page=5_000,
         page_size=9,
         include_filter_options=False,
@@ -204,7 +205,7 @@ def test_gallery_deep_page_anchor_cache_100k(tmp_path, record_property):
     assert first_page.timings_ms.get("anchor_seeded_by_offset") == 1.0
 
     def query():
-        page = storage.get_gallery_page(
+        page = gallery_queries.get_gallery_page(
             page=5_000,
             page_size=9,
             include_filter_options=False,
@@ -243,11 +244,11 @@ def test_gallery_filtered_deep_page_anchor_baselines(
     record_property,
 ):
     _configure_runtime(tmp_path)
-    monkeypatch.setattr(storage, "GALLERY_PAGE_ANCHOR_SMALL_OFFSET_THRESHOLD", 100)
-    monkeypatch.setattr(storage, "GALLERY_PAGE_ANCHOR_INTERVAL_PAGES", 25)
+    monkeypatch.setattr(gallery_queries, "GALLERY_PAGE_ANCHOR_SMALL_OFFSET_THRESHOLD", 100)
+    monkeypatch.setattr(gallery_queries, "GALLERY_PAGE_ANCHOR_INTERVAL_PAGES", 25)
     _seed_gallery_rows(100_000)
 
-    first_page = storage.get_gallery_page(
+    first_page = gallery_queries.get_gallery_page(
         page=page,
         page_size=9,
         filters=filters,
@@ -257,7 +258,7 @@ def test_gallery_filtered_deep_page_anchor_baselines(
     assert first_page.timings_ms.get("anchor_seeded_by_offset") == 1.0
 
     def query():
-        gallery_page = storage.get_gallery_page(
+        gallery_page = gallery_queries.get_gallery_page(
             page=page,
             page_size=9,
             filters=filters,
@@ -276,7 +277,7 @@ def test_gallery_filtered_deep_page_anchor_baselines(
 def test_gallery_cursor_query_baseline(tmp_path, record_property):
     _configure_runtime(tmp_path)
     _seed_gallery_rows(10_000)
-    first_page = storage.get_gallery_page(
+    first_page = gallery_queries.get_gallery_page(
         page=1,
         page_size=9,
         filters={"prompt": "benchmark prompt 4"},
@@ -284,7 +285,7 @@ def test_gallery_cursor_query_baseline(tmp_path, record_property):
     assert first_page.next_cursor
 
     def query():
-        page = storage.get_gallery_page(
+        page = gallery_queries.get_gallery_page(
             page=2,
             page_size=9,
             filters={"prompt": "benchmark prompt 4"},
@@ -304,7 +305,7 @@ def test_job_history_query_baseline(tmp_path, record_property):
     _seed_job_rows(500)
 
     def query():
-        rows = storage.list_generate_jobs(limit=50, offset=0)
+        rows = image_jobs_repo.list_generate_jobs(limit=50, offset=0)
         assert len(rows) == 50
 
     p50, p95 = _measure_ms(query)

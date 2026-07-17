@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { GenerateJobImage, GenerateJobStatus } from '$lib/api/types';
+import type { GenerateJobImage, GenerateJobStatus } from '$lib/api/types/jobs';
   import { t } from '$lib/i18n';
   import { displayImageSize, downloadUrl, filenameFromImageUrl, formatBeijingTime, stageLabel, statusLabel } from '$lib/utils/format';
 

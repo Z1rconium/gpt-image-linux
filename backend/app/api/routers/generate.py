@@ -7,16 +7,17 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
 from ..app_state import app
-from ..jobs import (
-    cleanup_parent_edit_sources,
+from ...services.job_events import (
     get_job_subscribers,
     get_jobs_subscribers,
     publish_queue,
-    queue_image_job,
     reconcile_active_generate_jobs,
-    run_generate_job,
     serialize_sse_event,
     store_generate_job,
+)
+from ...services.job_queue import (
+    cleanup_parent_edit_sources,
+    queue_image_job,
     trim_generate_jobs,
 )
 from ..sse_limiter import sse_limiter
@@ -26,12 +27,21 @@ from ...core.api_paths import normalize_api_path
 from ...core.constants import ACTIVE_GENERATE_JOB_STATUSES, ERROR_GENERATE_JOB_STATUSES
 from ...core.observability import metrics
 from ...core.utils import utc_now
-from ...repositories import storage
-from ...schemas.models import (
+from ...repositories.image_jobs import (
+    aggregate_image_job_units,
+    cancel_image_job_units,
+    clear_generate_job_history as clear_persisted_generate_job_history,
+    get_generate_job as get_persisted_generate_job,
+    get_generate_jobs_list_updated_at_edge,
+    get_generate_jobs_updated_at_edges,
+    list_generate_jobs as list_persisted_generate_jobs,
+    release_edit_source_reservation,
+)
+from ...schemas.common import MessageResponse
+from ...schemas.generation import (
     GenerateJobResponse,
     GenerateJobStatus,
     GenerateRequest,
-    MessageResponse,
 )
 
 
@@ -72,14 +82,14 @@ async def _poll_generate_jobs_sse() -> None:
                 break
 
             edge = await asyncio.to_thread(
-                storage.get_generate_jobs_list_updated_at_edge,
+                get_generate_jobs_list_updated_at_edge,
                 statuses=ACTIVE_GENERATE_JOB_STATUSES,
             )
             metrics.increment("sse.poll_queries.generate_jobs")
             if edge != last_edge:
                 last_edge = edge
                 jobs = await asyncio.to_thread(
-                    storage.list_generate_jobs,
+                    list_persisted_generate_jobs,
                     statuses=ACTIVE_GENERATE_JOB_STATUSES,
                 )
                 jobs = reconcile_active_generate_jobs(jobs)
@@ -110,7 +120,7 @@ async def _poll_generate_job_sse() -> None:
                 break
 
             current_edges = await asyncio.to_thread(
-                storage.get_generate_jobs_updated_at_edges,
+                get_generate_jobs_updated_at_edges,
                 job_ids=set(subscribers_by_job),
             )
             metrics.increment("sse.poll_queries.generate_job")
@@ -125,7 +135,7 @@ async def _poll_generate_job_sse() -> None:
                 if last_edges.get(job_id) != updated_at
             ]
             for job_id in changed_job_ids:
-                job = await asyncio.to_thread(storage.get_generate_job, job_id)
+                job = await asyncio.to_thread(get_persisted_generate_job, job_id)
                 event = (
                     {"event": "job", "data": job}
                     if job
@@ -147,24 +157,6 @@ async def _poll_generate_job_sse() -> None:
 
 @router.post("/api/generate", response_model=GenerateJobResponse, status_code=202)
 async def generate(req: GenerateRequest):
-    def start_generate_job(
-        job_id: str,
-        api_url: str,
-        api_key: str,
-        api_path: str,
-        api_preset_name: str,
-        socks5_proxy: str,
-    ):
-        return run_generate_job(
-            job_id,
-            api_url,
-            api_key,
-            api_path,
-            api_preset_name,
-            req,
-            socks5_proxy,
-        )
-
     return queue_image_job(
         req=req,
         operation="generation",
@@ -172,7 +164,6 @@ async def generate(req: GenerateRequest):
             req.api_path or str(preset.get("api_path") or "/v1/images/generations")
         ),
         queued_message="Queued image generation",
-        task_factory=start_generate_job,
     )
 
 
@@ -188,7 +179,7 @@ async def list_generate_jobs(
     if include_finished:
         statuses = ERROR_GENERATE_JOB_STATUSES if failed_only else None
         jobs = await asyncio.to_thread(
-            storage.list_generate_jobs,
+            list_persisted_generate_jobs,
             statuses=statuses,
             limit=limit,
             offset=offset,
@@ -197,7 +188,7 @@ async def list_generate_jobs(
         )
     else:
         jobs = await asyncio.to_thread(
-            storage.list_generate_jobs,
+            list_persisted_generate_jobs,
             statuses=ACTIVE_GENERATE_JOB_STATUSES,
         )
     return [GenerateJobStatus(**job) for job in jobs]
@@ -221,7 +212,7 @@ async def stream_generate_jobs(request: Request):
         _start_generate_jobs_sse_poller()
         try:
             jobs = await asyncio.to_thread(
-                storage.list_generate_jobs,
+                list_persisted_generate_jobs,
                 statuses=ACTIVE_GENERATE_JOB_STATUSES,
             )
             jobs = reconcile_active_generate_jobs(jobs)
@@ -280,7 +271,7 @@ async def stream_generate_jobs(request: Request):
 
 @router.delete("/api/generate/jobs/history", response_model=MessageResponse)
 async def clear_generate_job_history():
-    deleted_count = await asyncio.to_thread(storage.clear_generate_job_history)
+    deleted_count = await asyncio.to_thread(clear_persisted_generate_job_history)
     return MessageResponse(
         status="success",
         message=f"Deleted {deleted_count} job history entr{'y' if deleted_count == 1 else 'ies'}",
@@ -290,7 +281,7 @@ async def clear_generate_job_history():
 @router.get("/api/generate/{job_id}", response_model=GenerateJobStatus)
 async def get_generate_job(job_id: str):
     job = getattr(app.state, "generate_jobs", {}).get(job_id) or await asyncio.to_thread(
-        storage.get_generate_job,
+        get_persisted_generate_job,
         job_id,
     )
     if not job:
@@ -301,7 +292,7 @@ async def get_generate_job(job_id: str):
 @router.get("/api/generate/{job_id}/events")
 async def stream_generate_job(job_id: str, request: Request):
     job = getattr(app.state, "generate_jobs", {}).get(job_id) or await asyncio.to_thread(
-        storage.get_generate_job,
+        get_persisted_generate_job,
         job_id,
     )
     if not job:
@@ -324,7 +315,7 @@ async def stream_generate_job(job_id: str, request: Request):
         try:
             current = getattr(app.state, "generate_jobs", {}).get(job_id)
             if not current:
-                current = await asyncio.to_thread(storage.get_generate_job, job_id)
+                current = await asyncio.to_thread(get_persisted_generate_job, job_id)
             if not current:
                 return
             last_payload = json_payload_key(current)
@@ -393,7 +384,7 @@ async def stream_generate_job(job_id: str, request: Request):
 @router.delete("/api/generate/{job_id}", response_model=MessageResponse)
 async def cancel_generate_job(job_id: str):
     job = getattr(app.state, "generate_jobs", {}).get(job_id) or await asyncio.to_thread(
-        storage.get_generate_job,
+        get_persisted_generate_job,
         job_id,
     )
     if not job:
@@ -401,7 +392,7 @@ async def cancel_generate_job(job_id: str):
     if job.get("status") not in {"queued", "running"}:
         raise HTTPException(status_code=409, detail="Generation job already finished")
 
-    aggregate = await asyncio.to_thread(storage.aggregate_image_job_units, job_id)
+    aggregate = await asyncio.to_thread(aggregate_image_job_units, job_id)
     cancel_message = (
         "Image edit job cancelled"
         if job.get("operation") == "edit"
@@ -418,12 +409,12 @@ async def cancel_generate_job(job_id: str):
             "error": cancel_message,
         },
     )
-    await asyncio.to_thread(storage.cancel_image_job_units, job_id)
+    await asyncio.to_thread(cancel_image_job_units, job_id)
     await asyncio.to_thread(trim_generate_jobs)
 
     if job.get("operation") == "edit":
         if int(aggregate.get("running_count") or 0) > 0:
-            await asyncio.to_thread(storage.release_edit_source_reservation, job_id)
+            await asyncio.to_thread(release_edit_source_reservation, job_id)
         else:
             await asyncio.to_thread(cleanup_parent_edit_sources, job_id)
 

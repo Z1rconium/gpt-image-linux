@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
-  import type { GalleryEntry, GalleryResponse } from '$lib/api/types';
+import type { GalleryEntry, GalleryResponse } from '$lib/api/types/gallery';
   import GalleryFilterToolbar from '$lib/components/gallery/GalleryFilterToolbar.svelte';
   import GalleryPagination from '$lib/components/gallery/GalleryPagination.svelte';
   import { t } from '$lib/i18n';
@@ -245,10 +245,10 @@
     <div class="mb-4 rounded-xl border border-sky-500/30 bg-sky-500/10 p-3" role="status" aria-live="polite">
       <div class="flex items-start justify-between gap-3">
         <div>
-          <p class="text-xs font-semibold text-sky-100">{operationStatus.label}</p>
-          <p class="mt-1 text-xs text-sky-200/80">{operationStatus.detail}</p>
+          <p class="text-xs font-semibold text-sky-950 dark:text-sky-100">{operationStatus.label}</p>
+          <p class="mt-1 text-xs text-sky-800 dark:text-sky-200/80">{operationStatus.detail}</p>
         </div>
-        <div class="text-xs text-sky-200">{operationStatus.progress === null ? $t.gallery.notInterruptible : `${operationStatus.progress}%`}</div>
+        <div class="text-xs text-sky-800 dark:text-sky-200">{operationStatus.progress === null ? $t.gallery.notInterruptible : `${operationStatus.progress}%`}</div>
       </div>
       <div class="mt-3 h-1.5 overflow-hidden rounded-full bg-sky-950/70">
         {#if operationStatus.progress === null}

@@ -12,7 +12,8 @@ import aiohttp
 
 from ..core import settings as config
 from ..core import validators as ssrf
-from .upstream_client import UpstreamApiError, classify_probe_status, read_limited_text_response
+from .upstream.errors import UpstreamApiError
+from .upstream.transport import classify_probe_status, read_limited_text_response
 from .session_pool import TIMEOUT_PROMPT_OPTIMIZER, get_pool
 
 logger = logging.getLogger(__name__)

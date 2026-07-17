@@ -3,10 +3,13 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException, Request, Response
 
 from ..app_state import app
-from ..jobs import snapshot_queue_metrics
+from ...services.job_queue import snapshot_queue_metrics
 from ...core import settings as config
 from ...core.observability import build_metrics_snapshot, format_prometheus_metrics
-from ...repositories import storage
+from ...repositories.coordination import (
+    get_runtime_coordination_metrics,
+    record_worker_metrics_snapshot,
+)
 
 
 router = APIRouter()
@@ -43,7 +46,7 @@ def _merge_current_worker_snapshot(workers: list, worker_snapshot: dict) -> list
 
 def _metrics_snapshot() -> dict:
     worker_id = str(getattr(app.state, "worker_id", "unknown"))
-    runtime = storage.get_runtime_coordination_metrics()
+    runtime = get_runtime_coordination_metrics()
     gauges = snapshot_queue_metrics()
     gauges.update(runtime.get("gauges", {}))
     snapshot = build_metrics_snapshot(gauges=gauges)
@@ -56,7 +59,7 @@ def _metrics_snapshot() -> dict:
         "rates": snapshot["rates"],
         "timings_ms": snapshot["timings_ms"],
     }
-    storage.record_worker_metrics_snapshot(
+    record_worker_metrics_snapshot(
         worker_id,
         worker_payload,
     )

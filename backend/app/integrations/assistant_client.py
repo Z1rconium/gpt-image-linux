@@ -20,7 +20,8 @@ from ..core.api_paths import (
 )
 from ..repositories.image_files import configure_pillow_image_limits, validate_image_header_bytes
 from .session_pool import TIMEOUT_PROMPT_OPTIMIZER, get_pool
-from .upstream_client import UpstreamApiError, classify_probe_status, read_limited_text_response
+from .upstream.errors import UpstreamApiError
+from .upstream.transport import classify_probe_status, read_limited_text_response
 
 try:
     from PIL import Image, ImageOps, UnidentifiedImageError

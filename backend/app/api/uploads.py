@@ -3,13 +3,19 @@ from pathlib import Path
 
 from fastapi import HTTPException, UploadFile
 
-from ..repositories import storage
+from ..repositories.image_files import (
+    IMAGE_CONTENT_TYPE_FORMATS,
+    IMAGE_EXTENSION_FORMATS,
+    IMAGE_FILE_EXTENSIONS,
+    IMAGE_FORMAT_CONTENT_TYPES,
+    validate_image_header_bytes,
+)
 
 
-IMAGE_UPLOAD_EXTENSIONS = storage.IMAGE_FILE_EXTENSIONS
+IMAGE_UPLOAD_EXTENSIONS = IMAGE_FILE_EXTENSIONS
 IMAGE_UPLOAD_CONTENT_TYPES = {
-    extension: storage.IMAGE_FORMAT_CONTENT_TYPES[image_format]
-    for extension, image_format in storage.IMAGE_EXTENSION_FORMATS.items()
+    extension: IMAGE_FORMAT_CONTENT_TYPES[image_format]
+    for extension, image_format in IMAGE_EXTENSION_FORMATS.items()
 }
 
 
@@ -35,12 +41,12 @@ def is_image_upload(upload: UploadFile) -> bool:
     content_type = resolve_upload_content_type(upload)
     if not content_type.startswith("image/"):
         return False
-    return content_type != "image/svg+xml" and content_type in storage.IMAGE_CONTENT_TYPE_FORMATS
+    return content_type != "image/svg+xml" and content_type in IMAGE_CONTENT_TYPE_FORMATS
 
 
 def validate_upload_image_bytes(image_bytes: bytes, filename: str, content_type: str) -> str:
     try:
-        return storage.validate_image_header_bytes(
+        return validate_image_header_bytes(
             image_bytes,
             filename=filename,
             content_type=content_type,

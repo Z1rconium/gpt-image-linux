@@ -9,4 +9,4 @@ from .core.logging_config import setup_logging
 
 setup_logging()
 
-from .api.contract_app import app, proxy, storage  # noqa: F401
+from .api.contract_app import app, proxy  # noqa: F401

@@ -2,7 +2,7 @@
   import { onDestroy } from 'svelte';
   import { dialog } from '$lib/actions/dialog';
   import { language, t } from '$lib/i18n';
-  import type { AssistantImagePromptResponse } from '$lib/api/types';
+import type { AssistantImagePromptResponse } from '$lib/api/types/assistant';
   import { assistantStore, isAbortError } from '$lib/stores/assistant';
   import { settingsStore } from '$lib/stores/settings';
 
@@ -30,8 +30,8 @@
   let selectionSequence = 0;
   let wasOpen = false;
 
-  $: maxUploadBytes = $settingsStore.settings?.image_upload_limits.max_file_size_bytes || FALLBACK_MAX_UPLOAD_BYTES;
-  $: maxImagePixels = $settingsStore.settings?.image_upload_limits.max_image_pixels || FALLBACK_MAX_IMAGE_PIXELS;
+  $: maxUploadBytes = $settingsStore.settings?.image_upload_limits?.max_file_size_bytes || FALLBACK_MAX_UPLOAD_BYTES;
+  $: maxImagePixels = $settingsStore.settings?.image_upload_limits?.max_image_pixels || FALLBACK_MAX_IMAGE_PIXELS;
   $: maxUploadSize = formatUploadSize(maxUploadBytes);
 
   function formatUploadSize(bytes: number) {
@@ -197,6 +197,8 @@
     <div
       data-testid="image-prompt-dialog"
       id="image-prompt-dialog"
+      role="dialog"
+      aria-modal="true"
       class="mobile-dvh-dialog relative flex max-h-[calc(100vh-32px)] w-full max-w-3xl flex-col overflow-hidden rounded-2xl border border-stone-200 bg-stone-50 shadow-2xl dark:border-zinc-800 dark:bg-zinc-950"
       aria-labelledby="image-prompt-dialog-title"
       use:dialog={{ open, onClose: closeDialog }}

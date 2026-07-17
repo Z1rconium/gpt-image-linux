@@ -1,5 +1,6 @@
 <script lang="ts">
-  import type { AssistantGalleryMetadataResponse, GalleryEntry } from '$lib/api/types';
+import type { AssistantGalleryMetadataResponse } from '$lib/api/types/assistant';
+import type { GalleryEntry } from '$lib/api/types/gallery';
   import { t } from '$lib/i18n';
   import { displayImageSize, downloadUrl, formatBeijingTime, imageUrl } from '$lib/utils/format';
   import { dialog } from '$lib/actions/dialog';

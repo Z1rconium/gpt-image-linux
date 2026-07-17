@@ -1,5 +1,5 @@
 import { writable } from 'svelte/store';
-import type { GalleryEntry } from '$lib/api/types';
+import type { GalleryEntry } from '$lib/api/types/gallery';
 
 export type LightboxState = {
   image: GalleryEntry | null;

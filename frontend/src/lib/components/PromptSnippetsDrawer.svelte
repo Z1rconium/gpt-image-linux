@@ -1,6 +1,6 @@
 <script lang="ts">
   import { tick } from 'svelte';
-  import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput } from '$lib/api/types';
+import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput } from '$lib/api/types/snippets';
   import { dialog } from '$lib/actions/dialog';
   import { plainTextInput } from '$lib/actions/plainTextInput';
   import { swipeClose } from '$lib/actions/swipeClose';
