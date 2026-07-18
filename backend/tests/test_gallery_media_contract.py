@@ -47,7 +47,21 @@ def test_gallery_image_download_and_zip(client, monkeypatch):
 
     image = client.get("/api/image/gallery-zip.png")
     assert image.status_code == 200
-    assert image.headers["cache-control"].startswith("public")
+    assert image.headers["content-type"].startswith("image/png")
+    assert image.headers["content-length"] == str(len(PNG_BYTES))
+    assert image.headers["accept-ranges"] == "bytes"
+    assert image.headers.get("content-encoding") is None
+    assert image.headers["cache-control"] == "public, max-age=31536000, immutable"
+
+    image_range = client.get(
+        "/api/image/gallery-zip.png",
+        headers={"Accept-Encoding": "gzip", "Range": "bytes=0-7"},
+    )
+    assert image_range.status_code == 206
+    assert image_range.content == PNG_BYTES[:8]
+    assert image_range.headers["content-length"] == "8"
+    assert image_range.headers["content-range"] == f"bytes 0-7/{len(PNG_BYTES)}"
+    assert image_range.headers.get("content-encoding") is None
 
     thumb = client.get("/api/thumb/gallery-zip.png")
     assert thumb.status_code == 404
@@ -59,15 +73,21 @@ def test_gallery_image_download_and_zip(client, monkeypatch):
     thumb = client.get("/api/thumb/gallery-zip.png")
     assert thumb.status_code == 200
     assert thumb.headers["content-type"].startswith("image/webp")
-    assert thumb.headers["cache-control"].startswith("public")
+    assert thumb.headers["cache-control"] == "public, max-age=31536000, immutable"
+    assert thumb.headers.get("content-encoding") is None
 
     download = client.get("/api/download/gallery-zip.png")
     assert download.status_code == 200
     assert "attachment" in download.headers["content-disposition"]
+    assert download.headers["content-length"] == str(len(PNG_BYTES))
+    assert download.headers["accept-ranges"] == "bytes"
+    assert download.headers.get("content-encoding") is None
+    assert download.headers["cache-control"] == "public, max-age=31536000, immutable"
 
     archive = client.get("/api/download-all")
     assert archive.status_code == 200
     assert archive.headers["content-type"].startswith("application/zip")
+    assert archive.headers.get("content-encoding") != "gzip"
     assert "attachment" in archive.headers["content-disposition"]
     assert archive.headers.get("x-content-type-options") == "nosniff"
     with zipfile.ZipFile(io.BytesIO(archive.content)) as zf:
@@ -78,6 +98,31 @@ def test_gallery_image_download_and_zip(client, monkeypatch):
         assert "thumbnail_filename" not in metadata["images"][0]
         assert "thumbnail_url" not in metadata["images"][0]
         assert metadata["images"][0]["sha256"]
+
+
+def test_gzip_compresses_text_but_bypasses_large_image_responses(client):
+    large_image_bytes = PNG_BYTES * 64
+    _fake_gallery_entry("gzip-image", "gzip bypass " * 120, "1024x1024", "gzip-image.png")
+    path = image_files.safe_image_path("gzip-image.png")
+    assert path is not None
+    path.write_bytes(large_image_bytes)
+
+    image = client.get(
+        "/api/image/gzip-image.png",
+        headers={"Accept-Encoding": "gzip"},
+    )
+    assert image.status_code == 200
+    assert image.content == large_image_bytes
+    assert image.headers["content-length"] == str(len(large_image_bytes))
+    assert image.headers.get("content-encoding") is None
+
+    gallery = client.get(
+        "/api/gallery?page_size=100",
+        headers={"Accept-Encoding": "gzip"},
+    )
+    assert gallery.status_code == 200
+    assert gallery.headers["content-type"].startswith("application/json")
+    assert gallery.headers["content-encoding"] == "gzip"
 
 
 def test_gallery_image_responses_use_x_accel_redirect_when_enabled(client):

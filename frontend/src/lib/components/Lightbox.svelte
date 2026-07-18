@@ -2,7 +2,13 @@
 import type { AssistantGalleryMetadataResponse } from '$lib/api/types/assistant';
 import type { GalleryEntry } from '$lib/api/types/gallery';
   import { t } from '$lib/i18n';
-  import { displayImageSize, downloadUrl, formatBeijingTime, imageUrl } from '$lib/utils/format';
+  import {
+    displayImageSize,
+    downloadUrl,
+    formatBeijingTime,
+    imageUrl,
+    thumbnailUrl
+  } from '$lib/utils/format';
   import { dialog } from '$lib/actions/dialog';
 
   export let open = false;
@@ -35,8 +41,25 @@ import type { GalleryEntry } from '$lib/api/types/gallery';
   let swipeStartX = 0;
   let swipeStartY = 0;
   let swipeStartTime = 0;
+  let loadedImageSrc = '';
+  let failedImageSrc = '';
 
   $: aiLoading = Boolean(image && aiLoadingImageId === image.id);
+  $: fullImageSrc = image ? imageUrl(image.filename, image.image_url) : '';
+  $: previewImageSrc = image?.thumbnail_status === 'ready'
+    ? thumbnailUrl(image.filename, image.thumbnail_url)
+    : '';
+  $: fullImageLoaded = Boolean(fullImageSrc && loadedImageSrc === fullImageSrc);
+  $: fullImageFailed = Boolean(fullImageSrc && failedImageSrc === fullImageSrc);
+
+  function handleFullImageLoad() {
+    loadedImageSrc = fullImageSrc;
+    failedImageSrc = '';
+  }
+
+  function handleFullImageError() {
+    failedImageSrc = fullImageSrc;
+  }
 
   function resetSwipe() {
     swipePointerId = null;
@@ -101,15 +124,40 @@ import type { GalleryEntry } from '$lib/api/types/gallery';
       >
         <div class="flex h-full min-h-0 w-full flex-col">
           <div class="flex min-h-0 flex-1 items-center justify-center">
-            <img
-              src={imageUrl(image.filename, image.image_url)}
-              alt={image.prompt}
-              class="lightbox-img"
-              decoding="async"
-              fetchpriority="high"
-              width={image.image_width || undefined}
-              height={image.image_height || undefined}
-            />
+            {#key fullImageSrc}
+              <div class="lightbox-image-stage">
+                {#if previewImageSrc}
+                  <img
+                    src={previewImageSrc}
+                    alt=""
+                    aria-hidden="true"
+                    class:lightbox-preview-hidden={fullImageLoaded}
+                    class="lightbox-preview-img"
+                    decoding="async"
+                  />
+                {/if}
+                {#if !fullImageLoaded}
+                  <div class:lightbox-load-failed={fullImageFailed} class="lightbox-load-status" role="status">
+                    {#if !fullImageFailed}
+                      <span class="lightbox-load-track" aria-hidden="true"><span></span></span>
+                    {/if}
+                    <span>{fullImageFailed ? $t.lightbox.originalLoadFailed : $t.lightbox.loadingOriginal}</span>
+                  </div>
+                {/if}
+                <img
+                  src={fullImageSrc}
+                  alt={image.prompt}
+                  class:lightbox-img-loaded={fullImageLoaded}
+                  class="lightbox-img"
+                  decoding="async"
+                  fetchpriority="high"
+                  width={image.image_width || undefined}
+                  height={image.image_height || undefined}
+                  on:load={handleFullImageLoad}
+                  on:error={handleFullImageError}
+                />
+              </div>
+            {/key}
           </div>
           <div class="mt-4 flex h-10 shrink-0 items-center justify-between">
             {#if canNavigatePrevious}

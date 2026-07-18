@@ -407,6 +407,8 @@ const zh: Translation = {
     closeLabel: '关闭图片详情',
     previousImage: '上一张图片',
     nextImage: '下一张图片',
+    loadingOriginal: '原图加载中...',
+    originalLoadFailed: '原图加载失败',
     aiDescribe: '描述',
     aiPrompt: '反推',
     aiAnalyze: '分析',
@@ -556,4 +558,3 @@ const zh: Translation = {
 };
 
 export default zh;
-

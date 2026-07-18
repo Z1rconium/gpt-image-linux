@@ -78,6 +78,41 @@ test('gallery shows the source image while thumbnail generation is still queued'
   await expect(image).toHaveAttribute('src', '/api/image/pending-thumbnail.png');
 });
 
+test('lightbox shows a ready thumbnail until the original image loads', async ({ page }) => {
+  await loadApp(page, {
+    galleryImages: [
+      {
+        ...baseGalleryImages[0],
+        id: 'loading-original',
+        prompt: 'Loading original image',
+        filename: 'loading-original.png',
+        thumbnail_url: '/api/thumb/loading-original.png',
+        thumbnail_status: 'ready'
+      }
+    ]
+  });
+
+  let releaseOriginal: () => void = () => {};
+  const originalGate = new Promise<void>((resolve) => {
+    releaseOriginal = resolve;
+  });
+  await page.route('**/api/image/loading-original.png', async (route) => {
+    await originalGate;
+    await route.fulfill({ status: 200, contentType: 'image/png', body: PNG_BYTES });
+  });
+
+  await page.getByRole('img', { name: 'Loading original image' }).click();
+  const lightbox = page.getByRole('dialog', { name: 'Image Details' });
+  await expect(lightbox).toBeVisible();
+  await expect(lightbox.getByRole('status')).toHaveText('Loading original image...');
+  await expect(lightbox.locator('.lightbox-preview-img')).toBeVisible();
+  await expect(lightbox.locator('.lightbox-img')).toHaveCSS('opacity', '0');
+
+  releaseOriginal();
+  await expect(lightbox.getByRole('status')).toHaveCount(0);
+  await expect(lightbox.locator('.lightbox-img')).toHaveCSS('opacity', '1');
+});
+
 test('lightbox keeps describe, analyze, and stored AI metadata without reverse prompt action', async ({ page }) => {
   await loadApp(page);
 

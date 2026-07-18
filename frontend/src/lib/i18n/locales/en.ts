@@ -405,6 +405,8 @@ const en = {
     closeLabel: 'Close lightbox',
     previousImage: 'Previous image',
     nextImage: 'Next image',
+    loadingOriginal: 'Loading original image...',
+    originalLoadFailed: 'Original image failed to load',
     aiDescribe: 'Describe',
     aiPrompt: 'Prompt',
     aiAnalyze: 'Analyze',
@@ -556,4 +558,3 @@ const en = {
 type TranslationValue = string | ((...args: any[]) => string) | Record<string, unknown>;
 
 export default en;
-
