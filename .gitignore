@@ -2,6 +2,8 @@ CLAUDE.md
 
 # Claude Code local config
 .claude/
+.impeccable
+.venv
 
 .DS_Store
 __pycache__/
