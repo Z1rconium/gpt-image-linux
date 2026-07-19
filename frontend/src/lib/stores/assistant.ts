@@ -1,7 +1,7 @@
 import { get, writable } from 'svelte/store';
 import { apiFetch } from '$lib/api/client';
 import { language } from '$lib/i18n';
-import type { AssistantEditPlanRequest, AssistantEditPlanResponse, AssistantGalleryBatchJobStatus, AssistantGalleryBatchRequest, AssistantGalleryImageResponse, AssistantGalleryMetadataResponse, AssistantImagePromptResponse, AssistantJobDiagnoseRequest, AssistantJobDiagnoseResponse, AssistantPromptCheckRequest, AssistantPromptCheckResponse, AssistantPromptRewriteRequest, AssistantPromptRewriteResponse, AssistantPromptVariantsRequest, AssistantPromptVariantsResponse, AssistantRecommendParamsRequest, AssistantRecommendParamsResponse } from '$lib/api/types/assistant';
+import type { AssistantEditPlanRequest, AssistantEditPlanResponse, AssistantGalleryBatchJobStatus, AssistantGalleryBatchRequest, AssistantGalleryImageResponse, AssistantGalleryMetadataResponse, AssistantImagePromptOptimizeResponse, AssistantImagePromptResponse, AssistantJobDiagnoseRequest, AssistantJobDiagnoseResponse, AssistantPromptCheckRequest, AssistantPromptCheckResponse, AssistantPromptRewriteRequest, AssistantPromptRewriteResponse, AssistantPromptVariantsRequest, AssistantPromptVariantsResponse, AssistantRecommendParamsRequest, AssistantRecommendParamsResponse } from '$lib/api/types/assistant';
 
 export type AssistantState = {
   promptLoading: boolean;
@@ -243,6 +243,29 @@ function createAssistantStore() {
     }
   }
 
+  async function optimizeImagePrompt(file: File, prompt: string, targetLanguage: 'en' | 'zh-CN', signal?: AbortSignal) {
+    const requestSignal = operationSignal('imagePromptOptimize', signal);
+    beginCounter('prompt');
+    const formData = new FormData();
+    formData.append('image', file, file.name);
+    formData.append('prompt', prompt);
+    formData.append('target_language', targetLanguage);
+    try {
+      return await apiFetch<AssistantImagePromptOptimizeResponse>(
+        '/api/assistant/image/prompt/optimize',
+        {
+          method: 'POST',
+          signal: requestSignal,
+          body: formData
+        },
+        'generating and comparing a reverse-prompt preview'
+      );
+    } finally {
+      endCounter('prompt');
+      clearOperationSignal('imagePromptOptimize', requestSignal);
+    }
+  }
+
   async function describeGalleryImage(imageId: string, signal?: AbortSignal) {
     const requestSignal = operationSignal(`gallery:describe:${imageId}`, signal);
     beginGalleryLoading(imageId);
@@ -335,6 +358,7 @@ function createAssistantStore() {
     diagnoseJob,
     planEdit,
     promptFromImage,
+    optimizeImagePrompt,
     describeGalleryImage,
     promptFromGalleryImage,
     analyzeGalleryImage,

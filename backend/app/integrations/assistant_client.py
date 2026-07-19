@@ -6,6 +6,7 @@ import logging
 import re
 import time
 import warnings
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -76,11 +77,28 @@ def _build_chat_payload(
     system_prompt: str,
     user_prompt: str,
     image: dict[str, str | int | bool] | None,
+    images: Sequence[dict[str, str | int | bool]] | None = None,
     max_tokens: int,
     temperature: float,
 ) -> dict[str, Any]:
     content: str | list[dict[str, Any]]
-    if image:
+    if images:
+        content = [{"type": "text", "text": user_prompt}]
+        for index, item in enumerate(images):
+            label = str(item.get("label") or f"Image {index + 1}")
+            content.extend(
+                [
+                    {"type": "text", "text": label},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:{item['mime_type']};base64,{item['b64']}",
+                            "detail": "low",
+                        },
+                    },
+                ]
+            )
+    elif image:
         content = [
             {"type": "text", "text": user_prompt},
             {
@@ -112,11 +130,24 @@ def _build_responses_payload(
     system_prompt: str,
     user_prompt: str,
     image: dict[str, str | int | bool] | None,
+    images: Sequence[dict[str, str | int | bool]] | None = None,
     max_tokens: int,
     temperature: float,
 ) -> dict[str, Any]:
     content: list[dict[str, Any]] = [{"type": "input_text", "text": user_prompt}]
-    if image:
+    if images:
+        for index, item in enumerate(images):
+            label = str(item.get("label") or f"Image {index + 1}")
+            content.extend(
+                [
+                    {"type": "input_text", "text": label},
+                    {
+                        "type": "input_image",
+                        "image_url": f"data:{item['mime_type']};base64,{item['b64']}",
+                    },
+                ]
+            )
+    elif image:
         content.append(
             {
                 "type": "input_image",
@@ -212,6 +243,7 @@ async def request_assistant_json(
     user_prompt: str,
     schema: dict[str, Any],
     image: dict[str, str | int | bool] | None = None,
+    images: Sequence[dict[str, str | int | bool]] | None = None,
     timeout_seconds: float | None = None,
     max_tokens: int = 900,
     temperature: float = 0.2,
@@ -228,6 +260,7 @@ async def request_assistant_json(
             system_prompt=system,
             user_prompt=user_prompt,
             image=image,
+            images=images,
             max_tokens=max_tokens,
             temperature=temperature,
         )
@@ -237,6 +270,7 @@ async def request_assistant_json(
             system_prompt=system,
             user_prompt=user_prompt,
             image=image,
+            images=images,
             max_tokens=max_tokens,
             temperature=temperature,
         )
@@ -397,6 +431,7 @@ def _prepare_vision_preview(
                     image.draft("RGB", (config.AI_ASSISTANT_IMAGE_MAX_SIDE, config.AI_ASSISTANT_IMAGE_MAX_SIDE))
                 image.load()
                 image = ImageOps.exif_transpose(image)
+                source_width, source_height = image.size
                 source_has_alpha = _image_has_alpha(image)
                 image.thumbnail((config.AI_ASSISTANT_IMAGE_MAX_SIDE, config.AI_ASSISTANT_IMAGE_MAX_SIDE))
                 data, mime_type = _fit_preview(image, has_alpha=source_has_alpha, byte_limit_error=byte_limit_error)
@@ -418,6 +453,8 @@ def _prepare_vision_preview(
         "bytes": len(data),
         "width": width,
         "height": height,
+        "source_width": source_width,
+        "source_height": source_height,
         "source_has_alpha": source_has_alpha,
     }
 

@@ -225,6 +225,58 @@ async def call_image_generation_api(
     return entries
 
 
+async def call_image_generation_preview_api(
+    api_url: str,
+    api_key: str,
+    payload: GenerateRequest,
+    *,
+    socks5_proxy: str | None = None,
+) -> bytes:
+    """Generate and validate one image without creating gallery or job records."""
+    api_path = "/v1/images/generations"
+    upstream_url = build_upstream_url(api_url, api_path)
+
+    _warn_if_socks5_upstream_resolves_private(upstream_url, socks5_proxy)
+    ssrf.validate_upstream_url(upstream_url, config.UPSTREAM_HOST_ALLOWLIST)
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "User-Agent": "opencode",
+    }
+
+    pool = get_pool()
+    upstream_session = pool.get(timeout_kind=TIMEOUT_UPSTREAM, socks5_proxy=socks5_proxy)
+    async with upstream_session.post(
+        upstream_url,
+        json=_build_image_params(payload),
+        headers=headers,
+        allow_redirects=False,
+    ) as resp:
+        if not socks5_proxy:
+            ssrf.validate_response_peer_ip(resp, "Upstream API")
+        result, response_text = await parse_upstream_json_response(resp, api_path, None)
+
+    data = validate_upstream_image_data(result.get("data", []), 1)
+    if not data:
+        raise UpstreamApiError(f"No image data in upstream response: {response_text[:200]}")
+
+    image_bytes = await extract_image_bytes(
+        pool.get(timeout_kind=TIMEOUT_UPSTREAM),
+        data[0],
+        response_text[:200],
+        config.MAX_FILE_SIZE_MB * 1024 * 1024,
+    )
+    if len(image_bytes) > config.MAX_FILE_SIZE_MB * 1024 * 1024:
+        raise UpstreamImageDownloadError(
+            f"Image too large: {len(image_bytes)} bytes "
+            f"(max {config.MAX_FILE_SIZE_MB * 1024 * 1024})"
+        )
+    detected_format = detect_image_format(image_bytes) or payload.output_format
+    extension = DETECTED_FORMAT_EXTENSIONS.get(detected_format, "png")
+    validate_generated_image_bytes(image_bytes, f"assistant-preview.{extension}")
+    return image_bytes
+
+
 async def call_image_edit_api(
     api_url: str,
     api_key: str,

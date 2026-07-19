@@ -50,6 +50,9 @@ type MockOptions = {
   historyJobs?: unknown[];
   language?: 'en' | 'zh-CN' | null;
   reversePrompt?: string;
+  optimizedPrompts?: string[];
+  optimizeFailureAt?: number;
+  optimizeDelayMs?: number;
 };
 
 const baseGalleryImages: GalleryImageFixture[] = [
@@ -427,6 +430,7 @@ async function mockApi(page: Page, options: MockOptions = {}) {
   let mockedOverallConfig: any = structuredClone(overallConfigResponse);
   let optimizerSystemPrompt = 'Default optimizer system prompt';
   let selectionTokenSeq = 0;
+  let imagePromptOptimizeCount = 0;
   const selectionTokens = new Map<string, { prompt: string; favorite?: boolean | null }>();
   const runningJobs = options.runningJobs ?? [];
   let historyJobs = options.historyJobs ?? [job('history-1', 'saved prompt')];
@@ -638,6 +642,33 @@ async function mockApi(page: Page, options: MockOptions = {}) {
           system_prompt: optimizerSystemPrompt,
           default_system_prompt: 'Default optimizer system prompt',
           customized: true
+        })
+      );
+      return;
+    }
+    if (url.pathname === '/api/assistant/image/prompt/optimize' && request.method() === 'POST') {
+      imagePromptOptimizeCount += 1;
+      if (options.optimizeDelayMs) await new Promise((resolve) => setTimeout(resolve, options.optimizeDelayMs));
+      if (options.optimizeFailureAt === imagePromptOptimizeCount) {
+        await route.fulfill(json({ detail: 'Trial generation failed: custom size unsupported' }, 502));
+        return;
+      }
+      const prompt = options.optimizedPrompts?.[imagePromptOptimizeCount - 1] ?? `Refined reverse prompt ${imagePromptOptimizeCount}`;
+      await route.fulfill(
+        json({
+          prompt,
+          comparison_summary: `Comparison summary ${imagePromptOptimizeCount}`,
+          model: 'assistant-vision-model',
+          duration_ms: 29,
+          warnings: [],
+          temporary_image: {
+            b64: PNG_BYTES.toString('base64'),
+            mime_type: 'image/png',
+            width: 896,
+            height: 896,
+            model: 'preset-default-model',
+            duration_ms: 140
+          }
         })
       );
       return;

@@ -389,6 +389,102 @@ test('reverse prompt dialog uploads, replaces, copies, saves, applies, and reset
   await expect(dialog).toBeHidden();
 });
 
+test('reverse prompt trial optimization iterates, preserves the last success, and uses the latest prompt', async ({ page }) => {
+  await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
+  await loadApp(page, {
+    optimizedPrompts: ['First refined prompt', 'Second refined prompt', 'unused', 'Applied refined prompt'],
+    optimizeFailureAt: 3,
+    optimizeDelayMs: 150
+  });
+
+  const prompt = page.getByRole('textbox', { name: 'Prompt', exact: true });
+  await page.getByRole('button', { name: 'Reverse prompt', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Reverse prompt' });
+  const fileInput = dialog.locator('input[type="file"]');
+  await fileInput.setInputFiles({ name: 'target.png', mimeType: 'image/png', buffer: PNG_BYTES });
+  await dialog.getByRole('button', { name: 'Reverse prompt', exact: true }).click();
+  await expect(dialog.getByRole('button', { name: 'Try optimization' })).toBeEnabled();
+
+  const firstOptimizeRequest = page.waitForRequest(
+    (request) => request.method() === 'POST' && new URL(request.url()).pathname === '/api/assistant/image/prompt/optimize'
+  );
+  await dialog.getByRole('button', { name: 'Try optimization' }).click();
+  await expect(dialog).toContainText('Generating a trial image and comparing');
+  await expect(dialog.getByRole('button', { name: 'Replace image' })).toBeDisabled();
+  await expect(dialog.getByRole('button', { name: 'Remove image' })).toBeDisabled();
+  await expect(dialog.getByRole('button', { name: 'Reverse prompt', exact: true })).toBeDisabled();
+  await expect(dialog.getByRole('button', { name: 'Copy', exact: true })).toBeDisabled();
+  const firstRequest = await firstOptimizeRequest;
+  expect(firstRequest.postData()).toContain('A bright red square centered on a clean white background');
+
+  await expect(dialog.getByTestId('image-prompt-comparison')).toBeVisible();
+  await expect(dialog.getByRole('img', { name: 'Target image' })).toBeVisible();
+  await expect(dialog.getByRole('img', { name: 'Trial image' })).toBeVisible();
+  await expect(dialog).toContainText('Comparison summary 1');
+  await expect(dialog).toContainText('First refined prompt');
+  await expect(dialog).toContainText('Iteration 1');
+  await expect(dialog).toContainText('preset-default-model · 896x896 · 140 ms');
+  await page.screenshot({ path: '/tmp/gpt-image-reverse-prompt-optimized-desktop.png' });
+
+  const secondOptimizeRequest = page.waitForRequest(
+    (request) => request.method() === 'POST' && new URL(request.url()).pathname === '/api/assistant/image/prompt/optimize'
+  );
+  await dialog.getByRole('button', { name: 'Try optimization again' }).click();
+  const secondRequest = await secondOptimizeRequest;
+  expect(secondRequest.postData()).toContain('First refined prompt');
+  await expect(dialog).toContainText('Second refined prompt');
+  await expect(dialog).toContainText('Comparison summary 2');
+  await expect(dialog).toContainText('Iteration 2');
+
+  await dialog.getByRole('button', { name: 'Try optimization again' }).click();
+  await expect(dialog.getByRole('alert')).toContainText('custom size unsupported');
+  await expect(dialog).toContainText('Second refined prompt');
+  await expect(dialog).toContainText('Comparison summary 2');
+  await expect(dialog).toContainText('Iteration 2');
+
+  await dialog.getByRole('button', { name: 'Copy', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('Second refined prompt');
+
+  const saveRequestPromise = page.waitForRequest(
+    (request) => request.method() === 'POST' && new URL(request.url()).pathname === '/api/prompt-snippets'
+  );
+  await dialog.getByRole('button', { name: 'Save snippet' }).click();
+  const saveRequest = await saveRequestPromise;
+  expect(saveRequest.postDataJSON()).toMatchObject({ prompt: 'Second refined prompt' });
+  await expect(dialog).toBeHidden();
+
+  await page.getByRole('button', { name: 'Reverse prompt', exact: true }).click();
+  await fileInput.setInputFiles({ name: 'apply-target.png', mimeType: 'image/png', buffer: PNG_BYTES });
+  await dialog.getByRole('button', { name: 'Reverse prompt', exact: true }).click();
+  await dialog.getByRole('button', { name: 'Try optimization' }).click();
+  await expect(dialog).toContainText('Applied refined prompt');
+  await dialog.getByRole('button', { name: 'Apply to prompt' }).click();
+  await expect(prompt).toHaveValue('Applied refined prompt');
+});
+
+test('reverse prompt explains incompatible generation presets after analysis', async ({ page }) => {
+  const incompatiblePreset = {
+    ...settingsResponse.presets[0],
+    api_path: '/v1/responses'
+  };
+  await loadApp(page, {
+    settings: {
+      ...settingsResponse,
+      api_path: '/v1/responses',
+      presets: [incompatiblePreset]
+    }
+  });
+
+  await page.getByRole('button', { name: 'Reverse prompt', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Reverse prompt' });
+  await dialog.locator('input[type="file"]').setInputFiles({ name: 'target.png', mimeType: 'image/png', buffer: PNG_BYTES });
+  await dialog.getByRole('button', { name: 'Reverse prompt', exact: true }).click();
+  await expect(dialog.getByRole('button', { name: 'Try optimization' })).toBeDisabled();
+  await expect(dialog.getByTestId('image-prompt-optimize-reason')).toContainText(
+    'requires /v1/images/generations. The active preset uses /v1/responses'
+  );
+});
+
 test('reverse prompt remains discoverable and disables analysis when Assistant config is unavailable', async ({ page }) => {
   await loadApp(page, {
     settings: {
@@ -435,5 +531,13 @@ test('reverse prompt header and dialog stay within a mobile viewport', async ({ 
   expect(dialogBox?.y ?? -1).toBeGreaterThanOrEqual(0);
   expect((dialogBox?.x ?? 0) + (dialogBox?.width ?? 0)).toBeLessThanOrEqual(390);
   expect((dialogBox?.y ?? 0) + (dialogBox?.height ?? 0)).toBeLessThanOrEqual(844);
+  await dialog.locator('input[type="file"]').setInputFiles({ name: 'mobile.png', mimeType: 'image/png', buffer: PNG_BYTES });
+  await dialog.getByRole('button', { name: 'Reverse prompt', exact: true }).click();
+  await dialog.getByRole('button', { name: 'Try optimization' }).click();
+  const targetBox = await dialog.getByRole('img', { name: 'Target image' }).boundingBox();
+  const trialBox = await dialog.getByRole('img', { name: 'Trial image' }).boundingBox();
+  expect(trialBox?.y ?? 0).toBeGreaterThan(targetBox?.y ?? 0);
+  expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.screenshot({ path: '/tmp/gpt-image-reverse-prompt-mobile.png' });
 });

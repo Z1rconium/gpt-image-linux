@@ -313,6 +313,7 @@ async def _assistant_json(
     schema: dict[str, Any],
     vision: bool = False,
     image: dict[str, str | int | bool] | None = None,
+    images: list[dict[str, str | int | bool]] | None = None,
     max_tokens: int = 900,
     temperature: float = 0.2,
     runtime: AssistantRuntime | None = None,
@@ -329,6 +330,7 @@ async def _assistant_json(
                 user_prompt=user_prompt,
                 schema=schema,
                 image=image,
+                images=images,
                 timeout_seconds=runtime.timeout_seconds,
                 max_tokens=max_tokens,
                 temperature=temperature,
@@ -346,4 +348,3 @@ async def _assistant_json(
 
 
 __all__ = [name for name in globals() if not name.startswith("__")]
-

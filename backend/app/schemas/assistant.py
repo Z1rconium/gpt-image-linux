@@ -199,6 +199,21 @@ class AssistantImagePromptResponse(AssistantBaseResponse):
     prompt: str
 
 
+class AssistantTemporaryImage(BaseModel):
+    b64: str
+    mime_type: str
+    width: int = Field(gt=0)
+    height: int = Field(gt=0)
+    model: str
+    duration_ms: int = Field(ge=0)
+
+
+class AssistantImagePromptOptimizeResponse(AssistantBaseResponse):
+    prompt: str
+    comparison_summary: str
+    temporary_image: AssistantTemporaryImage
+
+
 class AssistantGalleryImageResponse(AssistantBaseResponse):
     image_id: str
     description: str = ""
@@ -234,6 +249,5 @@ class AssistantGalleryBatchJobStatus(BaseModel):
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
     error: Optional[str] = None
-
 
 

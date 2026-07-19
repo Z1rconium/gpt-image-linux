@@ -9,6 +9,7 @@ from ...schemas.assistant import (
     AssistantGalleryMetadataResponse,
     AssistantHealthResponse,
     AssistantImagePromptResponse,
+    AssistantImagePromptOptimizeResponse,
     AssistantJobDiagnoseResponse,
     AssistantPromptCheckResponse,
     AssistantPromptRewriteResponse,
@@ -27,10 +28,10 @@ router.add_api_route("/api/assistant/generate/recommend-params", assistant_text.
 router.add_api_route("/api/assistant/jobs/{job_id}/diagnose", assistant_text.diagnose_job, methods=["POST"], response_model=AssistantJobDiagnoseResponse)
 router.add_api_route("/api/assistant/edit/plan", assistant_text.plan_edit, methods=["POST"], response_model=AssistantEditPlanResponse)
 router.add_api_route("/api/assistant/image/prompt", assistant_vision.prompt_from_uploaded_image, methods=["POST"], response_model=AssistantImagePromptResponse)
+router.add_api_route("/api/assistant/image/prompt/optimize", assistant_vision.optimize_uploaded_image_prompt, methods=["POST"], response_model=AssistantImagePromptOptimizeResponse)
 router.add_api_route("/api/assistant/gallery/{image_id}/metadata", assistant_vision.get_gallery_metadata, methods=["GET"], response_model=AssistantGalleryMetadataResponse)
 router.add_api_route("/api/assistant/gallery/batch/analyze", assistant_batch.batch_analyze_gallery, methods=["POST"], response_model=AssistantGalleryBatchJobStatus, status_code=202)
 router.add_api_route("/api/assistant/gallery/batch/analyze/{job_id}", assistant_batch.get_batch_analyze_job, methods=["GET"], response_model=AssistantGalleryBatchJobStatus)
 router.add_api_route("/api/assistant/gallery/{image_id}/describe", assistant_vision.describe_gallery_image, methods=["POST"], response_model=AssistantGalleryImageResponse)
 router.add_api_route("/api/assistant/gallery/{image_id}/prompt", assistant_vision.prompt_gallery_image, methods=["POST"], response_model=AssistantGalleryImageResponse)
 router.add_api_route("/api/assistant/gallery/{image_id}/analyze", assistant_vision.analyze_gallery_image, methods=["POST"], response_model=AssistantGalleryImageResponse)
-

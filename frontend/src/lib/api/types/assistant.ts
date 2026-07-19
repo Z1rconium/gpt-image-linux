@@ -119,6 +119,21 @@ export type AssistantImagePromptResponse = AssistantBaseResponse & {
   prompt: string;
 };
 
+export type AssistantTemporaryImage = {
+  b64: string;
+  mime_type: string;
+  width: number;
+  height: number;
+  model: string;
+  duration_ms: number;
+};
+
+export type AssistantImagePromptOptimizeResponse = AssistantBaseResponse & {
+  prompt: string;
+  comparison_summary: string;
+  temporary_image: AssistantTemporaryImage;
+};
+
 export type AssistantGalleryImageResponse = AssistantBaseResponse & {
   image_id: string;
   description: string;
@@ -157,5 +172,4 @@ export type AssistantGalleryBatchJobStatus = {
   updated_at?: string | null;
   error?: string | null;
 };
-
 
