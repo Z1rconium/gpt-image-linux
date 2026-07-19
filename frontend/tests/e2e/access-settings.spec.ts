@@ -48,6 +48,34 @@ test('theme follows system preference, toggles, and persists after reload', asyn
   await expect(page.getByRole('button', { name: 'Switch to dark mode' })).toBeVisible();
 });
 
+test('image size dialog follows the light theme and preserves its dark palette', async ({ page }) => {
+  await page.emulateMedia({ colorScheme: 'light' });
+  await loadApp(page);
+
+  await page.getByRole('button', { name: 'Size', exact: true }).click();
+  const sizeDialog = page.getByRole('dialog', { name: 'Image Size' });
+  const selectedPreset = sizeDialog.getByRole('button', { name: 'auto', exact: true });
+  const customSize = sizeDialog.getByLabel('Size', { exact: true });
+
+  await expect(sizeDialog).toHaveCSS('background-color', 'rgb(255, 255, 255)');
+  await expect(sizeDialog.getByRole('heading', { name: 'Image Size' })).toHaveCSS('color', 'rgb(12, 10, 9)');
+  await expect(selectedPreset).toHaveCSS('color', 'rgb(4, 120, 87)');
+  await expect(customSize).toHaveCSS('background-color', 'rgb(250, 250, 249)');
+  await expect(customSize).toHaveCSS('color', 'rgb(28, 25, 23)');
+  await page.screenshot({ path: '/tmp/gpt-image-size-light-desktop.png' });
+
+  await sizeDialog.getByRole('button', { name: 'Close' }).click();
+  await page.getByRole('button', { name: 'Switch to dark mode' }).click();
+  await page.getByRole('button', { name: 'Size', exact: true }).click();
+
+  await expect(sizeDialog).toHaveCSS('background-color', 'rgb(24, 24, 27)');
+  await expect(sizeDialog.getByRole('heading', { name: 'Image Size' })).toHaveCSS('color', 'rgb(244, 244, 245)');
+  await expect(selectedPreset).toHaveCSS('color', 'rgb(209, 250, 229)');
+  await expect(customSize).toHaveCSS('background-color', 'rgb(9, 9, 11)');
+  await expect(customSize).toHaveCSS('color', 'rgb(244, 244, 245)');
+  await page.screenshot({ path: '/tmp/gpt-image-size-dark-desktop.png' });
+});
+
 test('settings and prompt snippets follow the active theme while open and after reopening', async ({ page }) => {
   await page.emulateMedia({ colorScheme: 'light' });
   await loadApp(page);

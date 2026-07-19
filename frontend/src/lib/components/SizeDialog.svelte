@@ -20,19 +20,19 @@
 </script>
 
 {#if open}
-  <div class="fixed inset-0 z-[80] flex items-center justify-center bg-zinc-950/75 px-4 backdrop-blur">
+  <div class="fixed inset-0 z-[80] flex items-center justify-center bg-stone-950/60 px-4 backdrop-blur dark:bg-zinc-950/75">
     <button class="absolute inset-0" type="button" tabindex="-1" aria-label={$t.common.close} on:click={onClose}></button>
     <div
-      class="fade-in relative w-full max-w-lg rounded-2xl border border-zinc-800 bg-zinc-900 p-5 shadow-2xl"
+      class="fade-in relative w-full max-w-lg rounded-2xl border border-stone-200 bg-white p-5 shadow-2xl dark:border-zinc-800 dark:bg-zinc-900"
       aria-labelledby="size-dialog-title"
       use:dialog={{ open, onClose }}
     >
       <div class="mb-5 flex items-center justify-between">
         <div>
-          <h2 id="size-dialog-title" class="text-lg font-semibold text-zinc-100">{$t.sizeDialog.title}</h2>
-          <p class="mt-1 text-xs text-zinc-500">{$t.sizeDialog.subtitle}</p>
+          <h2 id="size-dialog-title" class="text-lg font-semibold text-stone-950 dark:text-zinc-100">{$t.sizeDialog.title}</h2>
+          <p class="mt-1 text-xs text-stone-500 dark:text-zinc-500">{$t.sizeDialog.subtitle}</p>
         </div>
-        <button type="button" class="control-focus rounded-lg p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100" aria-label={$t.common.close} on:click={onClose}>x</button>
+        <button type="button" class="control-focus rounded-lg p-1.5 text-stone-500 hover:bg-stone-100 hover:text-stone-950 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100" aria-label={$t.common.close} on:click={onClose}>x</button>
       </div>
 
       <div class="grid grid-cols-2 gap-2 sm:grid-cols-3">
@@ -40,7 +40,9 @@
           <button
             type="button"
             class={`control-focus rounded-lg border px-3 py-3 text-sm transition-colors ${
-              value === size ? 'border-emerald-500 bg-emerald-500/10 text-emerald-100' : 'border-zinc-700 bg-zinc-950 text-zinc-300 hover:bg-zinc-800'
+              value === size
+                ? 'border-emerald-500 bg-emerald-500/10 text-emerald-700 dark:text-emerald-100'
+                : 'border-stone-200 bg-stone-50 text-stone-700 hover:bg-stone-100 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-300 dark:hover:bg-zinc-800'
             }`}
             on:click={() => apply(size)}
           >
@@ -58,7 +60,7 @@
           inputmode="numeric"
           autocomplete="off"
           aria-label={$t.common.size}
-          class="control-focus min-w-0 flex-1 rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2.5 font-mono text-sm text-zinc-100 focus:border-emerald-500"
+          class="control-focus min-w-0 flex-1 rounded-lg border border-stone-200 bg-stone-50 px-3 py-2.5 font-mono text-sm text-stone-900 focus:border-emerald-500 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
           placeholder="1024x1024"
         />
         <button type="button" class="control-focus rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-emerald-500" on:click={() => apply()}>{$t.common.apply}</button>
