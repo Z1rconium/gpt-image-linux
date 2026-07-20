@@ -80,6 +80,9 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
   let optimizingPrompt = false;
   let loadingPanel: LazyPanel | null = null;
   let lazyLoadSequence = 0;
+  let adminGateVisible = false;
+  let adminUnlocking = false;
+  let adminUnlockError = '';
   const panelFocusTargets: Partial<Record<LazyPanel, HTMLElement>> = {};
   const urlSync = createUrlSyncScheduler((mode) => {
     writePageUrl(
@@ -440,6 +443,46 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
     void settingsStore.saveSettings(body, showToast).then((saved) => {
       if (saved) setUi('settingsOpen', false);
     });
+  }
+
+  async function openSettingsSecure() {
+    try {
+      const status = await apiFetch<{ authenticated: boolean }>(
+        '/api/access/admin/status',
+        {},
+        'checking management access'
+      );
+      if (status.authenticated) {
+        await openUiPanel('settings', 'settingsOpen');
+        return;
+      }
+    } catch {
+      // The step-up form handles a missing or expired management session.
+    }
+    adminUnlockError = '';
+    adminGateVisible = true;
+  }
+
+  async function unlockAdmin(adminKey: string) {
+    adminUnlocking = true;
+    adminUnlockError = '';
+    try {
+      await apiFetch(
+        '/api/access/admin',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ admin_key: adminKey })
+        },
+        'unlocking management settings'
+      );
+      adminGateVisible = false;
+      await openUiPanel('settings', 'settingsOpen');
+    } catch (error) {
+      adminUnlockError = error instanceof Error ? error.message : $t.messages.requestFailed;
+    } finally {
+      adminUnlocking = false;
+    }
   }
 
   function createPreset() {
@@ -1140,6 +1183,7 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
 <a class="skip-link control-focus" href="#main-content">{$t.common.skipToMain}</a>
 
 <AccessGate visible={$accessStore.gateVisible} error={$accessStore.error} loading={$accessStore.loading} onUnlock={(key) => accessStore.unlockAccess(key, loadAuthenticatedData)} />
+<AccessGate visible={adminGateVisible} error={adminUnlockError} loading={adminUnlocking} onUnlock={unlockAdmin} />
 <Header
   version={$versionStore.version}
   latestVersion={$versionStore.latestVersion}
@@ -1153,7 +1197,7 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
   onOpenPromptSnippets={openPromptSnippetsDrawer}
   onOpenImagePrompt={openImagePromptDialog}
   onOpenJobs={openJobsDrawer}
-  onOpenSettings={() => void openUiPanel('settings', 'settingsOpen')}
+  onOpenSettings={() => void openSettingsSecure()}
   onPrefetchPromptSnippets={() => prefetchPanel('snippets')}
   onPrefetchImagePrompt={() => prefetchPanel('imagePrompt')}
   onPrefetchJobs={() => prefetchPanel('jobs')}

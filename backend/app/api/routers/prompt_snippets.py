@@ -13,6 +13,7 @@ from ...schemas.snippets import (
     PromptSnippet,
     PromptSnippetCreateRequest,
     PromptSnippetListResponse,
+    PromptSnippetSearchRequest,
     PromptSnippetUpdateRequest,
 )
 
@@ -24,7 +25,18 @@ router = APIRouter()
 async def list_prompt_snippets(
     query: str | None = Query(default=None, max_length=4000),
 ):
+    if query:
+        raise HTTPException(
+            status_code=422,
+            detail="Prompt snippet search must use POST /api/prompt-snippets/search",
+        )
     snippets = await asyncio.to_thread(list_persisted_prompt_snippets, query or "")
+    return PromptSnippetListResponse(snippets=snippets)
+
+
+@router.post("/api/prompt-snippets/search", response_model=PromptSnippetListResponse)
+async def search_prompt_snippets(req: PromptSnippetSearchRequest):
+    snippets = await asyncio.to_thread(list_persisted_prompt_snippets, req.query)
     return PromptSnippetListResponse(snippets=snippets)
 
 

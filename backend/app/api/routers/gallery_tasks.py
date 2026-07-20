@@ -49,7 +49,10 @@ from ...repositories.coordination import (
     get_gallery_jobs_updated_at_edges,
     list_gallery_job_ids_with_files,
     release_background_lease,
+    release_import_upload_reservation,
     reserve_gallery_job_capacity,
+    reserve_import_upload_capacity,
+    resize_import_upload_reservation,
     update_gallery_job,
     update_gallery_job_progress,
 )
@@ -276,7 +279,7 @@ async def _stream_gallery_job(
         event_stream(),
         media_type="text/event-stream",
         headers={
-            "Cache-Control": "no-cache",
+            "Cache-Control": PRIVATE_GALLERY_CACHE_CONTROL,
             "X-Accel-Buffering": "no",
         },
     )
@@ -317,6 +320,7 @@ def _cleanup_downloaded_gallery_export_job(job_id: str) -> None:
 def _gallery_export_download_headers(job: dict) -> dict[str, str]:
     return {
         "Content-Encoding": "identity",
+        "Cache-Control": PRIVATE_GALLERY_CACHE_CONTROL,
         "X-Content-Type-Options": "nosniff",
         "X-Gallery-Requested-Count": str(job.get("requested_count") or 0),
         "X-Gallery-Exported-Count": str(job.get("exported_count") or 0),
@@ -504,47 +508,65 @@ async def download_all_images(export_job_id: str | None = Query(default=None)):
 
 @router.post("/api/import")
 async def import_gallery_archive(
+    request: Request,
     archive: UploadFile = File(...),
     async_job: bool = Query(default=False),
 ):
-    import_dir = Path(config.DATA_DIR) / "imports" if async_job else None
-    temp_path = await stream_upload_to_tempfile(
-        archive,
-        import_archive_max_bytes(),
-        directory=import_dir,
+    del async_job
+    reservation_id = uuid.uuid4().hex
+    reservation_bytes = import_archive_max_bytes()
+    lease_expires_at = (
+        datetime.now(timezone.utc)
+        + timedelta(seconds=config.IMPORT_UPLOAD_RESERVATION_TTL_SECONDS)
+    ).isoformat()
+    reserved, reason = await asyncio.to_thread(
+        reserve_import_upload_capacity,
+        reservation_id=reservation_id,
+        client_ip=auth.get_client_ip(request),
+        byte_count=reservation_bytes,
+        max_total_bytes=config.IMPORT_TEMP_RESERVATION_MAX_MB * 1024 * 1024,
+        per_ip_limit=config.IMPORT_UPLOADS_PER_IP_PER_MINUTE,
+        lease_expires_at=lease_expires_at,
     )
-    if async_job:
-        try:
-            total_count = await asyncio.to_thread(count_import_gallery_entries, temp_path)
-            if total_count <= 0:
-                raise HTTPException(status_code=400, detail="No importable images found")
-            job = await _create_reserved_gallery_import_job(
-                temp_path,
-                total_count,
-                {"filename": archive.filename or ""},
-            )
-        except BaseException:
-            temp_path.unlink(missing_ok=True)
-            raise
-        kick_gallery_job_dispatchers()
-        return JSONResponse(
-            status_code=202,
-            content=GalleryImportJobStatus(**_gallery_import_payload(job)).model_dump(),
-        )
+    if not reserved:
+        if reason == "ip_rate":
+            raise HTTPException(status_code=429, detail="Too many import uploads from this IP")
+        raise HTTPException(status_code=429, detail="Import temporary storage is full")
 
+    import_dir = Path(config.DATA_DIR) / "imports"
+    temp_path: Path | None = None
     try:
-        imported_count = await asyncio.to_thread(
-            import_gallery_entries,
-            iter_import_gallery_entries(temp_path),
+        temp_path = await stream_upload_to_tempfile(
+            archive,
+            reservation_bytes,
+            directory=import_dir,
         )
-    finally:
-        temp_path.unlink(missing_ok=True)
-
-    if imported_count == 0:
-        raise HTTPException(status_code=400, detail="No importable images found")
-    kick_thumbnail_dispatcher()
-    return {
-        "status": "success",
-        "imported": imported_count,
-    }
-
+        try:
+            await asyncio.to_thread(
+                resize_import_upload_reservation,
+                reservation_id,
+                temp_path.stat().st_size,
+            )
+        except OSError:
+            pass
+        total_count = await asyncio.to_thread(count_import_gallery_entries, temp_path)
+        if total_count <= 0:
+            raise HTTPException(status_code=400, detail="No importable images found")
+        job = await _create_reserved_gallery_import_job(
+            temp_path,
+            total_count,
+            {
+                "filename": archive.filename or "",
+                "reservation_id": reservation_id,
+            },
+        )
+    except BaseException:
+        await asyncio.to_thread(release_import_upload_reservation, reservation_id)
+        if temp_path:
+            temp_path.unlink(missing_ok=True)
+        raise
+    kick_gallery_job_dispatchers()
+    return JSONResponse(
+        status_code=202,
+        content=GalleryImportJobStatus(**_gallery_import_payload(job)).model_dump(),
+    )

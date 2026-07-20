@@ -280,6 +280,141 @@ def count_active_gallery_jobs(kind: str) -> int:
     return int(row[0] or 0) if row else 0
 
 
+def _cleanup_expired_import_upload_reservations_on_conn(
+    conn: sqlite3.Connection,
+    now: str,
+) -> int:
+    cursor = conn.execute(
+        "DELETE FROM import_upload_reservations WHERE lease_expires_at <= ?",
+        (now,),
+    )
+    return int(cursor.rowcount or 0)
+
+
+def reserve_import_upload_capacity(
+    *,
+    reservation_id: str,
+    client_ip: str,
+    byte_count: int,
+    max_total_bytes: int,
+    per_ip_limit: int,
+    lease_expires_at: str,
+    now: str | None = None,
+) -> tuple[bool, str]:
+    _ensure_database()
+    normalized_id = str(reservation_id or "").strip()
+    normalized_ip = str(client_ip or "unknown").strip()[:256] or "unknown"
+    reserved_bytes = _coerce_nonnegative_int(byte_count, 0)
+    total_limit = max(1, int(max_total_bytes or 1))
+    ip_limit = max(1, int(per_ip_limit or 1))
+    if not normalized_id or reserved_bytes <= 0:
+        return False, "invalid"
+    now = now or utc_now()
+    with _connect() as conn:
+        with _transaction(conn):
+            _cleanup_expired_import_upload_reservations_on_conn(conn, now)
+            total_row = conn.execute(
+                """
+                SELECT COALESCE(SUM(byte_count), 0)
+                FROM import_upload_reservations
+                WHERE lease_expires_at > ?
+                """,
+                (now,),
+            ).fetchone()
+            current_bytes = int(total_row[0] or 0) if total_row else 0
+            if current_bytes + reserved_bytes > total_limit:
+                return False, "temp_space"
+
+            window_start = (
+                datetime.now(timezone.utc) - timedelta(seconds=60)
+            ).isoformat()
+            ip_row = conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM import_upload_reservations
+                WHERE client_ip = ? AND created_at > ?
+                """,
+                (normalized_ip, window_start),
+            ).fetchone()
+            if int(ip_row[0] or 0) >= ip_limit:
+                return False, "ip_rate"
+
+            conn.execute(
+                """
+                INSERT INTO import_upload_reservations (
+                    reservation_id,
+                    client_ip,
+                    byte_count,
+                    created_at,
+                    updated_at,
+                    lease_expires_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    normalized_id,
+                    normalized_ip,
+                    reserved_bytes,
+                    now,
+                    now,
+                    lease_expires_at,
+                ),
+            )
+    return True, "reserved"
+
+
+def resize_import_upload_reservation(
+    reservation_id: str,
+    byte_count: int,
+    *,
+    now: str | None = None,
+) -> bool:
+    _ensure_database()
+    normalized_id = str(reservation_id or "").strip()
+    if not normalized_id:
+        return False
+    now = now or utc_now()
+    with _connect() as conn:
+        with _transaction(conn):
+            _cleanup_expired_import_upload_reservations_on_conn(conn, now)
+            cursor = conn.execute(
+                """
+                UPDATE import_upload_reservations
+                SET byte_count = ?,
+                    updated_at = ?
+                WHERE reservation_id = ?
+                    AND lease_expires_at > ?
+                """,
+                (
+                    _coerce_nonnegative_int(byte_count, 0),
+                    now,
+                    normalized_id,
+                    now,
+                ),
+            )
+    return int(cursor.rowcount or 0) > 0
+
+
+def release_import_upload_reservation(
+    reservation_id: str,
+    *,
+    now: str | None = None,
+) -> bool:
+    _ensure_database()
+    normalized_id = str(reservation_id or "").strip()
+    if not normalized_id:
+        return False
+    now = now or utc_now()
+    with _connect() as conn:
+        with _transaction(conn):
+            _cleanup_expired_import_upload_reservations_on_conn(conn, now)
+            cursor = conn.execute(
+                "DELETE FROM import_upload_reservations WHERE reservation_id = ?",
+                (normalized_id,),
+            )
+    return int(cursor.rowcount or 0) > 0
+
+
 def reserve_gallery_job_capacity(
     *,
     job: dict[str, Any],
@@ -911,4 +1046,3 @@ def get_runtime_coordination_metrics() -> dict[str, Any]:
 
 
 __all__ = [name for name in globals() if not name.startswith("_")]
-

@@ -11,6 +11,7 @@ export type ApiPreset = {
   has_api_key: boolean;
   api_key_source: ApiKeySource;
   api_key_env_var?: string | null;
+  api_key_secret_id?: string | null;
 };
 
 export type SettingsResponse = {
@@ -20,6 +21,7 @@ export type SettingsResponse = {
   has_api_key: boolean;
   api_key_source: ApiKeySource;
   api_key_env_var?: string | null;
+  api_key_secret_id?: string | null;
   api_path: ApiPath;
   default_model: string;
   default_response_format: ResponseFormatDefault;
@@ -48,6 +50,7 @@ export type PromptOptimizerSettings = {
   has_api_key: boolean;
   api_key_source: ApiKeySource;
   api_key_env_var?: string | null;
+  api_key_secret_id?: string | null;
 };
 
 export type PromptOptimizerHealthResponse = {
@@ -85,6 +88,7 @@ export type AIAssistantSettings = {
   has_api_key: boolean;
   api_key_source: ApiKeySource;
   api_key_env_var?: string | null;
+  api_key_secret_id?: string | null;
 };
 
 export type AIAssistantSettingsInput = {
@@ -103,10 +107,12 @@ export type R2BackupSettings = {
   has_access_key_id: boolean;
   access_key_id_source: ApiKeySource;
   access_key_id_env_var?: string | null;
+  access_key_id_secret_id?: string | null;
   secret_access_key_masked: string;
   has_secret_access_key: boolean;
   secret_access_key_source: ApiKeySource;
   secret_access_key_env_var?: string | null;
+  secret_access_key_secret_id?: string | null;
 };
 
 export type R2BackupSettingsInput = {
@@ -170,6 +176,7 @@ export type OverallConfigItem = {
   hot_reload: boolean;
   restart_required: boolean;
   build_only: boolean;
+  startup_only: boolean;
   updated_at?: string | null;
   override_updated_at?: string | null;
 };
@@ -188,5 +195,3 @@ export type OverallConfigUpdateItem = {
 export type OverallConfigUpdateRequest = {
   updates: OverallConfigUpdateItem[];
 };
-
-

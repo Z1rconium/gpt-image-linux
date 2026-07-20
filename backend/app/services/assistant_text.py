@@ -89,7 +89,7 @@ async def assistant_health(req: AIAssistantSettingsRequest | None = Body(default
     try:
         result = await assistant_client.probe_assistant_endpoint(
             api_url=runtime.api_url,
-            api_key=runtime.api_key,
+            api_key=runtime.api_key if req and req.use_credentials else "",
             api_path=runtime.api_path,
             model=model,
             timeout_seconds=runtime.timeout_seconds,
@@ -420,6 +420,5 @@ async def plan_edit(req: AssistantEditPlanRequest):
         model=model,
         duration_ms=duration_ms,
     )
-
 
 

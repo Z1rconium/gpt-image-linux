@@ -31,6 +31,7 @@ class OverallConfigSpec:
     build_only: bool = False
     min_value: float | None = None
     validator: str | None = None
+    startup_only: bool = False
 
 
 def _spec(
@@ -84,7 +85,7 @@ OVERALL_CONFIG_REGISTRY: tuple[OverallConfigSpec, ...] = (
     _spec("PROMPT_OPTIMIZER_TIMEOUT_SECONDS", "int", "60", "Prompt Optimizer", "Optimizer timeout.", exposed_in_settings=True, min_value=1),
     _spec("PROMPT_OPTIMIZER_MAX_OUTPUT_CHARS", "int", "4000", "Prompt Optimizer", "Max optimized prompt characters.", min_value=1),
     _spec("PROMPT_OPTIMIZER_MAX_RESPONSE_MB", "int", "8", "Prompt Optimizer", "Max optimizer response body size.", min_value=1),
-    _spec("PROMPT_OPTIMIZER_HOST_ALLOWLIST", "string", "", "Prompt Optimizer", "Optimizer endpoint host allowlist.", validator="host_list"),
+    _spec("PROMPT_OPTIMIZER_HOST_ALLOWLIST", "string", "", "Prompt Optimizer", "Optimizer endpoint host allowlist.", validator="host_list", startup_only=True, restart_required=True),
     _spec("AI_ASSISTANT_ENABLED", "bool", "true", "AI Assistant", "Enable AI Assistant tools.", exposed_in_settings=True),
     _spec("AI_ASSISTANT_VISION_MODEL", "string", "gpt-4o-mini", "AI Assistant", "Assistant vision model.", exposed_in_settings=True),
     _spec("AI_ASSISTANT_MAX_RESPONSE_MB", "int", "8", "AI Assistant", "Max assistant response body size.", min_value=1),
@@ -94,7 +95,7 @@ OVERALL_CONFIG_REGISTRY: tuple[OverallConfigSpec, ...] = (
     _spec("AI_ASSISTANT_IMAGE_MAX_BYTES", "int", "1048576", "AI Assistant", "Max assistant vision preview bytes.", min_value=65536),
     _spec("R2_BACKUP_ENABLED", "bool", "false", "R2 Backup", "Enable R2 backup.", exposed_in_settings=True),
     _spec("R2_ENDPOINT_URL", "string", "", "R2 Backup", "R2 endpoint URL.", exposed_in_settings=True),
-    _spec("R2_ENDPOINT_HOST_ALLOWLIST", "string", "", "R2 Backup", "Additional allowed R2-compatible endpoint hostnames outside *.r2.cloudflarestorage.com.", validator="host_list"),
+    _spec("R2_ENDPOINT_HOST_ALLOWLIST", "string", "", "R2 Backup", "Allowed R2 endpoint hostnames.", validator="host_list", startup_only=True, restart_required=True),
     _spec("R2_BUCKET_NAME", "string", "", "R2 Backup", "R2 bucket name.", exposed_in_settings=True),
     _spec("R2_REGION", "string", "auto", "R2 Backup", "R2 region.", exposed_in_settings=True),
     _spec("R2_KEY_PREFIX", "string", "gallery/", "R2 Backup", "R2 key prefix.", exposed_in_settings=True),
@@ -102,22 +103,23 @@ OVERALL_CONFIG_REGISTRY: tuple[OverallConfigSpec, ...] = (
     _spec("R2_SECRET_ACCESS_KEY", "secret", "", "R2 Backup", "R2 secret access key.", secret=True, exposed_in_settings=True),
     _spec("R2_SYNC_INTERVAL_HOURS", "int", "0", "R2 Backup", "Scheduled R2 sync interval in hours; 0 disables automatic sync.", exposed_in_settings=True, min_value=0),
     _spec("R2_SYNC_CONCURRENCY", "int", "4", "R2 Backup", "Concurrent R2 HEAD/upload workers.", min_value=1),
-    _spec("ACCESS_KEY", "secret", "", "Access / Security", "Access gate key.", secret=True, restart_required=True),
+    _spec("ACCESS_KEY", "secret", "", "Access / Security", "Access gate key.", secret=True, restart_required=True, startup_only=True),
     _spec("ALLOW_UNAUTHENTICATED", "bool", "false", "Access / Security", "Allow startup without access key; logs a warning because non-health APIs are unauthenticated.", restart_required=True),
     _spec("ACCESS_KEY_COOKIE_NAME", "string", "gpt_image_access", "Access / Security", "Access cookie name.", restart_required=True),
     _spec("ACCESS_COOKIE_SECURE", "bool", "true", "Access / Security", "Set Secure on access cookie.", restart_required=True),
     _spec("ACCESS_MAX_FAILURES", "int", "5", "Access / Security", "Failed access attempts before lockout.", min_value=1, restart_required=True),
     _spec("ACCESS_LOCKOUT_SECONDS", "int", "300", "Access / Security", "Access lockout duration.", min_value=1, restart_required=True),
-    _spec("IP_ALLOWLIST", "string", "", "Access / Security", "Client IP/CIDR allowlist.", validator="ip_list", restart_required=True),
+    _spec("IP_ALLOWLIST", "string", "", "Access / Security", "Client IP/CIDR allowlist.", validator="ip_list", restart_required=True, startup_only=True),
     _spec("TRUST_PROXY_HEADERS", "bool", "false", "Access / Security", "Trust reverse-proxy headers.", restart_required=True),
-    _spec("TRUSTED_PROXY_IPS", "string", "", "Access / Security", "Trusted reverse proxy IP/CIDR list.", validator="ip_list", restart_required=True),
-    _spec("PUBLIC_ORIGIN", "string", "", "Access / Security", "Canonical browser origin.", validator="origin", restart_required=True),
-    _spec("ALLOWED_HOSTS", "string", "", "Access / Security", "Host / X-Forwarded-Host allowlist.", validator="host_or_origin_list", restart_required=True),
+    _spec("TRUSTED_PROXY_IPS", "string", "", "Access / Security", "Trusted reverse proxy IP/CIDR list.", validator="ip_list", restart_required=True, startup_only=True),
+    _spec("PUBLIC_ORIGIN", "string", "", "Access / Security", "Canonical browser origin.", validator="origin", restart_required=True, startup_only=True),
+    _spec("ALLOWED_HOSTS", "string", "", "Access / Security", "Host / X-Forwarded-Host allowlist.", validator="host_or_origin_list", restart_required=True, startup_only=True),
     _spec("CSRF_ORIGIN_CHECK_ENABLED", "bool", "true", "Access / Security", "Reject unsafe requests without valid Origin, Referer, or same-origin fetch metadata.", restart_required=True),
-    _spec("UPSTREAM_HOST_ALLOWLIST", "string", "", "Access / Security", "Upstream API host allowlist; SOCKS5 proxy is the trust boundary for remote DNS/network reachability.", validator="host_list", restart_required=True),
-    _spec("WEBHOOK_HOST_ALLOWLIST", "string", "", "Webhooks", "Webhook callback host allowlist.", validator="host_list", restart_required=True),
-    _spec("ALLOW_PLAINTEXT_SECRETS", "bool", "false", "Secret Persistence", "Allow literal secrets in SQLite.", restart_required=True),
-    _spec("WEBHOOK_SIGNING_SECRET", "secret", "", "Webhooks", "Webhook signing secret.", secret=True, restart_required=True),
+    _spec("UPSTREAM_HOST_ALLOWLIST", "string", "", "Access / Security", "Upstream API host allowlist.", validator="host_list", restart_required=True, startup_only=True),
+    _spec("UPSTREAM_PROXY_HOST_ALLOWLIST", "string", "", "Access / Security", "SOCKS5 proxy host allowlist.", validator="host_list", restart_required=True, startup_only=True),
+    _spec("WEBHOOK_HOST_ALLOWLIST", "string", "", "Webhooks", "Webhook callback host allowlist.", validator="host_list", restart_required=True, startup_only=True),
+    _spec("ALLOW_PLAINTEXT_SECRETS", "bool", "false", "Secret Persistence", "Deprecated; web-managed literal secrets are disabled.", restart_required=True, startup_only=True),
+    _spec("WEBHOOK_SIGNING_SECRET", "secret", "", "Webhooks", "Webhook signing secret.", secret=True, restart_required=True, startup_only=True),
     _spec("WEBHOOK_TIMEOUT_SECONDS", "float", "5", "Webhooks", "Webhook timeout per attempt.", min_value=0.1),
     _spec("WEBHOOK_MAX_ATTEMPTS", "int", "3", "Webhooks", "Webhook delivery attempts.", min_value=1),
     _spec("MAX_FILE_SIZE_MB", "int", "50", "Limits", "Max uploaded/downloaded image size.", min_value=1),
@@ -256,7 +258,7 @@ def _validate_host_or_origin_list(value: str) -> None:
 
 
 def effective_value(spec: OverallConfigSpec, row: dict[str, Any] | None) -> tuple[str, OverallConfigSource]:
-    if row and row.get("override_value") is not None:
+    if not spec.startup_only and row and row.get("override_value") is not None:
         return str(row.get("override_value") or ""), "override"
     if row and row.get("is_env_set"):
         if spec.secret:
@@ -295,8 +297,6 @@ def apply_rows_to_config(
         if overrides_only and (not row or row.get("override_value") is None):
             continue
         value, _source = effective_value(spec, row)
-        if spec.secret:
-            value = resolve_env_var_ref(value)
         setattr(config, spec.name, typed_value(spec, value))
 
     try:
@@ -316,8 +316,6 @@ def validate_effective_security(rows: dict[str, dict[str, Any]]) -> None:
     def get_string(name: str) -> str:
         spec = OVERALL_CONFIG_BY_NAME[name]
         value, _ = effective_value(spec, rows.get(name))
-        if spec.secret:
-            value = resolve_env_var_ref(value)
         return coerce_value(spec, value)
 
     if get_bool("TRUST_PROXY_HEADERS") and not _split_list(get_string("TRUSTED_PROXY_IPS")):
@@ -327,17 +325,9 @@ def validate_effective_security(rows: dict[str, dict[str, Any]]) -> None:
 
 
 def normalize_secret_override(spec: OverallConfigSpec, value: str) -> str:
+    if spec.startup_only:
+        raise ValueError(f"{spec.name} can only be configured at process startup")
     normalized = coerce_value(spec, value)
     if not spec.secret or not normalized:
         return normalized
-    if is_malformed_env_var_ref(normalized):
-        raise ValueError(f"{spec.name} env ref must be formatted as ${{ENV_VAR_NAME}}")
-    env_var = get_env_var_ref_name(normalized)
-    if env_var:
-        return f"${{{env_var}}}"
-    if config.ALLOW_PLAINTEXT_SECRETS:
-        return normalized
-    raise ValueError(
-        f"{spec.name} must use ${{ENV_VAR_NAME}} unless "
-        "ALLOW_PLAINTEXT_SECRETS=true"
-    )
+    raise ValueError(f"{spec.name} can only be configured at process startup")

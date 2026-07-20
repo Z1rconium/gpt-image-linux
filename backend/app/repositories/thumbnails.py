@@ -6,6 +6,8 @@ import warnings
 from pathlib import Path
 from urllib.parse import quote
 
+from ..core.cdn import signed_media_url
+
 from ..core import settings as config
 from .image_files import (
     IMAGE_FILE_EXTENSIONS,
@@ -57,7 +59,7 @@ def thumbnail_url_for_filename(filename: str) -> str | None:
     if not thumbnail_filename:
         return None
     if config.PUBLIC_THUMBNAIL_BASE_URL:
-        return f"{config.PUBLIC_THUMBNAIL_BASE_URL.rstrip('/')}/{quote(thumbnail_filename, safe='')}"
+        return signed_media_url(config.PUBLIC_THUMBNAIL_BASE_URL, thumbnail_filename)
     return f"/api/thumb/{quote(filename, safe='')}"
 
 

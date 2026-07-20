@@ -1,6 +1,7 @@
 from fastapi import HTTPException
 
 from .app_state import app
+from ..core import secrets
 from ..core import settings as config
 from ..core.api_paths import (
     normalize_api_path,
@@ -10,7 +11,6 @@ from ..core.api_paths import (
 )
 from ..core.validators import (
     get_env_var_ref_name,
-    is_malformed_env_var_ref,
     mask_socks5_proxy_url,
     mask_webhook_url,
     normalize_secret_env_ref_or_plaintext,
@@ -37,7 +37,9 @@ MASKED_API_KEY_VALUE = "********"
 
 
 def get_exception_message(error: Exception) -> str:
-    return str(error) or repr(error) or error.__class__.__name__
+    from ..core.redaction import redact_sensitive_text
+
+    return redact_sensitive_text(str(error) or repr(error) or error.__class__.__name__)
 
 
 def mask_key(key: str) -> str:
@@ -51,7 +53,17 @@ def get_api_key_env_var(api_key: str) -> str | None:
 
 
 def is_malformed_api_key_env_ref(api_key: str) -> bool:
-    return is_malformed_env_var_ref(api_key)
+    return "${" in str(api_key or "") or "}" in str(api_key or "")
+
+
+def _default_secret_reference(secret_id: str, value: str | None) -> str:
+    if secret_id in secrets.configured_secret_ids():
+        return secret_id
+    normalized = str(value or "").strip()
+    env_var = get_api_key_env_var(normalized)
+    if env_var:
+        return f"${{{env_var}}}"
+    return ""
 
 
 def resolve_api_key(api_key: str) -> str:
@@ -63,23 +75,26 @@ def api_key_response_fields(api_key: str) -> dict:
     env_var = get_api_key_env_var(value)
     if env_var:
         return {
-            "api_key_masked": f"${{{env_var}}}",
-            "has_api_key": bool(value),
+            "api_key_masked": value,
+            "has_api_key": True,
             "api_key_source": "env",
             "api_key_env_var": env_var,
+            "api_key_secret_id": None,
         }
     if value:
         return {
-            "api_key_masked": mask_key(value),
+            "api_key_masked": value,
             "has_api_key": True,
-            "api_key_source": "stored",
+            "api_key_source": "registry",
             "api_key_env_var": None,
+            "api_key_secret_id": value,
         }
     return {
         "api_key_masked": "***",
         "has_api_key": False,
         "api_key_source": "empty",
         "api_key_env_var": None,
+        "api_key_secret_id": None,
     }
 
 
@@ -90,41 +105,47 @@ def secret_response_fields(value: str, prefix: str) -> dict:
         f"has_{prefix}": fields["has_api_key"],
         f"{prefix}_source": fields["api_key_source"],
         f"{prefix}_env_var": fields["api_key_env_var"],
+        f"{prefix}_secret_id": fields["api_key_secret_id"],
     }
 
 
 def get_effective_preset_api_key(preset: dict) -> str:
-    api_key = str(preset.get("api_key") or "").strip()
-    env_var = get_api_key_env_var(api_key)
-    if is_malformed_api_key_env_ref(api_key):
-        raise HTTPException(
-            status_code=400,
-            detail="API Key env ref must be formatted as ${ENV_VAR_NAME}.",
+    secret_id = str(preset.get("api_key") or "").strip()
+    if not secret_id:
+        raise HTTPException(status_code=422, detail="API credential is not configured")
+    env_var = get_api_key_env_var(secret_id)
+    if secret_id not in secrets.configured_secret_ids():
+        resolved_key = resolve_api_key(secret_id)
+        if resolved_key:
+            return resolved_key
+        if env_var:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"API Key environment variable {env_var} is not set or empty. "
+                    "Set it in the server environment."
+                ),
+            )
+        raise HTTPException(status_code=422, detail="API credential is not configured")
+    try:
+        return secrets.resolve_secret(
+            secret_id,
+            purpose="upstream_api",
+            target_url=str(preset.get("api_url") or ""),
+            host_allowlist=config.UPSTREAM_HOST_ALLOWLIST,
         )
-
-    resolved_key = resolve_api_key(api_key)
-    if resolved_key:
-        return resolved_key
-
-    if env_var:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"API Key environment variable {env_var} is not set or empty. "
-                "Set it in the server environment."
-            ),
-        )
-    raise HTTPException(
-        status_code=400,
-        detail="API Key not configured. Please set it in Settings.",
-    )
+    except secrets.SecretRegistryError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 def _default_prompt_optimizer_settings() -> dict:
     return {
         "enabled": config.PROMPT_OPTIMIZER_ENABLED,
         "api_url": config.PROMPT_OPTIMIZER_API_URL,
-        "api_key": config.PROMPT_OPTIMIZER_API_KEY,
+        "api_key": _default_secret_reference(
+            "builtin-prompt-optimizer-key",
+            config.PROMPT_OPTIMIZER_API_KEY,
+        ),
         "model": config.PROMPT_OPTIMIZER_MODEL,
         "timeout_seconds": config.PROMPT_OPTIMIZER_TIMEOUT_SECONDS,
     }
@@ -238,7 +259,11 @@ def get_api_presets() -> list[dict]:
             "id": "default",
             "name": "Default",
             "api_url": getattr(app.state, "api_url", config.DEFAULT_API_URL),
-            "api_key": getattr(app.state, "api_key", config.DEFAULT_API_KEY),
+            "api_key": getattr(
+                app.state,
+                "api_key",
+                _default_secret_reference("builtin-default-api-key", config.DEFAULT_API_KEY),
+            ),
             "api_path": getattr(app.state, "api_path", config.DEFAULT_API_PATH),
             "default_model": getattr(app.state, "default_model", ""),
             "default_response_format": getattr(
@@ -291,8 +316,22 @@ def get_upstream_socks5_proxy(*, raw: bool = False) -> str:
     value = str(getattr(app.state, "upstream_socks5_proxy", "") or "").strip()
     if raw:
         return value
-    resolved = resolve_env_var_ref(value)
-    return normalize_socks5_proxy_url(resolved) if resolved else ""
+    if not value:
+        return ""
+    if value not in secrets.configured_secret_ids():
+        resolved = resolve_env_var_ref(value)
+        return normalize_socks5_proxy_url(resolved) if resolved else ""
+    try:
+        entry = secrets.secret_entry(value)
+        target = entry.resolve()
+        return secrets.resolve_secret(
+            value,
+            purpose="upstream_proxy",
+            target_url=target,
+            host_allowlist=config.UPSTREAM_PROXY_HOST_ALLOWLIST,
+        )
+    except secrets.SecretRegistryError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 def apply_upstream_socks5_proxy(value: str | None):
@@ -307,8 +346,22 @@ def get_webhook_url(*, raw: bool = False) -> str:
     value = str(getattr(app.state, "webhook_url", "") or "").strip()
     if raw:
         return value
-    resolved = resolve_env_var_ref(value)
-    return normalize_webhook_url(resolved) if resolved else ""
+    if not value:
+        return ""
+    if value not in secrets.configured_secret_ids():
+        resolved = resolve_env_var_ref(value)
+        return normalize_webhook_url(resolved) if resolved else ""
+    try:
+        entry = secrets.secret_entry(value)
+        target = entry.resolve()
+        return secrets.resolve_secret(
+            value,
+            purpose="webhook_url",
+            target_url=target,
+            host_allowlist=config.WEBHOOK_HOST_ALLOWLIST,
+        )
+    except secrets.SecretRegistryError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 def apply_webhook_url(value: str | None):
@@ -449,52 +502,62 @@ def build_r2_backup_settings_response(raw: dict | None) -> R2BackupSettingsRespo
 
 def resolve_prompt_optimizer_api_key(raw: dict | None) -> str:
     settings = normalize_prompt_optimizer_settings(raw)
-    api_key = str(settings.get("api_key") or "").strip()
-    env_var = get_api_key_env_var(api_key)
-    if is_malformed_api_key_env_ref(api_key):
-        raise HTTPException(
-            status_code=400,
-            detail="Prompt optimizer API Key env ref must be formatted as ${ENV_VAR_NAME}.",
-        )
-    resolved_key = resolve_api_key(api_key)
-    if resolved_key:
-        return resolved_key
-    if env_var:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Prompt optimizer API Key environment variable {env_var} is not set or empty. "
-                "Set it in the server environment."
-            ),
-        )
-    if not api_key:
+    secret_id = str(settings.get("api_key") or "").strip()
+    if not secret_id:
         return ""
-    return api_key
+    env_var = get_api_key_env_var(secret_id)
+    if secret_id not in secrets.configured_secret_ids():
+        resolved_key = resolve_api_key(secret_id)
+        if resolved_key:
+            return resolved_key
+        if env_var:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Prompt optimizer API Key environment variable {env_var} "
+                    "is not set or empty. Set it in the server environment."
+                ),
+            )
+        return secret_id
+    try:
+        return secrets.resolve_secret(
+            secret_id,
+            purpose="prompt_optimizer",
+            target_url=str(settings.get("api_url") or ""),
+            host_allowlist=config.PROMPT_OPTIMIZER_HOST_ALLOWLIST,
+        )
+    except secrets.SecretRegistryError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 def resolve_ai_assistant_api_key(raw: dict | None) -> str:
     settings = effective_ai_assistant_settings(raw)
-    api_key = str(settings.get("api_key") or "").strip()
-    env_var = get_api_key_env_var(api_key)
-    if is_malformed_api_key_env_ref(api_key):
-        raise HTTPException(
-            status_code=400,
-            detail="Prompt Optimizer API Key env ref for AI Assistant must be formatted as ${ENV_VAR_NAME}.",
-        )
-    resolved_key = resolve_api_key(api_key)
-    if resolved_key:
-        return resolved_key
-    if env_var:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Prompt Optimizer API Key environment variable {env_var} is not set or empty for AI Assistant. "
-                "Set it in the server environment."
-            ),
-        )
-    if not api_key:
+    secret_id = str(settings.get("api_key") or "").strip()
+    if not secret_id:
         return ""
-    return api_key
+    env_var = get_api_key_env_var(secret_id)
+    if secret_id not in secrets.configured_secret_ids():
+        resolved_key = resolve_api_key(secret_id)
+        if resolved_key:
+            return resolved_key
+        if env_var:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Prompt Optimizer API Key environment variable {env_var} "
+                    "is not set or empty for AI Assistant. Set it in the server environment."
+                ),
+            )
+        return secret_id
+    try:
+        return secrets.resolve_secret(
+            secret_id,
+            purpose="prompt_optimizer",
+            target_url=str(settings.get("api_url") or ""),
+            host_allowlist=config.PROMPT_OPTIMIZER_HOST_ALLOWLIST,
+        )
+    except secrets.SecretRegistryError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 def get_prompt_optimizer_settings() -> dict:
@@ -527,6 +590,60 @@ def get_r2_backup_settings() -> dict:
     return load_r2_backup_settings()
 
 
+def validate_configured_secret_bindings() -> None:
+    for preset in get_api_presets():
+        secret_id = str(preset.get("api_key") or "").strip()
+        if secret_id not in secrets.configured_secret_ids():
+            continue
+        if secret_id:
+            secrets.validate_secret_binding(
+                secret_id,
+                purpose="upstream_api",
+                target_url=str(preset.get("api_url") or ""),
+                host_allowlist=config.UPSTREAM_HOST_ALLOWLIST,
+            )
+
+    optimizer = normalize_prompt_optimizer_settings(get_prompt_optimizer_settings())
+    optimizer_secret_id = str(optimizer.get("api_key") or "").strip()
+    if optimizer_secret_id not in secrets.configured_secret_ids():
+        optimizer_secret_id = ""
+    if optimizer_secret_id:
+        secrets.validate_secret_binding(
+            optimizer_secret_id,
+            purpose="prompt_optimizer",
+            target_url=str(optimizer.get("api_url") or ""),
+            host_allowlist=config.PROMPT_OPTIMIZER_HOST_ALLOWLIST,
+        )
+
+    r2 = get_r2_backup_settings()
+    endpoint_url = str(r2.get("endpoint_url") or "")
+    for field, purpose in (
+        ("access_key_id", "r2_access_key_id"),
+        ("secret_access_key", "r2_secret_access_key"),
+    ):
+        secret_id = str(r2.get(field) or "").strip()
+        if secret_id not in secrets.configured_secret_ids():
+            continue
+        if secret_id:
+            secrets.validate_secret_binding(
+                secret_id,
+                purpose=purpose,
+                target_url=endpoint_url,
+                host_allowlist=config.R2_ENDPOINT_HOST_ALLOWLIST,
+            )
+
+    upstream_proxy = get_upstream_socks5_proxy(raw=True)
+    if upstream_proxy:
+        get_upstream_socks5_proxy()
+    webhook_url = get_webhook_url(raw=True)
+    if webhook_url:
+        get_webhook_url()
+        if len(config.WEBHOOK_SIGNING_SECRET.encode("utf-8")) < 32:
+            raise secrets.SecretRegistryError(
+                "A configured webhook requires WEBHOOK_SIGNING_SECRET with at least 32 bytes"
+            )
+
+
 def apply_prompt_optimizer_settings(
     current: dict | None, req_optimizer: object
 ) -> dict:
@@ -536,7 +653,10 @@ def apply_prompt_optimizer_settings(
     if hasattr(req_optimizer, "enabled") and req_optimizer.enabled is not None:
         current["enabled"] = req_optimizer.enabled
     if hasattr(req_optimizer, "api_url") and req_optimizer.api_url is not None:
-        current["api_url"] = req_optimizer.api_url.strip()
+        next_url = req_optimizer.api_url.strip()
+        if current.get("api_key") and not secrets.same_origin(current.get("api_url"), next_url):
+            current["api_key"] = ""
+        current["api_url"] = next_url
     if hasattr(req_optimizer, "model") and req_optimizer.model is not None:
         current["model"] = req_optimizer.model.strip()
     if (
@@ -571,7 +691,13 @@ def apply_r2_backup_settings(current: dict | None, req_r2: object) -> dict:
     if hasattr(req_r2, "enabled") and req_r2.enabled is not None:
         current["enabled"] = bool(req_r2.enabled)
     if hasattr(req_r2, "endpoint_url") and req_r2.endpoint_url is not None:
-        current["endpoint_url"] = req_r2.endpoint_url.strip()
+        next_endpoint = req_r2.endpoint_url.strip()
+        if any(current.get(key) for key in ("access_key_id", "secret_access_key")) and not secrets.same_origin(
+            current.get("endpoint_url"), next_endpoint
+        ):
+            current["access_key_id"] = ""
+            current["secret_access_key"] = ""
+        current["endpoint_url"] = next_endpoint
     if hasattr(req_r2, "bucket_name") and req_r2.bucket_name is not None:
         current["bucket_name"] = req_r2.bucket_name.strip()
     if hasattr(req_r2, "region") and req_r2.region is not None:

@@ -4,7 +4,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 ApiPath = Literal["/v1/images/generations", "/v1/responses", "/v1/chat/completions"]
 AssistantApiPath = Literal["/v1/chat/completions", "/v1/responses"]
-ApiKeySource = Literal["empty", "stored", "env"]
+ApiKeySource = Literal["empty", "stored", "env", "registry"]
 OverallConfigValueType = Literal["string", "secret", "bool", "int", "float"]
 OverallConfigValueSource = Literal["override", "env", "default"]
 ResponseFormatDefault = Literal["", "url", "b64_json"]
@@ -33,4 +33,3 @@ class StrictRequestModel(BaseModel):
 class MessageResponse(BaseModel):
     status: str
     message: str
-

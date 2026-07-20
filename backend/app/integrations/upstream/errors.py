@@ -10,6 +10,7 @@ from typing import Any, Protocol
 from urllib.parse import urljoin, urlsplit
 
 from ...core import settings as config
+from ...core.redaction import redact_sensitive_text
 from ...core.api_paths import (
     CHAT_COMPLETIONS_API_PATH,
     RESPONSES_API_PATH,
@@ -78,17 +79,7 @@ MAX_PERSISTABLE_UPSTREAM_ERROR_CHARS = 2000
 
 
 def _sanitize_upstream_error_text(value: Any) -> str:
-    text = str(value or "")[:MAX_PERSISTABLE_UPSTREAM_ERROR_CHARS]
-    text = re.sub(
-        r"(?i)(authorization\s*[:=]\s*(?:bearer\s+)?)[^\s,;]+",
-        r"\1[REDACTED]",
-        text,
-    )
-    return re.sub(
-        r'''(?i)(["']?(?:api[_-]?key|access[_-]?key|secret|token)["']?\s*[:=]\s*["']?)[^"',\s}]+''',
-        r"\1[REDACTED]",
-        text,
-    )
+    return redact_sensitive_text(value)[:MAX_PERSISTABLE_UPSTREAM_ERROR_CHARS]
 
 
 def validate_upstream_image_data(value: Any, requested_n: int) -> list[dict[str, Any]]:
@@ -128,5 +119,4 @@ def _warn_if_socks5_upstream_resolves_private(
 
 
 __all__ = [name for name in globals() if not name.startswith("__")]
-
 

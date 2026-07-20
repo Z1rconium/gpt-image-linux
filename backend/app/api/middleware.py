@@ -1,14 +1,17 @@
 from urllib.parse import urlsplit
 import re
 import logging
+import uuid
 
-from fastapi import Request, Response
+from fastapi import HTTPException, Request, Response
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.datastructures import Headers
 from starlette.middleware.gzip import GZipMiddleware, GZipResponder
 from starlette.types import Message, Receive, Scope, Send
 
 from .csp import CONTENT_SECURITY_POLICY
+from ..core.redaction import redact_sensitive_text
 from ..core import security as auth
 from ..core import settings as config
 
@@ -23,9 +26,7 @@ AUTH_EXEMPT_PATHS = {
     "/health",
 }
 AUTH_EXEMPT_PREFIXES = ("/_app/",)
-NO_CACHE_PATHS = {"/"}
-NO_CACHE_PREFIXES: tuple[str, ...] = ()
-CSRF_PROTECTED_METHODS = {"POST", "PATCH", "DELETE"}
+CSRF_SAFE_METHODS = {"GET", "HEAD", "OPTIONS", "TRACE"}
 _INVALID_HOST_RE = re.compile(r"[\x00-\x1f\x7f]")
 _GZIP_BYPASS_PATHS = {"/api/download-all"}
 _GZIP_BYPASS_PREFIXES = ("/api/image/", "/api/thumb/", "/api/download/")
@@ -109,6 +110,93 @@ def apply_security_headers(response: Response) -> Response:
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "same-origin"
     return response
+
+
+def _correlation_id(request: Request) -> str:
+    correlation_id = getattr(request.state, "correlation_id", None)
+    if not correlation_id:
+        correlation_id = uuid.uuid4().hex
+        request.state.correlation_id = correlation_id
+    return correlation_id
+
+
+def _safe_error_detail(detail: object) -> str:
+    if isinstance(detail, str):
+        return redact_sensitive_text(detail)
+    return redact_sensitive_text(str(detail or ""))
+
+
+def error_response(
+    request: Request,
+    status_code: int,
+    error_code: str,
+    detail: object | None = None,
+) -> JSONResponse:
+    correlation_id = _correlation_id(request)
+    safe_detail = _safe_error_detail(detail) if detail is not None else None
+    content = {
+        "status": "error",
+        "error_code": error_code,
+        "correlation_id": correlation_id,
+    }
+    if safe_detail:
+        content["detail"] = safe_detail
+        content["message"] = safe_detail
+        content["error"] = safe_detail
+    response = JSONResponse(
+        status_code=status_code,
+        content=content,
+    )
+    response.headers["X-Correlation-ID"] = correlation_id
+    response.headers["Cache-Control"] = "private, no-store"
+    return apply_security_headers(response)
+
+
+def _request_validation_detail(exc: RequestValidationError) -> str:
+    messages: list[str] = []
+    for error in exc.errors():
+        raw_loc = error.get("loc") or ()
+        loc_parts = [str(part) for part in raw_loc if part != "body"]
+        location = ".".join(loc_parts)
+        message = str(error.get("msg") or "Invalid input")
+        if message.startswith("Value error, "):
+            message = message.removeprefix("Value error, ")
+        messages.append(f"{location} - {message}" if location else message)
+    return "; ".join(messages) or "Request validation failed"
+
+
+def _error_code_for_status(status_code: int) -> str:
+    return {
+        400: "bad_request",
+        401: "authentication_required",
+        403: "forbidden",
+        404: "not_found",
+        405: "method_not_allowed",
+        409: "conflict",
+        413: "request_too_large",
+        422: "validation_error",
+        429: "rate_limited",
+        502: "upstream_error",
+        503: "service_unavailable",
+        504: "upstream_timeout",
+    }.get(status_code, "internal_error" if status_code >= 500 else "request_rejected")
+
+
+def _requires_admin_session(request: Request) -> bool:
+    if (
+        config.ALLOW_UNAUTHENTICATED
+        and not config.ACCESS_KEY
+        and not auth.configured_admin_key()
+    ):
+        return False
+    path = request.url.path
+    if path == "/api/settings/overall-config":
+        return True
+    if path == "/api/prompt/optimizer-system-prompt":
+        return True
+    if path in {"/api/prompt/optimizer-health", "/api/assistant/health"}:
+        return True
+    return path.startswith("/api/settings") and request.method.upper() not in {"GET", "HEAD"}
 
 
 def normalize_origin(value: str | None) -> str | None:
@@ -315,7 +403,7 @@ def get_request_origin(request: Request) -> str | None:
 def csrf_origin_allowed(request: Request) -> bool:
     if (
         not config.CSRF_ORIGIN_CHECK_ENABLED
-        or request.method.upper() not in CSRF_PROTECTED_METHODS
+        or request.method.upper() in CSRF_SAFE_METHODS
     ):
         return True
 
@@ -353,6 +441,7 @@ def csrf_origin_allowed(request: Request) -> bool:
 def register_middleware(app):
     @app.middleware("http")
     async def access_control_middleware(request: Request, call_next):
+        correlation_id = _correlation_id(request)
         host_allowed, host_detail = request_host_allowed(request)
         if not host_allowed:
             logger.warning(
@@ -361,12 +450,7 @@ def register_middleware(app):
                 auth.get_client_ip(request),
                 host_detail,
             )
-            return apply_security_headers(
-                JSONResponse(
-                    status_code=400,
-                    content={"status": "error", "detail": host_detail},
-                )
-            )
+            return error_response(request, 400, "host_not_allowed", host_detail)
 
         if request.url.path != "/health":
             client_ip = auth.get_client_ip(request)
@@ -376,11 +460,11 @@ def register_middleware(app):
                     request.url.path,
                     client_ip,
                 )
-                return apply_security_headers(
-                    JSONResponse(
-                        status_code=403,
-                        content={"status": "error", "detail": "IP address is not allowed"},
-                    )
+                return error_response(
+                    request,
+                    403,
+                    "ip_not_allowed",
+                    "IP address is not allowed",
                 )
 
         if not csrf_origin_allowed(request):
@@ -389,11 +473,11 @@ def register_middleware(app):
                 request.url.path,
                 auth.get_client_ip(request),
             )
-            return apply_security_headers(
-                JSONResponse(
-                    status_code=403,
-                    content={"status": "error", "detail": "CSRF origin check failed"},
-                )
+            return error_response(
+                request,
+                403,
+                "csrf_rejected",
+                "CSRF origin check failed",
             )
 
         if (
@@ -408,24 +492,69 @@ def register_middleware(app):
                     request.url.path,
                     auth.get_client_ip(request),
                 )
-                return apply_security_headers(
-                    JSONResponse(
-                        status_code=401,
-                        content={"status": "error", "detail": "Access key required"},
-                    )
+                return error_response(
+                    request,
+                    401,
+                    "authentication_required",
+                    "Access key required",
+                )
+
+        if _requires_admin_session(request):
+            admin_token = request.cookies.get(config.ADMIN_COOKIE_NAME)
+            if not auth.verify_admin_token(admin_token):
+                return error_response(
+                    request,
+                    403,
+                    "admin_reauth_required",
+                    "Admin re-authentication required",
                 )
 
         response = await call_next(request)
 
-        if request.url.path in NO_CACHE_PATHS or request.url.path.startswith(
-            NO_CACHE_PREFIXES
-        ):
+        if request.url.path.startswith("/api/") or response.status_code >= 400:
+            response.headers["Cache-Control"] = "private, no-store"
+            response.headers["Vary"] = "Cookie"
+        elif request.url.path == "/":
             response.headers["Cache-Control"] = "no-cache"
+
+        response.headers["X-Correlation-ID"] = correlation_id
 
         return apply_security_headers(response)
 
 
 def register_exception_handlers(app):
+    @app.exception_handler(HTTPException)
+    async def http_exception_handler(request: Request, exc: HTTPException):
+        logger.warning(
+            "Request rejected path=%s client=%s status=%s detail=%s correlation_id=%s",
+            request.url.path,
+            auth.get_client_ip(request),
+            exc.status_code,
+            exc.detail,
+            _correlation_id(request),
+        )
+        return error_response(
+            request,
+            exc.status_code,
+            _error_code_for_status(exc.status_code),
+            exc.detail,
+        )
+
+    @app.exception_handler(RequestValidationError)
+    async def request_validation_handler(request: Request, exc: RequestValidationError):
+        logger.warning(
+            "Request validation failed path=%s client=%s correlation_id=%s",
+            request.url.path,
+            auth.get_client_ip(request),
+            _correlation_id(request),
+        )
+        return error_response(
+            request,
+            422,
+            "validation_error",
+            _request_validation_detail(exc),
+        )
+
     @app.exception_handler(Exception)
     async def unhandled_exception_handler(request: Request, exc: Exception):
         logger.exception(
@@ -433,7 +562,4 @@ def register_exception_handlers(app):
             request.url.path,
             auth.get_client_ip(request),
         )
-        return JSONResponse(
-            status_code=500,
-            content={"status": "error", "detail": "Internal Server Error"},
-        )
+        return error_response(request, 500, "internal_error", "Internal Server Error")

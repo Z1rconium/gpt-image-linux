@@ -1,6 +1,6 @@
 export type ApiPath = '/v1/images/generations' | '/v1/responses' | '/v1/chat/completions';
 export type AssistantApiPath = '/v1/chat/completions' | '/v1/responses';
-export type ApiKeySource = 'empty' | 'stored' | 'env';
+export type ApiKeySource = 'empty' | 'stored' | 'env' | 'registry';
 export type OverallConfigValueType = 'string' | 'secret' | 'bool' | 'int' | 'float';
 export type OverallConfigValueSource = 'override' | 'env' | 'default';
 export type ResponseFormatDefault = '' | 'url' | 'b64_json';
@@ -10,4 +10,3 @@ export type GalleryExportJobStatusValue = 'queued' | 'running' | 'success' | 'er
 export type GallerySyncJobStatusValue = 'queued' | 'running' | 'success' | 'error';
 export type GalleryImportJobStatusValue = 'queued' | 'running' | 'success' | 'error';
 export type AssistantGalleryBatchJobStatusValue = GalleryImportJobStatusValue;
-

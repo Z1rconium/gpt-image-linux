@@ -47,4 +47,7 @@ class PromptSnippetListResponse(BaseModel):
     snippets: list[PromptSnippet]
 
 
+class PromptSnippetSearchRequest(StrictRequestModel):
+    query: str = Field(default="", max_length=4000)
+
 

@@ -263,7 +263,7 @@ async def stream_generate_jobs(request: Request):
         event_stream(),
         media_type="text/event-stream",
         headers={
-            "Cache-Control": "no-cache",
+            "Cache-Control": "private, no-store",
             "X-Accel-Buffering": "no",
         },
     )
@@ -375,7 +375,7 @@ async def stream_generate_job(job_id: str, request: Request):
         event_stream(),
         media_type="text/event-stream",
         headers={
-            "Cache-Control": "no-cache",
+            "Cache-Control": "private, no-store",
             "X-Accel-Buffering": "no",
         },
     )

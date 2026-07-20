@@ -18,6 +18,10 @@ class AccessStatusResponse(BaseModel):
     expires_at: Optional[str] = None
 
 
+class AdminAccessRequest(StrictRequestModel):
+    admin_key: str = Field(..., min_length=1, max_length=4096)
+
+
 class VersionResponse(BaseModel):
     version: str
     github_repo: str = ""
@@ -28,6 +32,5 @@ class LatestVersionResponse(BaseModel):
     latest_version: Optional[str] = None
     has_update: bool = False
     checked_at: Optional[str] = None
-
 
 

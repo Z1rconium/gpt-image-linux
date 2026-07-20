@@ -8,6 +8,7 @@ from pathlib import Path
 
 from fastapi import FastAPI
 
+from ..core import secrets
 from ..core import security as auth
 from ..core import settings as config
 from ..core import overall_config
@@ -89,6 +90,7 @@ async def lifespan(app: FastAPI):
     from ..services import job_events, job_scheduler
 
     app.state.worker_id = f"{os.getpid()}-{id(app)}"
+    secrets.configure_registry(config.SECRET_REGISTRY_JSON)
     Path(config.IMAGES_DIR).mkdir(parents=True, exist_ok=True)
     Path(config.THUMBNAILS_DIR).mkdir(parents=True, exist_ok=True)
     Path(config.DATA_DIR).mkdir(parents=True, exist_ok=True)
@@ -104,11 +106,27 @@ async def lifespan(app: FastAPI):
             "ACCESS_KEY is required. Set ACCESS_KEY, or set "
             "ALLOW_UNAUTHENTICATED=true to explicitly run without authentication."
         )
+    admin_key = auth.configured_admin_key()
+    if not admin_key and not (
+        config.ALLOW_UNAUTHENTICATED and not config.ACCESS_KEY
+    ):
+        raise RuntimeError("ADMIN_KEY is required for Settings management step-up")
+    if (config.PUBLIC_IMAGE_BASE_URL or config.PUBLIC_THUMBNAIL_BASE_URL) and len(
+        config.CDN_SIGNING_SECRET.encode("utf-8")
+    ) < 32:
+        raise RuntimeError(
+            "Public CDN media URLs require CDN_SIGNING_SECRET with at least 32 bytes"
+        )
     if config.ALLOW_UNAUTHENTICATED and not config.ACCESS_KEY:
         logger.warning(
             "ALLOW_UNAUTHENTICATED=true and ACCESS_KEY is unset; all non-health API "
             "routes are running without access-key authentication."
         )
+        if not admin_key:
+            logger.warning(
+                "ADMIN_KEY is unset; Settings management step-up is not enforced "
+                "in unauthenticated mode."
+            )
 
     auth.validate_proxy_config()
 
@@ -180,6 +198,7 @@ async def lifespan(app: FastAPI):
         else None
     )
     presets.load_api_settings()
+    presets.validate_configured_secret_bindings()
     app.state.generate_jobs = {}
     app.state.generate_job_tasks = {}
     app.state.upstream_request_semaphore = asyncio.Semaphore(config.MAX_ACTIVE_GENERATE_JOBS)

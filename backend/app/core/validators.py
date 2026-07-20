@@ -34,6 +34,8 @@ def normalize_secret_env_ref_or_plaintext(
     field_name: str,
     normalizer=None,
 ) -> str:
+    from .secrets import configured_secret_ids, normalize_secret_id
+
     normalized = str(value or "").strip()
     if not normalized:
         return ""
@@ -45,6 +47,9 @@ def normalize_secret_env_ref_or_plaintext(
     env_var = get_env_var_ref_name(normalized)
     if env_var:
         return f"${{{env_var}}}"
+
+    if normalized in configured_secret_ids():
+        return normalize_secret_id(normalized, field_name=field_name)
 
     if not config.ALLOW_PLAINTEXT_SECRETS:
         raise ValueError(
@@ -403,7 +408,9 @@ def mask_webhook_url(url: str | None) -> str:
     value = str(url or "").strip()
     if not value:
         return ""
-    if get_env_var_ref_name(value):
+    from .secrets import configured_secret_ids
+
+    if value in configured_secret_ids() or get_env_var_ref_name(value):
         return value
 
     try:
@@ -455,7 +462,9 @@ def mask_socks5_proxy_url(url: str | None) -> str:
     value = str(url or "").strip()
     if not value:
         return ""
-    if get_env_var_ref_name(value):
+    from .secrets import configured_secret_ids
+
+    if value in configured_secret_ids() or get_env_var_ref_name(value):
         return value
 
     try:

@@ -51,6 +51,16 @@ class GallerySelectionFilterRequest(StrictRequestModel):
     favorite: Optional[bool] = None
 
 
+class GallerySearchRequest(GallerySelectionFilterRequest):
+    page: int = Field(default=1, ge=1)
+    page_size: int = Field(default=9, ge=1, le=100)
+    include_total_bytes: bool = False
+    include_counts: bool = True
+    include_filter_options: bool = True
+    cursor: Optional[str] = Field(default=None, max_length=512)
+    direction: str = Field(default="next", max_length=8)
+
+
 class GallerySelectionTokenRequest(StrictRequestModel):
     filters: GallerySelectionFilterRequest = Field(default_factory=GallerySelectionFilterRequest)
 
@@ -212,6 +222,5 @@ class GalleryResponse(BaseModel):
     prev_cursor: Optional[str] = None
     images: list[GalleryEntry]
     filter_options: GalleryFilterOptions = Field(default_factory=GalleryFilterOptions)
-
 
 

@@ -134,8 +134,8 @@ import type { AIAssistantSettingsInput, ApiPreset, AssistantHealthResponse, Over
     apiUrl = activePreset.api_url || settings.api_url || '';
     defaultModel = activePreset.default_model || settings.default_model || 'gpt-image-2';
     apiKey =
-      activePreset.api_key_source === 'env' && activePreset.api_key_env_var
-        ? `\${${activePreset.api_key_env_var}}`
+      activePreset.api_key_source === 'registry' && activePreset.api_key_secret_id
+        ? activePreset.api_key_secret_id
         : activePreset.has_api_key || settings.has_api_key
           ? MASKED_API_KEY_VALUE
           : '';
@@ -148,8 +148,8 @@ import type { AIAssistantSettingsInput, ApiPreset, AssistantHealthResponse, Over
     promptOptimizerModel = settings.prompt_optimizer?.model || 'gpt-4o-mini';
     promptOptimizerTimeoutSeconds = settings.prompt_optimizer?.timeout_seconds || 60;
     promptOptimizerApiKey =
-      settings.prompt_optimizer?.api_key_source === 'env' && settings.prompt_optimizer.api_key_env_var
-        ? `\${${settings.prompt_optimizer.api_key_env_var}}`
+      settings.prompt_optimizer?.api_key_source === 'registry' && settings.prompt_optimizer.api_key_secret_id
+        ? settings.prompt_optimizer.api_key_secret_id
         : settings.prompt_optimizer?.has_api_key
           ? MASKED_API_KEY_VALUE
           : '';
@@ -162,22 +162,22 @@ import type { AIAssistantSettingsInput, ApiPreset, AssistantHealthResponse, Over
     r2KeyPrefix = settings.r2_backup?.key_prefix || 'gallery/';
     r2SyncIntervalHours = settings.r2_backup?.sync_interval_hours ?? 0;
     r2AccessKeyId =
-      settings.r2_backup?.access_key_id_source === 'env' && settings.r2_backup.access_key_id_env_var
-        ? `\${${settings.r2_backup.access_key_id_env_var}}`
+      settings.r2_backup?.access_key_id_source === 'registry' && settings.r2_backup.access_key_id_secret_id
+        ? settings.r2_backup.access_key_id_secret_id
         : settings.r2_backup?.has_access_key_id
           ? MASKED_API_KEY_VALUE
           : '';
     r2SecretAccessKey =
-      settings.r2_backup?.secret_access_key_source === 'env' && settings.r2_backup.secret_access_key_env_var
-        ? `\${${settings.r2_backup.secret_access_key_env_var}}`
+      settings.r2_backup?.secret_access_key_source === 'registry' && settings.r2_backup.secret_access_key_secret_id
+        ? settings.r2_backup.secret_access_key_secret_id
         : settings.r2_backup?.has_secret_access_key
           ? MASKED_API_KEY_VALUE
           : '';
   }
-  $: apiKeyInputType = apiKey.trim().startsWith('${') && apiKey.trim().endsWith('}') ? 'text' : 'password';
-  $: promptOptimizerApiKeyInputType = promptOptimizerApiKey.trim().startsWith('${') && promptOptimizerApiKey.trim().endsWith('}') ? 'text' : 'password';
-  $: r2AccessKeyIdInputType = r2AccessKeyId.trim().startsWith('${') && r2AccessKeyId.trim().endsWith('}') ? 'text' : 'password';
-  $: r2SecretAccessKeyInputType = r2SecretAccessKey.trim().startsWith('${') && r2SecretAccessKey.trim().endsWith('}') ? 'text' : 'password';
+  $: apiKeyInputType = 'text';
+  $: promptOptimizerApiKeyInputType = 'text';
+  $: r2AccessKeyIdInputType = 'text';
+  $: r2SecretAccessKeyInputType = 'text';
   $: if (!open && systemPromptOpen) {
     systemPromptOpen = false;
     systemPromptError = '';

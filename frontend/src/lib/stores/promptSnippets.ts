@@ -16,14 +16,6 @@ const initialPromptSnippetsState: PromptSnippetsState = {
   query: ''
 };
 
-function promptSnippetsUrl(query: string) {
-  const params = new URLSearchParams();
-  const normalizedQuery = query.trim();
-  if (normalizedQuery) params.set('query', normalizedQuery);
-  const suffix = params.toString();
-  return `/api/prompt-snippets${suffix ? `?${suffix}` : ''}`;
-}
-
 function createPromptSnippetsStore() {
   const { subscribe, update } = writable<PromptSnippetsState>(initialPromptSnippetsState);
 
@@ -31,8 +23,12 @@ function createPromptSnippetsStore() {
     update((state) => ({ ...state, loading: true, query }));
     try {
       const response = await apiFetch<PromptSnippetListResponse>(
-        promptSnippetsUrl(query),
-        {},
+        '/api/prompt-snippets/search',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query: query.trim() })
+        },
         'loading prompt snippets'
       );
       update((state) => ({

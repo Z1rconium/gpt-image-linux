@@ -123,7 +123,6 @@ function buildGalleryParams(
   includeFilterOptions = true
 ) {
   const params = new URLSearchParams({ page: String(page), page_size: '9' });
-  if (filters.prompt.trim()) params.set('prompt', filters.prompt.trim());
   if (filters.model) params.set('model', filters.model);
   if (filters.preset) params.set('preset', filters.preset);
   if (filters.size) params.set('size', filters.size);
@@ -138,6 +137,25 @@ function buildGalleryParams(
     params.set('direction', direction);
   }
   return params;
+}
+
+function gallerySearchBody(params: URLSearchParams, filters: GalleryFilters) {
+  return {
+    page: Number(params.get('page') || 1),
+    page_size: Number(params.get('page_size') || 9),
+    prompt: filters.prompt.trim(),
+    model: filters.model,
+    preset: filters.preset,
+    size: filters.size,
+    date_from: filters.dateFrom,
+    date_to: filters.dateTo,
+    favorite: filters.favorite ? true : null,
+    include_total_bytes: params.get('include_total_bytes') === 'true',
+    include_counts: params.get('include_counts') !== 'false',
+    include_filter_options: params.get('include_filter_options') !== 'false',
+    cursor: params.get('cursor'),
+    direction: params.get('direction') || 'next'
+  };
 }
 
 function isAbortError(error: unknown) {
@@ -362,7 +380,8 @@ function createGalleryStore() {
       !lightweightCursorPage,
       !lightweightCursorPage
     );
-    const requestKey = params.toString();
+    const requestBody = gallerySearchBody(params, filters);
+    const requestKey = JSON.stringify(requestBody);
     const seq = ++requestSeq;
     const cachedGallery = prefetchedPages.get(requestKey);
     if (cachedGallery) {
@@ -421,8 +440,13 @@ function createGalleryStore() {
     update((current) => ({ ...current, loading: true, page }));
     try {
       const gallery = await apiFetch<GalleryResponse>(
-        `/api/gallery?${requestKey}`,
-        { signal: abortController.signal },
+        '/api/gallery/search',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(requestBody),
+          signal: abortController.signal
+        },
         'loading gallery'
       );
       if (seq !== requestSeq) return;
@@ -464,13 +488,22 @@ function createGalleryStore() {
     if ((navigation === 'next' || navigation === 'prev') && !cursor) return null;
 
     const params = buildGalleryParams(page, filters, false, cursor, direction, !direction, !direction);
-    const requestKey = params.toString();
+    const requestBody = gallerySearchBody(params, filters);
+    const requestKey = JSON.stringify(requestBody);
     const cached = prefetchedPages.get(requestKey);
     if (cached) return cached;
     const pending = prefetchRequests.get(requestKey);
     if (pending) return pending;
 
-    const request = apiFetch<GalleryResponse>(`/api/gallery?${requestKey}`, {}, 'prefetching gallery').then(
+    const request = apiFetch<GalleryResponse>(
+      '/api/gallery/search',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(requestBody)
+      },
+      'prefetching gallery'
+    ).then(
       (gallery) => {
         prefetchRequests.delete(requestKey);
         prefetchedPages.set(requestKey, gallery);

@@ -3,12 +3,14 @@ import hashlib
 import hmac
 import json
 import logging
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 
 import aiohttp
 
 from ..core import settings as config
+from ..core.redaction import redact_sensitive_text
 from ..core import validators as ssrf
 from ..core.safe_connector import create_safe_connector
 from ..core.utils import utc_now
@@ -35,12 +37,10 @@ def build_webhook_payload(job: dict[str, Any]) -> dict[str, Any]:
         "job_id",
         "status",
         "stage",
-        "message",
         "operation",
         "id",
         "image_id",
         "image_url",
-        "prompt",
         "size",
         "created_at",
         "started_at",
@@ -57,11 +57,13 @@ def build_webhook_payload(job: dict[str, Any]) -> dict[str, Any]:
         "api_path",
         "api_preset_name",
         "duration",
-        "error",
     }
     payload = {key: job[key] for key in allowed_fields if key in job and job[key] is not None}
     payload["event"] = "image.job.finished"
     payload["delivered_at"] = utc_now()
+    if str(job.get("status") or "") == "error":
+        payload["error_code"] = str(job.get("error_code") or "job_failed")
+        payload["correlation_id"] = str(job.get("correlation_id") or uuid.uuid4().hex)
     return payload
 
 
@@ -126,7 +128,7 @@ async def deliver_webhook(webhook_url: str, job: dict[str, Any]):
                         return
                     last_error = f"HTTP {response.status}"
             except Exception as error:
-                last_error = str(error) or error.__class__.__name__
+                last_error = redact_sensitive_text(str(error) or error.__class__.__name__)
 
             if attempt < attempts:
                 await asyncio.sleep(min(2 ** (attempt - 1), 4))

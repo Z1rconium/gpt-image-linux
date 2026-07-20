@@ -7,11 +7,11 @@ from itertools import islice
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
+from ...core import secrets
 from ...core import settings as config
 from ...core.utils import utc_now
 from ...core.validators import (
     get_env_var_ref_name,
-    is_malformed_env_var_ref,
     normalize_r2_endpoint_url,
     resolve_env_var_ref,
 )
@@ -142,21 +142,35 @@ def normalize_key_prefix(value: Any) -> str:
     return f"{'/'.join(parts)}/" if parts else ""
 
 
-def _resolve_secret(value: Any, field_name: str) -> str:
+def _resolve_secret(
+    value: Any,
+    field_name: str,
+    *,
+    purpose: secrets.SecretPurpose,
+    endpoint_url: str,
+) -> str:
     raw = str(value or "").strip()
     if not raw:
         return ""
-    if is_malformed_env_var_ref(raw):
-        raise R2ConfigurationError(
-            f"{field_name} env ref must be formatted as ${{ENV_VAR_NAME}}."
-        )
     env_var = get_env_var_ref_name(raw)
-    resolved = resolve_env_var_ref(raw)
-    if env_var and not resolved:
+    if env_var:
+        resolved = resolve_env_var_ref(raw)
+        if resolved:
+            return resolved
         raise R2ConfigurationError(
             f"{field_name} environment variable {env_var} is not set or empty."
         )
-    return resolved
+    if raw not in secrets.configured_secret_ids():
+        return raw
+    try:
+        return secrets.resolve_secret(
+            raw,
+            purpose=purpose,
+            target_url=endpoint_url,
+            host_allowlist=config.R2_ENDPOINT_HOST_ALLOWLIST,
+        )
+    except secrets.SecretRegistryError as exc:
+        raise R2ConfigurationError(f"{field_name}: {exc}") from exc
 
 
 def resolve_r2_backup_settings(
@@ -179,10 +193,17 @@ def resolve_r2_backup_settings(
 
     region = str(raw.get("region") or "auto").strip() or "auto"
     key_prefix = normalize_key_prefix(raw.get("key_prefix"))
-    access_key_id = _resolve_secret(raw.get("access_key_id"), "R2 access key ID")
+    access_key_id = _resolve_secret(
+        raw.get("access_key_id"),
+        "R2 access key ID",
+        purpose="r2_access_key_id",
+        endpoint_url=endpoint_url,
+    )
     secret_access_key = _resolve_secret(
         raw.get("secret_access_key"),
         "R2 secret access key",
+        purpose="r2_secret_access_key",
+        endpoint_url=endpoint_url,
     )
     if not access_key_id:
         raise R2ConfigurationError("R2 access key ID is not configured.")
@@ -202,4 +223,3 @@ def resolve_r2_backup_settings(
 
 
 __all__ = [name for name in globals() if not name.startswith("__")]
-

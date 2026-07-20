@@ -103,6 +103,7 @@ from ...schemas.gallery import (
     GalleryFavoriteRequest,
     GalleryImportJobStatus,
     GalleryResponse,
+    GallerySearchRequest,
     GallerySelectionTokenRequest,
     GallerySelectionTokenResponse,
     GallerySyncRequest,
@@ -113,22 +114,22 @@ from ...services.gallery_maintenance import kick_thumbnail_dispatcher
 
 router = APIRouter()
 
-@router.get("/api/gallery", response_model=GalleryResponse)
-async def get_gallery_handler(
-    page: int = Query(default=1, ge=1),
-    page_size: int = Query(default=9, ge=1, le=100),
-    prompt: str | None = Query(default=None, max_length=4000),
-    model: str | None = Query(default=None, max_length=200),
-    preset: str | None = Query(default=None, max_length=200),
-    size: str | None = Query(default=None, max_length=40),
-    date_from: str | None = Query(default=None),
-    date_to: str | None = Query(default=None),
-    favorite: bool | None = Query(default=None),
-    include_total_bytes: bool = Query(default=False),
-    include_counts: bool = Query(default=True),
-    include_filter_options: bool = Query(default=True),
-    cursor: str | None = Query(default=None, max_length=512),
-    direction: str = Query(default="next"),
+async def _query_gallery(
+    *,
+    page: int,
+    page_size: int,
+    prompt: str | None,
+    model: str | None,
+    preset: str | None,
+    size: str | None,
+    date_from: str | None,
+    date_to: str | None,
+    favorite: bool | None,
+    include_total_bytes: bool,
+    include_counts: bool,
+    include_filter_options: bool,
+    cursor: str | None,
+    direction: str,
 ):
     filters = build_gallery_filters(
         prompt=prompt,
@@ -198,6 +199,63 @@ async def get_gallery_handler(
     )
 
 
+@router.get("/api/gallery", response_model=GalleryResponse)
+async def get_gallery_handler(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=9, ge=1, le=100),
+    prompt: str | None = Query(default=None, max_length=4000),
+    model: str | None = Query(default=None, max_length=200),
+    preset: str | None = Query(default=None, max_length=200),
+    size: str | None = Query(default=None, max_length=40),
+    date_from: str | None = Query(default=None),
+    date_to: str | None = Query(default=None),
+    favorite: bool | None = Query(default=None),
+    include_total_bytes: bool = Query(default=False),
+    include_counts: bool = Query(default=True),
+    include_filter_options: bool = Query(default=True),
+    cursor: str | None = Query(default=None, max_length=512),
+    direction: str = Query(default="next"),
+):
+    if prompt:
+        raise HTTPException(status_code=422, detail="Prompt search requires POST JSON")
+    return await _query_gallery(
+        page=page,
+        page_size=page_size,
+        prompt=None,
+        model=model,
+        preset=preset,
+        size=size,
+        date_from=date_from,
+        date_to=date_to,
+        favorite=favorite,
+        include_total_bytes=include_total_bytes,
+        include_counts=include_counts,
+        include_filter_options=include_filter_options,
+        cursor=cursor,
+        direction=direction,
+    )
+
+
+@router.post("/api/gallery/search", response_model=GalleryResponse)
+async def search_gallery_handler(req: GallerySearchRequest):
+    return await _query_gallery(
+        page=req.page,
+        page_size=req.page_size,
+        prompt=req.prompt,
+        model=req.model,
+        preset=req.preset,
+        size=req.size,
+        date_from=req.date_from,
+        date_to=req.date_to,
+        favorite=req.favorite,
+        include_total_bytes=req.include_total_bytes,
+        include_counts=req.include_counts,
+        include_filter_options=req.include_filter_options,
+        cursor=req.cursor,
+        direction=req.direction,
+    )
+
+
 @router.patch("/api/gallery/{image_id}/favorite", response_model=GalleryEntry)
 async def update_gallery_favorite(
     image_id: str,
@@ -237,13 +295,13 @@ async def _image_file_response(filename: str, *, download: bool = False):
             path,
             media_type=media_type,
             filename=f"gpt-image-{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.{extension}",
-            headers={"Cache-Control": IMMUTABLE_GALLERY_CACHE_CONTROL},
+            headers={"Cache-Control": PRIVATE_GALLERY_CACHE_CONTROL},
         )
 
     return FileResponse(
         path,
         media_type=media_type,
-        headers={"Cache-Control": IMMUTABLE_GALLERY_CACHE_CONTROL},
+        headers={"Cache-Control": PRIVATE_GALLERY_CACHE_CONTROL},
     )
 
 
@@ -263,7 +321,7 @@ async def serve_thumbnail(filename: str):
         raise HTTPException(
             status_code=404,
             detail="Thumbnail not found",
-            headers={"Cache-Control": "no-cache"},
+            headers={"Cache-Control": PRIVATE_GALLERY_CACHE_CONTROL},
         )
 
     if config.ENABLE_NGINX_ACCEL_REDIRECT:
@@ -276,7 +334,7 @@ async def serve_thumbnail(filename: str):
     return FileResponse(
         path,
         media_type=THUMBNAIL_CONTENT_TYPE,
-        headers={"Cache-Control": IMMUTABLE_GALLERY_CACHE_CONTROL},
+        headers={"Cache-Control": PRIVATE_GALLERY_CACHE_CONTROL},
     )
 
 

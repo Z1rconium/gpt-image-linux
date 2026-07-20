@@ -1,7 +1,7 @@
 import asyncio
 import logging
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Body, HTTPException
 
 from ..presets import (
     get_prompt_optimizer_settings,
@@ -25,14 +25,18 @@ from ...schemas.assistant import (
     PromptOptimizerSystemPromptRequest,
     PromptOptimizerSystemPromptResponse,
 )
-from ...schemas.settings import PromptOptimizerHealthResponse
+from ...schemas.settings import CredentialProbeRequest, PromptOptimizerHealthResponse
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
 
-def _resolve_prompt_optimizer_runtime(settings: dict | None) -> tuple[str, str, int, str]:
+def _resolve_prompt_optimizer_runtime(
+    settings: dict | None,
+    *,
+    include_credentials: bool = True,
+) -> tuple[str, str, int, str]:
     normalized = normalize_prompt_optimizer_settings(settings)
     if not normalized.get("enabled"):
         raise HTTPException(status_code=400, detail="Prompt optimizer is not enabled")
@@ -41,8 +45,8 @@ def _resolve_prompt_optimizer_runtime(settings: dict | None) -> tuple[str, str, 
     if not api_url:
         raise HTTPException(status_code=400, detail="Prompt optimizer endpoint URL is not configured")
 
-    api_key = resolve_prompt_optimizer_api_key(settings)
-    if not api_key:
+    api_key = resolve_prompt_optimizer_api_key(settings) if include_credentials else ""
+    if include_credentials and not api_key:
         raise HTTPException(status_code=400, detail="Prompt optimizer API key is not configured")
 
     try:
@@ -129,13 +133,16 @@ async def optimize_prompt_endpoint(req: PromptOptimizeRequest):
 
 
 @router.post("/api/prompt/optimizer-health", response_model=PromptOptimizerHealthResponse)
-async def prompt_optimizer_health():
+async def prompt_optimizer_health(
+    req: CredentialProbeRequest | None = Body(default=None),
+):
     settings = get_prompt_optimizer_settings()
     normalized = normalize_prompt_optimizer_settings(settings)
     model = str(normalized.get("model", "")).strip() or "gpt-4o-mini"
     try:
         api_url, model, timeout_seconds, api_key = _resolve_prompt_optimizer_runtime(
-            settings
+            settings,
+            include_credentials=bool(req and req.use_credentials),
         )
     except HTTPException as e:
         return PromptOptimizerHealthResponse(

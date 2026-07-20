@@ -5,10 +5,16 @@ from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 
 from . import settings as config
+from .redaction import redact_sensitive_text
 
 
 DEFAULT_LOG_LEVEL = "INFO"
 DEFAULT_LOG_RETENTION_HOURS = 24
+
+
+class RedactingFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        return redact_sensitive_text(super().format(record))
 
 
 def _parse_log_level(value: str | None) -> int:
@@ -42,7 +48,7 @@ def setup_logging() -> None:
     log_dir.mkdir(parents=True, exist_ok=True)
     _prune_expired_logs(log_dir, retention_hours)
 
-    formatter = logging.Formatter(
+    formatter = RedactingFormatter(
         "%(asctime)s %(levelname)s %(name)s [pid=%(process)d] %(message)s"
     )
 
@@ -73,4 +79,3 @@ def setup_logging() -> None:
         root.addHandler(file_handler)
 
     logging.captureWarnings(True)
-

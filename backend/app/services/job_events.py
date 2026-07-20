@@ -182,10 +182,10 @@ def validate_job_webhook_url(webhook_url: str | None) -> str | None:
         ssrf.validate_webhook_url(normalized_url, config.WEBHOOK_HOST_ALLOWLIST)
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
-    if not config.WEBHOOK_SIGNING_SECRET:
+    if len(config.WEBHOOK_SIGNING_SECRET.encode("utf-8")) < 32:
         raise HTTPException(
             status_code=422,
-            detail="WEBHOOK_SIGNING_SECRET is required to sign webhook callbacks",
+            detail="WEBHOOK_SIGNING_SECRET must contain at least 32 bytes",
         )
     return normalized_url
 
@@ -247,6 +247,5 @@ def store_generate_job(job_id: str, updates: dict, *, persist: bool = True) -> d
     if is_terminal:
         dispatch_job_webhook(job)
     return job
-
 
 

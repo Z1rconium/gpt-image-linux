@@ -32,6 +32,7 @@ class ApiPresetResponse(BaseModel):
     has_api_key: bool
     api_key_source: ApiKeySource = "empty"
     api_key_env_var: Optional[str] = None
+    api_key_secret_id: Optional[str] = None
 
 
 class PresetCreateRequest(StrictRequestModel):
@@ -41,9 +42,7 @@ class PresetCreateRequest(StrictRequestModel):
         default=None,
         max_length=8192,
         description=(
-            "API key for authentication, or ${ENV_VAR_NAME} to resolve from "
-            "the server environment. Literal keys require "
-            "ALLOW_PLAINTEXT_SECRETS=true."
+            "Opaque secret_id predeclared in the startup Secret Registry."
         ),
     )
     api_path: Optional[ApiPath] = None
@@ -82,9 +81,8 @@ class SettingsRequest(StrictRequestModel):
         default=None,
         max_length=8192,
         description=(
-            "API key for authentication, or ${ENV_VAR_NAME} to resolve from "
-            "the server environment. Literal keys require "
-            "ALLOW_PLAINTEXT_SECRETS=true. Omit/null to keep the current key."
+            "Opaque secret_id predeclared in the startup Secret Registry. "
+            "Omit/null to keep the current binding when the origin is unchanged."
         ),
     )
     api_path: ApiPath = "/v1/images/generations"
@@ -94,9 +92,8 @@ class SettingsRequest(StrictRequestModel):
         default=None,
         max_length=2048,
         description=(
-            "Optional global SOCKS5 proxy for upstream generation/edit API calls. "
-            "Use ${ENV_VAR_NAME} by default; literal values require "
-            "ALLOW_PLAINTEXT_SECRETS=true. Null keeps the current value; "
+            "Secret Registry ID for an optional global SOCKS5 proxy URL. "
+            "Null keeps the current value; "
             "an empty string clears it."
         ),
     )
@@ -104,9 +101,8 @@ class SettingsRequest(StrictRequestModel):
         default=None,
         max_length=2048,
         description=(
-            "Optional global HTTPS webhook callback URL for completed generation/edit jobs. "
-            "Use ${ENV_VAR_NAME} by default; literal values require "
-            "ALLOW_PLAINTEXT_SECRETS=true. Null keeps the current value; "
+            "Secret Registry ID for an optional HTTPS webhook callback URL. "
+            "Null keeps the current value; "
             "an empty string clears it."
         ),
     )
@@ -164,6 +160,7 @@ class SettingsResponse(BaseModel):
     has_api_key: bool
     api_key_source: ApiKeySource = "empty"
     api_key_env_var: Optional[str] = None
+    api_key_secret_id: Optional[str] = None
     api_path: ApiPath
     default_model: str
     default_response_format: ResponseFormatDefault = "url"
@@ -189,6 +186,10 @@ class PresetHealthResponse(BaseModel):
     checks: list[PresetHealthCheck]
 
 
+class CredentialProbeRequest(StrictRequestModel):
+    use_credentials: bool = False
+
+
 class R2HealthResponse(PresetHealthResponse):
     pass
 
@@ -209,6 +210,7 @@ class OverallConfigItem(BaseModel):
     hot_reload: bool = True
     restart_required: bool = False
     build_only: bool = False
+    startup_only: bool = False
     updated_at: Optional[str] = None
     override_updated_at: Optional[str] = None
 
@@ -243,6 +245,7 @@ class PromptOptimizerSettingsResponse(BaseModel):
     has_api_key: bool = False
     api_key_source: ApiKeySource = "empty"
     api_key_env_var: Optional[str] = None
+    api_key_secret_id: Optional[str] = None
 
 
 class PromptOptimizerHealthResponse(BaseModel):
@@ -291,6 +294,7 @@ class AIAssistantSettingsResponse(BaseModel):
     has_api_key: bool = False
     api_key_source: ApiKeySource = "empty"
     api_key_env_var: Optional[str] = None
+    api_key_secret_id: Optional[str] = None
 
 
 class AIAssistantSettingsRequest(StrictRequestModel):
@@ -320,6 +324,7 @@ class AIAssistantSettingsRequest(StrictRequestModel):
         max_length=8192,
         description="Deprecated no-op. AI Assistant reuses the Prompt Optimizer API key.",
     )
+    use_credentials: bool = False
 
     @field_validator("api_url")
     @classmethod
@@ -354,10 +359,12 @@ class R2BackupSettingsResponse(BaseModel):
     has_access_key_id: bool = False
     access_key_id_source: ApiKeySource = "empty"
     access_key_id_env_var: Optional[str] = None
+    access_key_id_secret_id: Optional[str] = None
     secret_access_key_masked: str = "***"
     has_secret_access_key: bool = False
     secret_access_key_source: ApiKeySource = "empty"
     secret_access_key_env_var: Optional[str] = None
+    secret_access_key_secret_id: Optional[str] = None
 
 
 class R2BackupSettingsRequest(StrictRequestModel):
@@ -369,6 +376,7 @@ class R2BackupSettingsRequest(StrictRequestModel):
     sync_interval_hours: Optional[Annotated[StrictInt, Field(ge=0)]] = None
     access_key_id: Optional[str] = Field(default=None, max_length=8192)
     secret_access_key: Optional[str] = Field(default=None, max_length=8192)
+    use_credentials: bool = False
 
     @field_validator("endpoint_url")
     @classmethod
@@ -400,5 +408,3 @@ class R2BackupSettingsRequest(StrictRequestModel):
             value,
             field_name="R2 secret access key",
         )
-
-

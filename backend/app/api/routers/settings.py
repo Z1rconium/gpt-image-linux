@@ -2,7 +2,7 @@ import asyncio
 import os
 import uuid
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Body, HTTPException
 
 from ..app_state import app
 from ..presets import (
@@ -26,6 +26,7 @@ from ..presets import (
     persist_api_settings,
 )
 from ...core import settings as config
+from ...core import secrets
 from ...core import overall_config
 from ...core import validators as ssrf
 from ...core.api_paths import (
@@ -48,6 +49,7 @@ from ...schemas.settings import (
     OverallConfigItem,
     OverallConfigResponse,
     OverallConfigUpdateRequest,
+    CredentialProbeRequest,
     PresetCreateRequest,
     PresetHealthResponse,
     R2BackupSettingsRequest,
@@ -58,6 +60,65 @@ from ...schemas.settings import (
 
 
 router = APIRouter()
+
+
+def _validate_preset_secret_binding(preset: dict) -> None:
+    secret_id = str(preset.get("api_key") or "").strip()
+    if not secret_id or secret_id not in secrets.configured_secret_ids():
+        return
+    try:
+        secrets.validate_secret_binding(
+            secret_id,
+            purpose="upstream_api",
+            target_url=str(preset.get("api_url") or ""),
+            host_allowlist=config.UPSTREAM_HOST_ALLOWLIST,
+        )
+    except secrets.SecretRegistryError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+def _validate_optimizer_secret_binding(settings: dict) -> None:
+    secret_id = str(settings.get("api_key") or "").strip()
+    if not secret_id or secret_id not in secrets.configured_secret_ids():
+        return
+    try:
+        secrets.validate_secret_binding(
+            secret_id,
+            purpose="prompt_optimizer",
+            target_url=str(settings.get("api_url") or ""),
+            host_allowlist=config.PROMPT_OPTIMIZER_HOST_ALLOWLIST,
+        )
+    except secrets.SecretRegistryError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+def _validate_r2_secret_bindings(settings: dict) -> None:
+    endpoint_url = str(settings.get("endpoint_url") or "")
+    for field, purpose in (
+        ("access_key_id", "r2_access_key_id"),
+        ("secret_access_key", "r2_secret_access_key"),
+    ):
+        secret_id = str(settings.get(field) or "").strip()
+        if not secret_id or secret_id not in secrets.configured_secret_ids():
+            continue
+        try:
+            secrets.validate_secret_binding(
+                secret_id,
+                purpose=purpose,
+                target_url=endpoint_url,
+                host_allowlist=config.R2_ENDPOINT_HOST_ALLOWLIST,
+            )
+        except secrets.SecretRegistryError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+def _validate_webhook_security() -> None:
+    webhook_url = get_webhook_url()
+    if webhook_url and len(config.WEBHOOK_SIGNING_SECRET.encode("utf-8")) < 32:
+        raise HTTPException(
+            status_code=422,
+            detail="Webhook signing secret must contain at least 32 bytes",
+        )
 
 
 def _mask_overall_config_value(value: str, *, secret: bool) -> str:
@@ -101,6 +162,7 @@ def _serialize_overall_config(
                 hot_reload=spec.hot_reload and not spec.restart_required and not spec.build_only,
                 restart_required=spec.restart_required,
                 build_only=spec.build_only,
+                startup_only=spec.startup_only,
                 updated_at=row.get("updated_at"),
                 override_updated_at=row.get("override_updated_at"),
             )
@@ -129,6 +191,11 @@ async def update_overall_config(req: OverallConfigUpdateRequest):
         spec = overall_config.OVERALL_CONFIG_BY_NAME.get(item.name)
         if spec is None or spec.exposed_in_settings:
             raise HTTPException(status_code=422, detail=f"Unknown config name: {item.name}")
+        if spec.startup_only:
+            raise HTTPException(
+                status_code=422,
+                detail=f"{item.name} can only be configured at process startup",
+            )
 
         if item.clear_override:
             updates[item.name] = None
@@ -191,7 +258,11 @@ async def update_settings(req: SettingsRequest):
         raise HTTPException(status_code=404, detail="Preset not found")
 
     preset["name"] = (req.preset_name or preset.get("name") or "Untitled preset").strip()
-    preset["api_url"] = req.api_url.rstrip("/")
+    previous_api_url = str(preset.get("api_url") or "")
+    next_api_url = req.api_url.rstrip("/")
+    if preset.get("api_key") and not secrets.same_origin(previous_api_url, next_api_url):
+        preset["api_key"] = ""
+    preset["api_url"] = next_api_url
     if req.api_key is not None:
         preset["api_key"] = req.api_key.strip()
     preset["api_path"] = normalize_api_path(req.api_path)
@@ -218,6 +289,8 @@ async def update_settings(req: SettingsRequest):
             app.state.webhook_url = current_webhook_url
         else:
             apply_webhook_url(requested_webhook_url)
+        _validate_webhook_security()
+    _validate_preset_secret_binding(preset)
     apply_api_preset(preset)
     await asyncio.to_thread(persist_api_settings)
     if req.prompt_optimizer is not None:
@@ -227,6 +300,7 @@ async def update_settings(req: SettingsRequest):
         )
         current_optimizer = get_prompt_optimizer_settings()
         updated_optimizer = apply_prompt_optimizer_settings(current_optimizer, req.prompt_optimizer)
+        _validate_optimizer_secret_binding(updated_optimizer)
         await asyncio.to_thread(save_prompt_optimizer_settings, updated_optimizer)
     if req.ai_assistant is not None:
         from ..presets import get_ai_assistant_settings
@@ -237,6 +311,7 @@ async def update_settings(req: SettingsRequest):
         from ..presets import get_r2_backup_settings
         current_r2 = get_r2_backup_settings()
         updated_r2 = apply_r2_backup_settings(current_r2, req.r2_backup)
+        _validate_r2_secret_bindings(updated_r2)
         await asyncio.to_thread(save_r2_backup_settings, updated_r2)
     return await asyncio.to_thread(build_settings_response)
 
@@ -253,6 +328,23 @@ async def check_r2_settings_health(req: R2BackupSettingsRequest):
 
     current = await asyncio.to_thread(get_r2_backup_settings)
     draft = apply_r2_backup_settings(current, req)
+    _validate_r2_secret_bindings(draft)
+    if not req.use_credentials:
+        return R2HealthResponse(
+            status="warning",
+            checks=[
+                {
+                    "name": "configuration",
+                    "status": "ok",
+                    "message": "R2 configuration and secret bindings are valid",
+                },
+                {
+                    "name": "remote_probe",
+                    "status": "warning",
+                    "message": "Credentialed remote probe was not requested",
+                },
+            ],
+        )
     result = await asyncio.to_thread(probe_r2_settings, draft)
     return R2HealthResponse(**result)
 
@@ -279,6 +371,13 @@ async def create_settings_preset(req: PresetCreateRequest):
             req.api_path or source.get("api_path", "/v1/images/generations")
         ),
     }
+    if (
+        req.api_key is None
+        and source.get("api_key")
+        and not secrets.same_origin(source.get("api_url"), preset["api_url"])
+    ):
+        preset["api_key"] = ""
+    _validate_preset_secret_binding(preset)
     preset["default_model"] = normalize_default_model(
         req.default_model if req.default_model is not None else source.get("default_model"),
         preset["api_path"],
@@ -405,37 +504,8 @@ def validate_health_api_path(api_path: str, checks: list[dict]) -> bool:
 
 def validate_health_api_key(api_key: str, checks: list[dict]) -> str:
     raw_key = str(api_key or "").strip()
-    env_var = get_api_key_env_var(raw_key)
-
-    if is_malformed_api_key_env_ref(raw_key):
-        add_health_check(
-            checks,
-            "api_key",
-            "error",
-            "API key env ref must be formatted as ${ENV_VAR_NAME}",
-        )
-        return ""
-
-    if env_var:
-        resolved_key = os.getenv(env_var, "").strip()
-        if resolved_key:
-            add_health_check(
-                checks,
-                "api_key",
-                "ok",
-                f"API key resolves from environment variable {env_var}",
-            )
-            return resolved_key
-        add_health_check(
-            checks,
-            "api_key",
-            "error",
-            f"Environment variable {env_var} is not set or empty",
-        )
-        return ""
-
     if raw_key:
-        add_health_check(checks, "api_key", "ok", "Stored API key is configured")
+        add_health_check(checks, "api_key", "ok", "A Secret Registry credential is configured")
         return raw_key
 
     add_health_check(checks, "api_key", "error", "API key is not configured")
@@ -446,7 +516,10 @@ def validate_health_api_key(api_key: str, checks: list[dict]) -> str:
     "/api/settings/presets/{preset_id}/health",
     response_model=PresetHealthResponse,
 )
-async def check_settings_preset_health(preset_id: str):
+async def check_settings_preset_health(
+    preset_id: str,
+    req: CredentialProbeRequest | None = Body(default=None),
+):
     preset = get_preset_by_id(preset_id)
     if not preset:
         raise HTTPException(status_code=404, detail="Preset not found")
@@ -457,7 +530,8 @@ async def check_settings_preset_health(preset_id: str):
 
     api_path_ok = validate_health_api_path(api_path, checks)
     url_ok = validate_health_api_url(api_url, api_path, checks) if api_path_ok else False
-    effective_api_key = validate_health_api_key(preset.get("api_key", ""), checks)
+    validate_health_api_key(preset.get("api_key", ""), checks)
+    effective_api_key = get_effective_preset_api_key(preset) if req and req.use_credentials else ""
 
     if api_path_ok and url_ok:
         try:

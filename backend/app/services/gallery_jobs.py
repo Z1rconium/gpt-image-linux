@@ -51,6 +51,7 @@ from ..repositories.coordination import (
     get_gallery_jobs_updated_at_edges,
     list_gallery_job_ids_with_files,
     release_background_lease,
+    release_import_upload_reservation,
     reserve_gallery_job_capacity,
     update_gallery_job,
     update_gallery_job_progress,
@@ -146,6 +147,7 @@ async def _gallery_zip_response(
     headers = {
         "Content-Disposition": f'attachment; filename="{filename}"',
         "Content-Encoding": "identity",
+        "Cache-Control": PRIVATE_GALLERY_CACHE_CONTROL,
         "X-Content-Type-Options": "nosniff",
     }
     if direct_job_id:
@@ -831,13 +833,18 @@ async def _create_reserved_gallery_import_job(
     total_count: int,
     payload: dict | None = None,
 ) -> dict:
-    active_count = await asyncio.to_thread(count_active_gallery_jobs, "import")
-    if active_count >= MAX_ACTIVE_IMPORT_JOBS:
+    job = await asyncio.to_thread(
+        reserve_gallery_job_capacity,
+        job=_create_gallery_import_job(zip_path, total_count, payload),
+        counted_kinds=("import",),
+        max_active=MAX_ACTIVE_IMPORT_JOBS,
+    )
+    if not job:
         raise HTTPException(
             status_code=429,
             detail="A gallery import job is already queued or running.",
         )
-    return await asyncio.to_thread(_create_gallery_import_job, zip_path, total_count, payload)
+    return job
 
 
 async def _run_gallery_export_job(job: dict) -> None:
@@ -1034,6 +1041,8 @@ async def _run_gallery_sync_job(job: dict) -> None:
 async def _run_gallery_import_job(job: dict) -> None:
     job_id = job["job_id"]
     zip_path = _resolve_trusted_gallery_job_path(job.get("path"), kind="import")
+    payload = job.get("payload") or {}
+    reservation_id = str(payload.get("reservation_id") or "")
     requested_count = int(job.get("requested_count") or 0)
     loop = asyncio.get_running_loop()
     last_counts = {
@@ -1153,6 +1162,8 @@ async def _run_gallery_import_job(job: dict) -> None:
         )
     finally:
         _unlink_trusted_gallery_job_path(job.get("path"), kind="import", job_id=job_id)
+        if reservation_id:
+            await asyncio.to_thread(release_import_upload_reservation, reservation_id)
 
 
 async def _run_gallery_job_dispatcher(kind: str, worker_id: str, running_limit: int) -> None:

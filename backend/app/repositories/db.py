@@ -21,8 +21,10 @@ from urllib.parse import quote
 
 from ..core import settings as config
 from ..core.api_paths import default_model_for_api_path, normalize_api_preset
+from ..core.cdn import signed_media_url
 from ..core.constants import ACTIVE_GENERATE_JOB_STATUSES
 from ..core.observability import metrics, observe_job_stage
+from ..core.secrets import configured_secret_ids
 from ..core.utils import utc_now
 from ..core.validators import (
     get_env_var_ref_name,
@@ -318,40 +320,74 @@ def _iter_sqlite_in_chunks(
 
 
 def _normalize_stored_api_key(value: str | None) -> str:
-    return normalize_secret_env_ref_or_plaintext(
-        value,
-        field_name="API key",
-    )
+    normalized = str(value or "").strip()
+    if get_env_var_ref_name(normalized):
+        return normalized
+    try:
+        return normalize_secret_env_ref_or_plaintext(normalized, field_name="API key")
+    except ValueError:
+        return normalized
 
 
 def _normalize_stored_socks5_proxy(value: str | None) -> str:
-    return normalize_secret_env_ref_or_plaintext(
-        value,
-        field_name="SOCKS5 proxy URL",
-        normalizer=normalize_socks5_proxy_url,
-    )
+    normalized = str(value or "").strip()
+    if get_env_var_ref_name(normalized):
+        return normalized
+    try:
+        return normalize_secret_env_ref_or_plaintext(normalized, field_name="SOCKS5 proxy URL")
+    except ValueError:
+        return normalized
 
 
 def _normalize_stored_webhook_url(value: str | None) -> str:
-    return normalize_secret_env_ref_or_plaintext(
-        value,
-        field_name="Webhook URL",
-        normalizer=normalize_webhook_url,
-    )
+    normalized = str(value or "").strip()
+    if get_env_var_ref_name(normalized):
+        return normalized
+    try:
+        return normalize_secret_env_ref_or_plaintext(normalized, field_name="Webhook URL")
+    except ValueError:
+        return normalized
 
 
 def _normalize_stored_r2_access_key_id(value: str | None) -> str:
-    return normalize_secret_env_ref_or_plaintext(
-        value,
-        field_name="R2 access key ID",
-    )
+    normalized = str(value or "").strip()
+    if get_env_var_ref_name(normalized):
+        return normalized
+    try:
+        return normalize_secret_env_ref_or_plaintext(normalized, field_name="R2 access key ID")
+    except ValueError:
+        return normalized
 
 
 def _normalize_stored_r2_secret_access_key(value: str | None) -> str:
-    return normalize_secret_env_ref_or_plaintext(
-        value,
-        field_name="R2 secret access key",
-    )
+    normalized = str(value or "").strip()
+    if get_env_var_ref_name(normalized):
+        return normalized
+    try:
+        return normalize_secret_env_ref_or_plaintext(normalized, field_name="R2 secret access key")
+    except ValueError:
+        return normalized
+
+
+def _default_secret_reference(secret_id: str, value: str | None) -> str:
+    if secret_id in configured_secret_ids():
+        return secret_id
+    normalized = str(value or "").strip()
+    if get_env_var_ref_name(normalized):
+        return normalized
+    return ""
+
+
+def _default_r2_secret_reference(secret_id: str, env_var: str, value: str | None) -> str:
+    if secret_id in configured_secret_ids():
+        return secret_id
+    normalized = str(value or "").strip()
+    if not normalized:
+        return ""
+    env_ref = get_env_var_ref_name(normalized)
+    if env_ref:
+        return f"${{{env_ref}}}"
+    return f"${{{env_var}}}"
 
 
 def _chmod_path(path: Path, mode: int) -> None:
@@ -524,8 +560,9 @@ def _invalidate_gallery_query_caches_on_conn(conn: sqlite3.Connection):
 def _default_settings() -> dict:
     return {
         "active_preset_id": "default",
-        "upstream_socks5_proxy": _normalize_stored_socks5_proxy(
-            config.DEFAULT_UPSTREAM_SOCKS5_PROXY
+        "upstream_socks5_proxy": _default_secret_reference(
+            "builtin-upstream-proxy",
+            config.DEFAULT_UPSTREAM_SOCKS5_PROXY,
         ),
         "webhook_url": "",
         "presets": [
@@ -533,7 +570,10 @@ def _default_settings() -> dict:
                 "id": "default",
                 "name": "Default",
                 "api_url": config.DEFAULT_API_URL.rstrip("/"),
-                "api_key": _normalize_stored_api_key(config.DEFAULT_API_KEY),
+                "api_key": _default_secret_reference(
+                    "builtin-default-api-key",
+                    config.DEFAULT_API_KEY,
+                ),
                 "api_path": config.DEFAULT_API_PATH,
                 "default_model": default_model_for_api_path(config.DEFAULT_API_PATH),
                 "default_response_format": "url",
@@ -557,7 +597,10 @@ def _default_prompt_optimizer_settings() -> dict:
     return {
         "enabled": config.PROMPT_OPTIMIZER_ENABLED,
         "api_url": config.PROMPT_OPTIMIZER_API_URL,
-        "api_key": _normalize_stored_api_key(config.PROMPT_OPTIMIZER_API_KEY),
+        "api_key": _default_secret_reference(
+            "builtin-prompt-optimizer-key",
+            config.PROMPT_OPTIMIZER_API_KEY,
+        ),
         "model": config.PROMPT_OPTIMIZER_MODEL,
         "timeout_seconds": config.PROMPT_OPTIMIZER_TIMEOUT_SECONDS,
     }
@@ -568,16 +611,6 @@ def _default_ai_assistant_settings() -> dict:
         "enabled": config.AI_ASSISTANT_ENABLED,
         "vision_model": config.AI_ASSISTANT_VISION_MODEL or config.PROMPT_OPTIMIZER_MODEL,
     }
-
-
-def _default_r2_secret_ref(env_var: str, value: str) -> str:
-    normalized = str(value or "").strip()
-    if not normalized:
-        return ""
-    env_ref = get_env_var_ref_name(normalized)
-    if env_ref:
-        return f"${{{env_ref}}}"
-    return f"${{{env_var}}}"
 
 
 def _normalize_r2_key_prefix(value: Any, default: str = "gallery/") -> str:
@@ -595,11 +628,13 @@ def _default_r2_backup_settings() -> dict:
         "bucket_name": config.R2_BUCKET_NAME,
         "region": config.R2_REGION or "auto",
         "key_prefix": _normalize_r2_key_prefix(config.R2_KEY_PREFIX),
-        "access_key_id": _default_r2_secret_ref(
+        "access_key_id": _default_r2_secret_reference(
+            "builtin-r2-access-key-id",
             "R2_ACCESS_KEY_ID",
             config.R2_ACCESS_KEY_ID,
         ),
-        "secret_access_key": _default_r2_secret_ref(
+        "secret_access_key": _default_r2_secret_reference(
+            "builtin-r2-secret-access-key",
             "R2_SECRET_ACCESS_KEY",
             config.R2_SECRET_ACCESS_KEY,
         ),
@@ -1253,6 +1288,20 @@ def _ensure_database():
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS import_upload_reservations (
+                    reservation_id TEXT PRIMARY KEY,
+                    client_ip TEXT NOT NULL,
+                    byte_count INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    lease_expires_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_import_upload_reservations_expires
+                    ON import_upload_reservations(lease_expires_at);
+                CREATE INDEX IF NOT EXISTS idx_import_upload_reservations_client
+                    ON import_upload_reservations(client_ip, created_at);
 
                 CREATE TABLE IF NOT EXISTS prompt_snippets (
                     id TEXT PRIMARY KEY,
@@ -2568,7 +2617,7 @@ def image_url_for_filename(filename: str) -> str | None:
     if not safe_image_path(filename):
         return None
     if config.PUBLIC_IMAGE_BASE_URL:
-        return _public_file_url(config.PUBLIC_IMAGE_BASE_URL, filename)
+        return signed_media_url(config.PUBLIC_IMAGE_BASE_URL, filename)
     return f"/api/image/{quote(filename, safe='')}"
 
 
