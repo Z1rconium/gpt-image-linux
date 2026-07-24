@@ -12,7 +12,8 @@
 
   <p>
     <a href="#english">English</a> ·
-    <a href="#中文文档">简体中文</a>
+    <a href="#中文文档">简体中文</a> ·
+    <a href="./README.zh-TW.md">繁體中文</a>
   </p>
 
   <p>
@@ -142,8 +143,12 @@ docker build \
 
 ### Local Development
 
+Create a project-local Python 3.11+ virtual environment first. The `.venv` directory is local developer state and is not provided by the repository.
+
 ```bash
-pip install -r backend/requirements-dev.txt
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r backend/requirements-dev.txt
 npm --prefix frontend install
 npm run backend:dev
 ```
@@ -160,7 +165,7 @@ Production-style local smoke test:
 
 ```bash
 npm run frontend:build
-ALLOW_UNAUTHENTICATED=true granian --interface asgi backend.app.main:app --host 127.0.0.1 --port 9090
+ALLOW_UNAUTHENTICATED=true .venv/bin/granian --interface asgi backend.app.main:app --host 127.0.0.1 --port 9090
 ```
 
 ## Configuration
@@ -228,6 +233,7 @@ Key backend routes:
 | `GET` | `/health` | Health check. |
 | `GET` | `/api/access/status` | Read access state. |
 | `POST` | `/api/access` | Unlock the panel with the access key. |
+| `GET/POST/DELETE` | `/api/access/admin`, `/api/access/admin/status` | Read, unlock, or clear the admin access state used by protected settings. |
 | `GET` | `/api/version`, `/api/version/latest` | Read current version and optional latest release information. |
 | `GET/PUT` | `/api/settings/overall-config` | Read/save Overall Config overrides. |
 | `GET/POST` | `/api/settings` | Read/save active preset, prompt optimizer, R2 backup, proxy, and webhook settings. |
@@ -237,6 +243,7 @@ Key backend routes:
 | `POST` | `/api/settings/presets/{preset_id}/health` | Validate a saved upstream preset. |
 | `POST` | `/api/settings/r2/health` | Validate draft R2 backup settings. |
 | `GET/POST` | `/api/prompt-snippets` | List/create reusable prompt snippets. |
+| `POST` | `/api/prompt-snippets/search` | Search reusable prompt snippets. |
 | `PATCH/DELETE` | `/api/prompt-snippets/{snippet_id}` | Update/delete a prompt snippet. |
 | `GET/POST` | `/api/prompt/optimizer-system-prompt` | Read/save the prompt optimizer system prompt. |
 | `POST` | `/api/prompt/optimize`, `/api/prompt/optimizer-health` | Optimize a prompt or probe optimizer connectivity. |
@@ -245,6 +252,7 @@ Key backend routes:
 | `POST` | `/api/assistant/generate/recommend-params` | Recommend only generation parameters supported by the selected API path. |
 | `POST` | `/api/assistant/jobs/{job_id}/diagnose`, `/api/assistant/edit/plan` | Diagnose a job or plan an edit without submitting it. |
 | `POST` | `/api/assistant/image/prompt` | Reverse-prompt one validated local raster image in memory; returns a generation prompt without creating a Gallery record. |
+| `POST` | `/api/assistant/image/prompt/optimize` | Optimize a reverse-prompt result together with its uploaded source image. |
 | `POST/GET` | `/api/assistant/gallery/*` | Describe, reverse-prompt, analyze, batch-analyze, and read AI metadata for local gallery images. |
 | `POST` | `/api/generate` | Start generation job. |
 | `POST` | `/api/edits` | Start edit job with uploaded source images. |
@@ -255,6 +263,7 @@ Key backend routes:
 | `GET` | `/api/generate/{job_id}/events` | SSE stream for one job. |
 | `DELETE` | `/api/generate/jobs/history` | Clear terminal job history. |
 | `GET` | `/api/gallery` | List/search/filter gallery images. |
+| `POST` | `/api/gallery/search` | Search/filter gallery images with a JSON request body. |
 | `GET/DELETE` | `/api/gallery/{image_id}` | Read or delete a gallery image. |
 | `PATCH` | `/api/gallery/{image_id}/favorite` | Favorite/unfavorite one gallery image. |
 | `POST/PATCH` | `/api/gallery/batch/*` | Selection-token, favorite, delete, and download batch actions. |
@@ -280,7 +289,7 @@ The public API surface is contract-tested; keep paths, methods, status codes, SS
 - Keep browser calls same-origin through `/api/*`; do not add direct frontend calls to upstream model APIs, R2, webhook targets, or arbitrary image URLs.
 - Keep ownership boundaries intact:
   - routers/request orchestration in `backend/app/api/routers/`
-  - DTOs in `backend/app/schemas/models.py`
+  - DTOs in `backend/app/schemas/`
   - persistence and SQLite coordination in `backend/app/repositories/`
   - upstream integrations in `backend/app/integrations/`
   - mirrored frontend API types in `frontend/src/lib/api/types.ts`
@@ -300,6 +309,8 @@ The public API surface is contract-tested; keep paths, methods, status codes, SS
 - Do not commit runtime/generated artifacts such as `images/`, `data/`, `frontend/build/`, `.svelte-kit/`, Playwright reports, test results, dependency folders, local DB files, or logs.
 
 ## Testing
+
+Activate the project-local `.venv` before running backend or contract tests. The npm contract/performance scripts use `.venv/bin/python`.
 
 ```bash
 npm run frontend:check
@@ -336,7 +347,7 @@ See [LICENSE](./LICENSE).
 
 自托管 GPT 兼容图像生成和编辑 Web 面板。
 
-[English](#english) | 中文
+[English](#english) | 简体中文 | [繁體中文](./README.zh-TW.md)
 
 ## 概述
 
@@ -451,8 +462,12 @@ docker build \
 
 ### 本地开发
 
+先使用本机的 Python 3.11+ 创建项目专用虚拟环境。`.venv` 属于本地开发环境，仓库不提供该目录。
+
 ```bash
-pip install -r backend/requirements-dev.txt
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r backend/requirements-dev.txt
 npm --prefix frontend install
 npm run backend:dev
 ```
@@ -469,7 +484,7 @@ npm run frontend:dev
 
 ```bash
 npm run frontend:build
-ALLOW_UNAUTHENTICATED=true granian --interface asgi backend.app.main:app --host 127.0.0.1 --port 9090
+ALLOW_UNAUTHENTICATED=true .venv/bin/granian --interface asgi backend.app.main:app --host 127.0.0.1 --port 9090
 ```
 
 ## 配置
@@ -537,6 +552,7 @@ Overall Config 会把 override 持久化到 SQLite。部分配置可热更新；
 | `GET` | `/health` | 健康检查。 |
 | `GET` | `/api/access/status` | 读取访问状态。 |
 | `POST` | `/api/access` | 使用访问密钥解锁面板。 |
+| `GET/POST/DELETE` | `/api/access/admin`, `/api/access/admin/status` | 读取、解锁或清除受保护设置使用的管理员访问状态。 |
 | `GET` | `/api/version`, `/api/version/latest` | 读取当前版本和可选最新 release 信息。 |
 | `GET/PUT` | `/api/settings/overall-config` | 读取/保存 Overall Config override。 |
 | `GET/POST` | `/api/settings` | 读取/保存当前预设、提示词优化器、R2 备份、代理和 webhook 设置。 |
@@ -546,6 +562,7 @@ Overall Config 会把 override 持久化到 SQLite。部分配置可热更新；
 | `POST` | `/api/settings/presets/{preset_id}/health` | 校验已保存上游预设。 |
 | `POST` | `/api/settings/r2/health` | 校验草稿 R2 备份设置。 |
 | `GET/POST` | `/api/prompt-snippets` | 查询/创建提示词片段。 |
+| `POST` | `/api/prompt-snippets/search` | 搜索可复用提示词片段。 |
 | `PATCH/DELETE` | `/api/prompt-snippets/{snippet_id}` | 更新/删除提示词片段。 |
 | `GET/POST` | `/api/prompt/optimizer-system-prompt` | 读取/保存提示词优化器 system prompt。 |
 | `POST` | `/api/prompt/optimize`, `/api/prompt/optimizer-health` | 优化提示词或探测优化器连通性。 |
@@ -554,6 +571,7 @@ Overall Config 会把 override 持久化到 SQLite。部分配置可热更新；
 | `POST` | `/api/assistant/generate/recommend-params` | 仅推荐当前 API path 支持的生成参数。 |
 | `POST` | `/api/assistant/jobs/{job_id}/diagnose`, `/api/assistant/edit/plan` | 诊断任务或生成编辑规划，不会自动提交。 |
 | `POST` | `/api/assistant/image/prompt` | 在内存中校验并反推一张本地位图；返回可用于生成的提示词，不创建 Gallery 记录。 |
+| `POST` | `/api/assistant/image/prompt/optimize` | 结合上传的源图优化反推提示词结果。 |
 | `POST/GET` | `/api/assistant/gallery/*` | 描述、反推 prompt、分析、批量分析和读取本地 Gallery AI metadata。 |
 | `POST` | `/api/generate` | 创建生成任务。 |
 | `POST` | `/api/edits` | 用上传源图创建编辑任务。 |
@@ -564,6 +582,7 @@ Overall Config 会把 override 持久化到 SQLite。部分配置可热更新；
 | `GET` | `/api/generate/{job_id}/events` | 单任务 SSE。 |
 | `DELETE` | `/api/generate/jobs/history` | 清理终态任务历史。 |
 | `GET` | `/api/gallery` | 查询/搜索/筛选 Gallery。 |
+| `POST` | `/api/gallery/search` | 使用 JSON 请求体搜索/筛选 Gallery。 |
 | `GET/DELETE` | `/api/gallery/{image_id}` | 读取或删除 Gallery 图片。 |
 | `PATCH` | `/api/gallery/{image_id}/favorite` | 收藏/取消收藏单张 Gallery 图片。 |
 | `POST/PATCH` | `/api/gallery/batch/*` | selection token、收藏、删除和下载等批量操作。 |
@@ -589,7 +608,7 @@ Overall Config 会把 override 持久化到 SQLite。部分配置可热更新；
 - 浏览器请求保持同源 `/api/*`；不要在前端直接调用上游模型 API、R2、webhook 目标或任意图片 URL。
 - 保持现有代码分层：
   - 路由与请求编排在 `backend/app/api/routers/`
-  - DTO 在 `backend/app/schemas/models.py`
+  - DTO 在 `backend/app/schemas/`
   - 持久化与 SQLite 协调在 `backend/app/repositories/`
   - 上游集成在 `backend/app/integrations/`
   - 前端镜像 API 类型在 `frontend/src/lib/api/types.ts`
@@ -609,6 +628,8 @@ Overall Config 会把 override 持久化到 SQLite。部分配置可热更新；
 - 不要提交运行时/生成产物，例如 `images/`、`data/`、`frontend/build/`、`.svelte-kit/`、Playwright 报告、测试结果、依赖目录、本地 DB 文件或日志。
 
 ## 测试
+
+运行后端或契约测试前，请先激活项目本地 `.venv`。npm 的契约/性能测试脚本会使用 `.venv/bin/python`。
 
 ```bash
 npm run frontend:check
