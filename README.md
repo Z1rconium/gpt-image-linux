@@ -1,14 +1,33 @@
-# GPT Image Panel
+<div align="center">
+  <br />
+  <img src="frontend/static/favicon-preview.png" alt="GPT Image Panel logo" width="128" height="128" />
 
-![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688?logo=fastapi)
-![SvelteKit](https://img.shields.io/badge/SvelteKit-2-FF3E00?logo=svelte)
-![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python)
-![SQLite](https://img.shields.io/badge/SQLite-3-003B57?logo=sqlite)
-![Docker](https://img.shields.io/badge/Docker-24.0+-2496ED?logo=docker)
+  <h1>GPT Image Panel</h1>
 
-Self-hosted GPT-compatible image generation and editing panel.
+  <hr />
 
-English | [中文](#中文文档)
+  <p>
+    <strong>Self-hosted GPT-compatible image generation and editing panel.</strong>
+  </p>
+
+  <p>
+    <a href="#english">English</a> ·
+    <a href="#中文文档">简体中文</a>
+  </p>
+
+  <p>
+    <img alt="CI passing" src="https://img.shields.io/badge/CI-passing-2cc653?logo=github&logoColor=white" />
+    <img alt="Release v1.3.3" src="https://img.shields.io/badge/release-v1.3.3-0e8dcc" />
+    <img alt="Python 3.11+" src="https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white" />
+    <img alt="Node.js 24" src="https://img.shields.io/badge/Node.js-24-339933?logo=node.js&logoColor=white" />
+    <img alt="FastAPI 0.115+" src="https://img.shields.io/badge/FastAPI-0.115+-009688?logo=fastapi&logoColor=white" />
+    <img alt="SvelteKit 2" src="https://img.shields.io/badge/SvelteKit-2-FF3E00?logo=svelte&logoColor=white" />
+    <img alt="License CC BY-NC 4.0" src="https://img.shields.io/badge/License-CC_BY--NC_4.0-6f42c1" />
+    <img alt="Image GHCR" src="https://img.shields.io/badge/GHCR-gpt--image--linux-1f6f8b?logo=github&logoColor=white" />
+  </p>
+</div>
+
+<a id="english"></a>
 
 ## Overview
 
@@ -317,7 +336,7 @@ See [LICENSE](./LICENSE).
 
 自托管 GPT 兼容图像生成和编辑 Web 面板。
 
-[English](#gpt-image-panel) | 中文
+[English](#english) | 中文
 
 ## 概述
 
