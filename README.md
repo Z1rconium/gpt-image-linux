@@ -1,6 +1,6 @@
 <div align="center">
   <br />
-  <img src="frontend/static/favicon-preview.png" alt="GPT Image Panel logo" width="128" height="128" />
+  <img src="frontend/static/favicon.ico" alt="GPT Image Panel logo" width="48" height="48" />
 
   <h1>GPT Image Panel</h1>
 
