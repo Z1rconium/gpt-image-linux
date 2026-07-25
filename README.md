@@ -113,12 +113,13 @@ package.json
 ```bash
 cp .env.example .env
 # edit .env: set ACCESS_KEY and any default upstream API values you want
-docker-compose up -d --force-recreate
+# this example uses plain HTTP on loopback, so disable Secure cookies
+ACCESS_COOKIE_SECURE=false docker-compose up -d --force-recreate
 ```
 
 Open `http://127.0.0.1:9090`.
 
-By default, `ACCESS_KEY` is required. For local-only testing you can set `ALLOW_UNAUTHENTICATED=true`, but that makes every non-health API route accessible.
+This local HTTP example requires `ACCESS_COOKIE_SECURE=false`; keep it `true` when serving the panel over HTTPS. By default, `ACCESS_KEY` is required. For local-only testing, unset `ACCESS_KEY` and set `ALLOW_UNAUTHENTICATED=true`; this makes every non-health API route accessible.
 
 ### Docker
 
@@ -127,6 +128,7 @@ docker build -t gpt-image-panel .
 docker run -d --name gpt-image-panel \
   -p 127.0.0.1:9090:9090 \
   -e ACCESS_KEY=change-me \
+  -e ACCESS_COOKIE_SECURE=false \
   -v $(pwd)/images:/app/images \
   -v $(pwd)/data:/app/data \
   gpt-image-panel
@@ -174,7 +176,7 @@ Most runtime options live in `.env.example`. API presets, prompt optimizer, R2 b
 
 | Variable | Purpose |
 | --- | --- |
-| `ACCESS_KEY` | Access gate key. Required unless `ALLOW_UNAUTHENTICATED=true`. |
+| `ACCESS_KEY` | Access gate key. Required unless it is unset and `ALLOW_UNAUTHENTICATED=true`. |
 | `DEFAULT_API_URL` | Default upstream API base URL; may omit or include `/v1`. |
 | `DEFAULT_API_KEY` | Default upstream API key. Prefer env refs such as `${OPENAI_API_KEY}` in Web Settings. |
 | `DEFAULT_API_PATH` | `/v1/images/generations`, `/v1/responses`, or `/v1/chat/completions`. |
@@ -315,6 +317,7 @@ Activate the project-local `.venv` before running backend or contract tests. The
 ```bash
 npm run frontend:check
 npm run frontend:build
+.venv/bin/python -m pytest backend/tests -q
 npm run test:contract
 npm run test:e2e
 npm run test:perf

@@ -97,12 +97,13 @@ package.json
 ```bash
 cp .env.example .env
 # 編輯 .env：至少設定 ACCESS_KEY，並視需要填入預設上游 API
-docker-compose up -d --force-recreate
+# 此範例透過迴環位址使用 HTTP，需要停用 Secure cookie
+ACCESS_COOKIE_SECURE=false docker-compose up -d --force-recreate
 ```
 
 開啟 `http://127.0.0.1:9090`。
 
-預設必須設定 `ACCESS_KEY`。僅在本機測試時可設為 `ALLOW_UNAUTHENTICATED=true`，但這會讓所有非 health API 都不需要驗證。
+此本機 HTTP 範例需要設定 `ACCESS_COOKIE_SECURE=false`；透過 HTTPS 提供服務時應保持為 `true`。預設必須設定 `ACCESS_KEY`。僅在本機測試時，清空 `ACCESS_KEY` 並設定 `ALLOW_UNAUTHENTICATED=true`，這會讓所有非 health API 都不需要驗證。
 
 ### Docker
 
@@ -111,6 +112,7 @@ docker build -t gpt-image-panel .
 docker run -d --name gpt-image-panel \
   -p 127.0.0.1:9090:9090 \
   -e ACCESS_KEY=change-me \
+  -e ACCESS_COOKIE_SECURE=false \
   -v $(pwd)/images:/app/images \
   -v $(pwd)/data:/app/data \
   gpt-image-panel
@@ -158,7 +160,7 @@ ALLOW_UNAUTHENTICATED=true .venv/bin/granian --interface asgi backend.app.main:a
 
 | 變數 | 用途 |
 | --- | --- |
-| `ACCESS_KEY` | 存取密鑰。除非 `ALLOW_UNAUTHENTICATED=true`，否則必填。 |
+| `ACCESS_KEY` | 存取密鑰。除非清空該變數並設定 `ALLOW_UNAUTHENTICATED=true`，否則必填。 |
 | `DEFAULT_API_URL` | 預設上游 API base URL，可包含或省略 `/v1`。 |
 | `DEFAULT_API_KEY` | 預設上游 API key。Web Settings 建議使用 `${OPENAI_API_KEY}` 之類的 env ref。 |
 | `DEFAULT_API_PATH` | `/v1/images/generations`、`/v1/responses` 或 `/v1/chat/completions`。 |
@@ -280,6 +282,7 @@ Overall Config 會將 Override 持久化至 SQLite。部分設定可熱更新；
 ```bash
 npm run frontend:check
 npm run frontend:build
+.venv/bin/python -m pytest backend/tests -q
 npm run test:contract
 npm run test:e2e
 npm run test:perf
