@@ -5,7 +5,7 @@ import type { GalleryEntry, GalleryResponse } from '$lib/api/types/gallery';
   import GalleryPagination from '$lib/components/gallery/GalleryPagination.svelte';
   import { t } from '$lib/i18n';
   import type { GalleryFilters, GalleryOperationStatus } from '$lib/stores/gallery';
-  import { displayImageSize, formatBytes, imageUrl, thumbnailUrl } from '$lib/utils/format';
+  import { displayImageSize, formatBytes, thumbnailUrl } from '$lib/utils/format';
 
   export let gallery: GalleryResponse | null = null;
   export let filters: GalleryFilters;
@@ -43,16 +43,7 @@ import type { GalleryEntry, GalleryResponse } from '$lib/api/types/gallery';
   const skeletonCards = Array.from({ length: 6 });
   const EAGER_THUMB_COUNT = 3;
   const THUMBNAIL_RETRY_DELAYS_MS = [1200, 2400, 4800, 9600, 16000];
-  const THUMBNAIL_PLACEHOLDER_SRC =
-    'data:image/svg+xml;charset=UTF-8,' +
-    encodeURIComponent(
-      `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-hidden="true">
-        <rect width="64" height="64" fill="#e7e5e4"/>
-        <path d="M0 0h64v64H0z" fill="none" stroke="#d6d3d1"/>
-        <path d="M10 42l11-12 9 9 13-15 11 18" fill="none" stroke="#a8a29e" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
-        <circle cx="22" cy="22" r="5" fill="#c7c3be"/>
-      </svg>`
-    );
+  const THUMBNAIL_PLACEHOLDER_SRC = 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=';
 
   let importInput: HTMLInputElement;
   let failedThumbnailIds = new Set<string>();
@@ -104,11 +95,7 @@ import type { GalleryEntry, GalleryResponse } from '$lib/api/types/gallery';
   }
 
   function galleryImageSrc(image: GalleryEntry) {
-    if (!thumbnailReady(image)) {
-      return image.thumbnail_status === 'queued'
-        ? imageUrl(image.filename, image.image_url)
-        : THUMBNAIL_PLACEHOLDER_SRC;
-    }
+    if (!thumbnailReady(image)) return THUMBNAIL_PLACEHOLDER_SRC;
     if (failedThumbnailIds.has(image.id)) {
       return THUMBNAIL_PLACEHOLDER_SRC;
     }
@@ -214,7 +201,7 @@ import type { GalleryEntry, GalleryResponse } from '$lib/api/types/gallery';
       >
         {operationStatus?.kind === 'sync' ? $t.gallery.syncing : $t.gallery.syncR2}
       </button>
-      <button type="button" class="control-focus rounded-lg border border-red-500/40 px-3 py-2 text-xs text-red-300 hover:bg-red-500/10" on:click={onDeleteAll}>
+      <button type="button" class="control-focus rounded-lg border border-red-500/40 px-3 py-2 text-xs text-red-700 hover:bg-red-500/10 dark:text-red-300" on:click={onDeleteAll}>
         {$t.gallery.deleteAll}
       </button>
       <input bind:this={importInput} type="file" accept=".zip,application/zip" class="hidden" on:change={importSelected} />
@@ -232,29 +219,29 @@ import type { GalleryEntry, GalleryResponse } from '$lib/api/types/gallery';
         <button type="button" class="control-focus rounded-lg border border-stone-300 px-2.5 py-2 text-xs text-stone-700 hover:bg-stone-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" disabled={!hasSelection} on:click={onClearSelection}>{$t.gallery.clearSelection}</button>
         <button type="button" class="control-focus rounded-lg border border-stone-300 px-2.5 py-2 text-xs text-stone-700 hover:bg-stone-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" disabled={!hasSelection || busy} on:click={onBatchDownload}>{operationStatus?.kind === 'download' ? $t.gallery.downloading : $t.gallery.downloadSelected}</button>
         {#if canAiAnalyze}
-          <button type="button" class="control-focus rounded-lg border border-cyan-500/35 px-2.5 py-2 text-xs text-cyan-700 hover:bg-cyan-500/10 disabled:opacity-40 dark:text-cyan-200" disabled={!hasSelection || busy} on:click={onBatchAiAnalyze}>{operationStatus?.kind === 'ai_analyze' ? $t.gallery.aiAnalyzing : $t.gallery.aiAnalyzeSelected}</button>
+          <button type="button" class="control-focus rounded-lg border border-stone-300 px-2.5 py-2 text-xs text-stone-700 hover:bg-stone-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" disabled={!hasSelection || busy} on:click={onBatchAiAnalyze}>{operationStatus?.kind === 'ai_analyze' ? $t.gallery.aiAnalyzing : $t.gallery.aiAnalyzeSelected}</button>
         {/if}
         <button type="button" class="control-focus rounded-lg border border-stone-300 px-2.5 py-2 text-xs text-stone-700 hover:bg-stone-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" disabled={!hasSelection || busy} on:click={() => onBatchFavorite(true)}>{$t.gallery.favoriteSelected}</button>
         <button type="button" class="control-focus rounded-lg border border-stone-300 px-2.5 py-2 text-xs text-stone-700 hover:bg-stone-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" disabled={!hasSelection || busy} on:click={() => onBatchFavorite(false)}>{$t.gallery.unfavoriteSelected}</button>
-        <button type="button" class="control-focus rounded-lg border border-red-500/40 px-2.5 py-2 text-xs text-red-300 hover:bg-red-500/10 disabled:opacity-40" disabled={!hasSelection || busy} on:click={onBatchDelete}>{$t.gallery.deleteSelected}</button>
+        <button type="button" class="control-focus rounded-lg border border-red-500/40 px-2.5 py-2 text-xs text-red-700 hover:bg-red-500/10 disabled:opacity-40 dark:text-red-300" disabled={!hasSelection || busy} on:click={onBatchDelete}>{$t.gallery.deleteSelected}</button>
       </div>
     </div>
   {/if}
 
   {#if operationStatus}
-    <div class="mb-4 rounded-xl border border-sky-500/30 bg-sky-500/10 p-3" role="status" aria-live="polite">
+    <div class="mb-4 rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-3" role="status" aria-live="polite">
       <div class="flex items-start justify-between gap-3">
         <div>
-          <p class="text-xs font-semibold text-sky-950 dark:text-sky-100">{operationStatus.label}</p>
-          <p class="mt-1 text-xs text-sky-800 dark:text-sky-200/80">{operationStatus.detail}</p>
+          <p class="text-xs font-semibold text-emerald-950 dark:text-emerald-100">{operationStatus.label}</p>
+          <p class="mt-1 text-xs text-emerald-800 dark:text-emerald-200/80">{operationStatus.detail}</p>
         </div>
-        <div class="text-xs text-sky-800 dark:text-sky-200">{operationStatus.progress === null ? $t.gallery.notInterruptible : `${operationStatus.progress}%`}</div>
+        <div class="text-xs text-emerald-800 dark:text-emerald-200">{operationStatus.progress === null ? $t.gallery.notInterruptible : `${operationStatus.progress}%`}</div>
       </div>
-      <div class="mt-3 h-1.5 overflow-hidden rounded-full bg-sky-950/70">
+      <div class="mt-3 h-1.5 overflow-hidden rounded-full bg-emerald-950/20 dark:bg-emerald-950/70">
         {#if operationStatus.progress === null}
-          <div class="h-full w-1/3 animate-pulse rounded-full bg-sky-300"></div>
+          <div class="h-full w-1/3 animate-pulse rounded-full bg-emerald-500 dark:bg-emerald-300"></div>
         {:else}
-          <div class="h-full rounded-full bg-sky-300 transition-[width]" style={`width: ${Number(operationStatus.progress) || 0}%`}></div>
+          <div class="h-full rounded-full bg-emerald-500 transition-[width] dark:bg-emerald-300" style={`width: ${Number(operationStatus.progress) || 0}%`}></div>
         {/if}
       </div>
     </div>
@@ -311,9 +298,9 @@ import type { GalleryEntry, GalleryResponse } from '$lib/api/types/gallery';
                 <img
                   src={galleryImageSrc(image)}
                   alt={image.prompt}
-                  class="h-full w-full object-cover"
+                  class="gallery-image preview-empty h-full w-full object-cover"
                   loading={index < EAGER_THUMB_COUNT ? 'eager' : 'lazy'}
-                  fetchpriority={index < EAGER_THUMB_COUNT ? 'high' : 'auto'}
+                  fetchpriority={index < EAGER_THUMB_COUNT ? 'high' : 'low'}
                   decoding="async"
                   width={image.image_width || undefined}
                   height={image.image_height || undefined}
@@ -376,7 +363,7 @@ import type { GalleryEntry, GalleryResponse } from '$lib/api/types/gallery';
                 </a>
                 <button
                   type="button"
-                  class="gallery-icon-action control-focus border-red-500/40 text-red-300 hover:bg-red-500/10"
+                  class="gallery-icon-action control-focus border-red-500/40 text-red-700 hover:bg-red-500/10 dark:text-red-300"
                   aria-label={$t.common.delete}
                   title={$t.common.delete}
                   on:click={(event) => handleGalleryAction(event, () => onDelete(image))}

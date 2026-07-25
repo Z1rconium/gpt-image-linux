@@ -242,22 +242,22 @@ import type { ApiPath } from '$lib/api/types/common';
       />
     </label>
     <div class="grid grid-cols-2 gap-2 self-end sm:grid-cols-5">
-      <button type="button" disabled={actionDisabled} class="control-focus rounded-lg border border-emerald-500/40 px-3 py-2 text-xs font-semibold text-emerald-700 hover:bg-emerald-500/10 disabled:cursor-not-allowed disabled:border-stone-300 disabled:text-stone-400 disabled:opacity-60 dark:text-emerald-200 dark:disabled:border-zinc-700 dark:disabled:text-zinc-500" on:click={runRewrite}>
+      <button type="button" disabled={actionDisabled} class="control-focus rounded-lg border border-emerald-500/40 px-3 py-2 text-xs font-semibold text-emerald-700 hover:bg-emerald-500/10 disabled:cursor-not-allowed disabled:opacity-40 dark:text-emerald-200" on:click={runRewrite}>
         {$t.aiAssistant.rewrite}
       </button>
       <button
         type="button"
         disabled={quickOptimizeDisabled}
         title={!optimizerEnabled ? $t.aiAssistant.quickOptimizeUnavailable : undefined}
-        class="control-focus rounded-lg border border-emerald-500/40 px-3 py-2 text-xs font-semibold text-emerald-700 hover:bg-emerald-500/10 disabled:cursor-not-allowed disabled:border-stone-300 disabled:text-stone-400 disabled:opacity-60 dark:text-emerald-200 dark:disabled:border-zinc-700 dark:disabled:text-zinc-500"
+        class="control-focus rounded-lg border border-emerald-500/40 px-3 py-2 text-xs font-semibold text-emerald-700 hover:bg-emerald-500/10 disabled:cursor-not-allowed disabled:opacity-40 dark:text-emerald-200"
         on:click={runQuickOptimize}
       >
         {$t.aiAssistant.quickOptimize}
       </button>
-      <button type="button" disabled={actionDisabled} class="control-focus rounded-lg border border-cyan-500/35 px-3 py-2 text-xs font-semibold text-cyan-700 hover:bg-cyan-500/10 disabled:cursor-not-allowed disabled:border-stone-300 disabled:text-stone-400 disabled:opacity-60 dark:text-cyan-200 dark:disabled:border-zinc-700 dark:disabled:text-zinc-500" on:click={runCheck}>
+      <button type="button" disabled={actionDisabled} class="control-focus rounded-lg border border-stone-300 px-3 py-2 text-xs font-semibold text-stone-700 hover:bg-stone-100 disabled:cursor-not-allowed disabled:text-stone-400 disabled:opacity-60 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:disabled:text-zinc-500" on:click={runCheck}>
         {$t.aiAssistant.check}
       </button>
-      <button type="button" disabled={actionDisabled} class="control-focus rounded-lg border border-violet-500/35 px-3 py-2 text-xs font-semibold text-violet-700 hover:bg-violet-500/10 disabled:cursor-not-allowed disabled:border-stone-300 disabled:text-stone-400 disabled:opacity-60 dark:text-violet-200 dark:disabled:border-zinc-700 dark:disabled:text-zinc-500" on:click={runVariants}>
+      <button type="button" disabled={actionDisabled} class="control-focus rounded-lg border border-stone-300 px-3 py-2 text-xs font-semibold text-stone-700 hover:bg-stone-100 disabled:cursor-not-allowed disabled:text-stone-400 disabled:opacity-60 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:disabled:text-zinc-500" on:click={runVariants}>
         {$t.aiAssistant.variants}
       </button>
       <button type="button" disabled={actionDisabled} class="control-focus rounded-lg border border-stone-300 px-3 py-2 text-xs font-semibold text-stone-700 hover:bg-stone-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" on:click={runParams}>
@@ -267,11 +267,11 @@ import type { ApiPath } from '$lib/api/types/common';
   </div>
 
   {#if panelBusy}
-    <div class="mt-4 rounded-lg border border-zinc-800 bg-zinc-950/35 px-3 py-2 text-xs text-zinc-400">{$t.aiAssistant.working}</div>
+    <div class="mt-4 rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-xs text-stone-600 dark:border-zinc-800 dark:bg-zinc-950/35 dark:text-zinc-400">{$t.aiAssistant.working}</div>
   {/if}
 
   {#if error}
-    <div class="mt-4 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-200">{error}</div>
+    <div class="mt-4 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-700 dark:text-red-200">{error}</div>
   {/if}
 
   {#if (resultMode === 'rewrite' || resultMode === 'quickOptimize') && rewrittenPrompt}
@@ -279,8 +279,8 @@ import type { ApiPath } from '$lib/api/types/common';
       <div class="mb-2 text-xs font-semibold text-stone-500 dark:text-zinc-400">{resultMode === 'quickOptimize' ? $t.aiAssistant.quickOptimizeResult : $t.aiAssistant.rewriteResult}</div>
       <p class="whitespace-pre-wrap text-sm leading-6 text-stone-900 dark:text-zinc-100">{rewrittenPrompt}</p>
       <div class="mt-3 flex flex-wrap justify-end gap-2">
-        <button type="button" class="control-focus rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800" on:click={() => onInsertPrompt(rewrittenPrompt)}>{$t.aiAssistant.insert}</button>
-        <button type="button" class="control-focus rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800" on:click={() => onSaveSnippet(rewrittenPrompt)}>{$t.aiAssistant.saveSnippet}</button>
+        <button type="button" class="control-focus rounded-lg border border-stone-300 px-3 py-2 text-xs text-stone-700 hover:bg-stone-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" on:click={() => onInsertPrompt(rewrittenPrompt)}>{$t.aiAssistant.insert}</button>
+        <button type="button" class="control-focus rounded-lg border border-stone-300 px-3 py-2 text-xs text-stone-700 hover:bg-stone-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" on:click={() => onSaveSnippet(rewrittenPrompt)}>{$t.aiAssistant.saveSnippet}</button>
         <button type="button" class="control-focus rounded-lg bg-emerald-600 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-500" on:click={() => onApplyPrompt(rewrittenPrompt)}>{$t.common.apply}</button>
       </div>
     </div>
@@ -318,8 +318,8 @@ import type { ApiPath } from '$lib/api/types/common';
           </div>
           <p class="whitespace-pre-wrap text-sm leading-6 text-stone-800 dark:text-zinc-200">{variant.prompt}</p>
           <div class="mt-3 flex flex-wrap justify-end gap-2">
-            <button type="button" class="control-focus rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800" on:click={() => onInsertPrompt(variant.prompt)}>{$t.aiAssistant.insert}</button>
-            <button type="button" class="control-focus rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800" on:click={() => onSaveSnippet(variant.prompt)}>{$t.aiAssistant.saveSnippet}</button>
+            <button type="button" class="control-focus rounded-lg border border-stone-300 px-3 py-2 text-xs text-stone-700 hover:bg-stone-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" on:click={() => onInsertPrompt(variant.prompt)}>{$t.aiAssistant.insert}</button>
+            <button type="button" class="control-focus rounded-lg border border-stone-300 px-3 py-2 text-xs text-stone-700 hover:bg-stone-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" on:click={() => onSaveSnippet(variant.prompt)}>{$t.aiAssistant.saveSnippet}</button>
             <button type="button" class="control-focus rounded-lg bg-emerald-600 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-500" on:click={() => onApplyPrompt(variant.prompt)}>{$t.common.apply}</button>
           </div>
         </article>
@@ -337,7 +337,7 @@ import type { ApiPath } from '$lib/api/types/common';
         {#if paramsResult.n}<span class="rounded border border-zinc-700 px-2 py-1">n: {paramsResult.n}</span>{/if}
       </div>
       {#if paramsResult.warnings.length}
-        <div class="mt-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">{paramsResult.warnings.join(' ')}</div>
+        <div class="mt-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-800 dark:text-amber-200">{paramsResult.warnings.join(' ')}</div>
       {/if}
       <div class="mt-3 flex justify-end">
         <button type="button" class="control-focus rounded-lg bg-emerald-600 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-500" on:click={() => paramsResult && onApplyParams(paramsResult)}>{$t.aiAssistant.applyParams}</button>

@@ -11,10 +11,10 @@ export type LazyComponentState = {
 
 type ComponentModule = { default: Component<any> };
 
-export function createLazyComponent(loader: () => Promise<ComponentModule>, retryLoader: () => Promise<ComponentModule> = loader) {
+export function createLazyComponent(loader: () => Promise<ComponentModule>) {
   const store = writable<LazyComponentState>({ status: 'idle', component: null, error: null });
   let pending: Promise<Component<any>> | null = null;
-  let loadAttempts = 0;
+  let loadFailures = 0;
 
   async function load() {
     const current = get(store);
@@ -23,15 +23,14 @@ export function createLazyComponent(loader: () => Promise<ComponentModule>, retr
     if (current.status === 'error') throw current.error;
 
     store.set({ status: 'loading', component: null, error: null });
-    const activeLoader = loadAttempts > 0 ? retryLoader : loader;
-    pending = activeLoader()
+    pending = loader()
       .then((module) => {
-        loadAttempts = 0;
+        loadFailures = 0;
         store.set({ status: 'ready', component: module.default, error: null });
         return module.default;
       })
       .catch((error: unknown) => {
-        loadAttempts += 1;
+        loadFailures += 1;
         store.set({ status: 'error', component: null, error });
         throw error;
       })
@@ -51,6 +50,7 @@ export function createLazyComponent(loader: () => Promise<ComponentModule>, retr
     subscribe: store.subscribe,
     load,
     prefetch: () => load().catch(() => undefined),
-    reset
+    reset,
+    retryRequiresReload: () => loadFailures > 1
   };
 }

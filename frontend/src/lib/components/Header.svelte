@@ -53,12 +53,12 @@
               rel="noreferrer"
               title={versionTitle}
               class={hasVersionUpdate
-                ? 'control-focus inline-flex items-center whitespace-nowrap rounded-md border border-amber-400/40 bg-amber-400/10 px-2 py-0.5 text-[11px] font-semibold leading-5 text-amber-200 transition-colors hover:border-amber-300/70 hover:bg-amber-400/15'
+                ? 'control-focus inline-flex items-center whitespace-nowrap rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[11px] font-semibold leading-5 text-amber-800 transition-colors hover:border-amber-500/70 hover:bg-amber-500/15 dark:text-amber-200'
                 : 'control-focus inline-flex items-center whitespace-nowrap rounded-md border border-stone-300 px-2 py-0.5 text-[11px] font-semibold leading-5 text-stone-500 transition-colors hover:text-stone-900 dark:border-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-100'}
             >
               {version}
               {#if hasVersionUpdate}
-                <span class="ml-1 rounded bg-amber-400/20 px-1 py-px text-[10px] text-amber-300">{$t.header.newVersion}</span>
+                <span class="ml-1 rounded bg-amber-500/15 px-1 py-px text-[10px] text-amber-800 dark:bg-amber-400/20 dark:text-amber-300">{$t.header.newVersion}</span>
               {/if}
             </a>
           {/if}
@@ -126,7 +126,7 @@
       >
         <span class="text-sm font-semibold leading-none">{$t.header.jobs}</span>
         {#if activeJobsCount}
-          <span class="absolute -right-1 -top-1 h-4 min-w-4 rounded-full bg-emerald-500 px-1 text-[10px] font-semibold leading-4 text-zinc-950">
+          <span class="absolute -right-1 -top-1 h-4 min-w-4 rounded-full bg-emerald-700 px-1 text-[10px] font-semibold leading-4 text-white">
             {activeJobsCount}
           </span>
         {/if}

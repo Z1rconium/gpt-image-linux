@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Request } from '@playwright/test';
 import {
   PNG_BYTES,
   baseGalleryImages,
@@ -11,6 +11,12 @@ import {
   mockApi,
   settingsResponse
 } from './fixtures/mockApi';
+
+function gallerySearchBody(request: Request) {
+  const url = new URL(request.url());
+  if (request.method() !== 'POST' || url.pathname !== '/api/gallery/search') return null;
+  return request.postDataJSON() as Record<string, unknown>;
+}
 
 test('generation, gallery edit source, batch favorite, and lightbox flows work with mocked API', async ({ page }) => {
   await loadApp(page);
@@ -26,8 +32,8 @@ test('generation, gallery edit source, batch favorite, and lightbox flows work w
   await expect(page.getByRole('img', { name: 'Generated preview' })).toBeVisible();
 
   const filterRequest = page.waitForResponse((response) => {
-    const url = new URL(response.url());
-    return response.request().method() === 'GET' && url.pathname === '/api/gallery' && url.searchParams.get('prompt') === 'First';
+    const body = gallerySearchBody(response.request());
+    return body?.prompt === 'First';
   });
   await page.getByLabel('Filter prompt').fill('First');
   await filterRequest;
@@ -44,7 +50,7 @@ test('generation, gallery edit source, batch favorite, and lightbox flows work w
   await favoriteButton.click();
   await favoriteRequest;
   await expect(favoriteButton).toHaveAttribute('aria-pressed', 'true');
-  await expect(favoriteButton).toHaveCSS('color', 'rgb(217, 119, 6)');
+  await expect(favoriteButton).toHaveCSS('color', 'rgb(180, 83, 9)');
 
   await page.getByRole('button', { name: 'Select' }).click();
   await page.getByRole('button', { name: 'Select page' }).click();
@@ -57,25 +63,6 @@ test('generation, gallery edit source, batch favorite, and lightbox flows work w
   await expect(lightbox).toBeVisible();
   await page.keyboard.press('Escape');
   await expect(lightbox).toBeHidden();
-});
-
-test('gallery shows the source image while thumbnail generation is still queued', async ({ page }) => {
-  await loadApp(page, {
-    galleryImages: [
-      {
-        ...baseGalleryImages[0],
-        id: 'pending-thumbnail',
-        prompt: 'Pending thumbnail image',
-        filename: 'pending-thumbnail.png',
-        thumbnail_url: '/api/thumb/pending-thumbnail.png',
-        thumbnail_status: 'queued'
-      }
-    ]
-  });
-
-  const image = page.getByRole('img', { name: 'Pending thumbnail image' });
-  await expect(image).toBeVisible();
-  await expect(image).toHaveAttribute('src', '/api/image/pending-thumbnail.png');
 });
 
 test('lightbox shows a ready thumbnail until the original image loads', async ({ page }) => {
@@ -184,13 +171,12 @@ test('lightbox navigates images across gallery pages', async ({ page }) => {
   await expect(lightbox).toBeHidden();
 
   const nextPageRequest = page.waitForRequest((request) => {
-    const url = new URL(request.url());
+    const body = gallerySearchBody(request);
     return (
-      request.method() === 'GET' &&
-      url.pathname === '/api/gallery' &&
-      url.searchParams.get('page') === '2' &&
-      url.searchParams.get('direction') === 'next' &&
-      Boolean(url.searchParams.get('cursor'))
+      body?.page === 2 &&
+      body.direction === 'next' &&
+      typeof body.cursor === 'string' &&
+      body.cursor.length > 0
     );
   });
   await page.getByRole('img', { name: 'Paged gallery image 9', exact: true }).click();
@@ -208,12 +194,12 @@ test('lightbox navigates images across gallery pages', async ({ page }) => {
   await expect(page).toHaveURL(/image=paged-img-10/);
 });
 
-test('gallery url state restores filters, lightbox, and job history tab', async ({ page }) => {
+test('gallery url state restores durable filters, lightbox, and job history tab', async ({ page }) => {
   await mockApi(page);
   await page.goto('/?prompt=Second&favorite=true&image=img-2&jobs=history');
 
-  await expect(page.getByLabel('Filter prompt')).toHaveValue('Second');
-  await expect(page).toHaveURL(/prompt=Second/);
+  await expect(page.getByLabel('Filter prompt')).toHaveValue('');
+  await expect(page).not.toHaveURL(/prompt=/);
   await expect(page).toHaveURL(/favorite=true/);
 
   const lightbox = page.getByRole('dialog', { name: 'Image Details' });
@@ -231,12 +217,12 @@ test('gallery url state restores filters, lightbox, and job history tab', async 
   await expect(page).toHaveURL(/jobs=history/);
 
   const promptFilterRequest = page.waitForRequest((request) => {
-    const url = new URL(request.url());
-    return request.method() === 'GET' && url.pathname === '/api/gallery' && url.searchParams.get('prompt') === 'First';
+    const body = gallerySearchBody(request);
+    return body?.prompt === 'First';
   });
   await page.getByLabel('Filter prompt').fill('First');
   await promptFilterRequest;
-  await expect(page).toHaveURL(/prompt=First/);
+  await expect(page).not.toHaveURL(/prompt=/);
 });
 
 test('gallery page input jumps to the requested page on Enter', async ({ page }) => {
@@ -247,13 +233,8 @@ test('gallery page input jumps to the requested page on Enter', async ({ page })
   await expect(pageInput).toHaveValue('1');
 
   const nextPageRequest = page.waitForRequest((request) => {
-    const url = new URL(request.url());
-    return (
-      request.method() === 'GET' &&
-      url.pathname === '/api/gallery' &&
-      url.searchParams.get('page') === '2' &&
-      !url.searchParams.has('cursor')
-    );
+    const body = gallerySearchBody(request);
+    return body?.page === 2 && body.cursor === null;
   });
   await pageInput.fill('2');
   await pageInput.press('Enter');
@@ -270,20 +251,19 @@ test('gallery handles 500 mocked images with lightweight cursor paging, filterin
 
   await expect(page.getByRole('img', { name: 'Paged gallery image 1', exact: true })).toBeVisible();
   const nextPageRequest = page.waitForRequest((request) => {
-    const url = new URL(request.url());
+    const body = gallerySearchBody(request);
     return (
-      request.method() === 'GET' &&
-      url.pathname === '/api/gallery' &&
-      url.searchParams.get('page') === '2' &&
-      url.searchParams.get('direction') === 'next' &&
-      Boolean(url.searchParams.get('cursor'))
+      body?.page === 2 &&
+      body.direction === 'next' &&
+      typeof body.cursor === 'string' &&
+      body.cursor.length > 0
     );
   });
   await page.getByRole('button', { name: 'Next' }).click();
   const nextRequest = await nextPageRequest;
-  const nextUrl = new URL(nextRequest.url());
-  expect(nextUrl.searchParams.get('include_counts')).toBe('false');
-  expect(nextUrl.searchParams.get('include_filter_options')).toBe('false');
+  const nextBody = gallerySearchBody(nextRequest);
+  expect(nextBody?.include_counts).toBe(false);
+  expect(nextBody?.include_filter_options).toBe(false);
   await expect(page.getByRole('img', { name: 'Paged gallery image 10', exact: true })).toBeVisible();
 
   await page.getByRole('button', { name: 'Select' }).click();
@@ -293,8 +273,8 @@ test('gallery handles 500 mocked images with lightweight cursor paging, filterin
   await page.getByRole('button', { name: 'Cancel selection' }).click();
 
   const filterRequest = page.waitForRequest((request) => {
-    const url = new URL(request.url());
-    return request.method() === 'GET' && url.pathname === '/api/gallery' && url.searchParams.get('prompt') === '500';
+    const body = gallerySearchBody(request);
+    return body?.prompt === '500';
   });
   await page.getByLabel('Filter prompt').fill('500');
   await filterRequest;
@@ -332,8 +312,8 @@ test('cross-page batch delete refreshes filtered gallery state after the optimis
   await loadApp(page, { galleryImages: manyGalleryImages(10) });
 
   const filterRequest = page.waitForResponse((response) => {
-    const url = new URL(response.url());
-    return response.request().method() === 'GET' && url.pathname === '/api/gallery' && url.searchParams.get('prompt') === 'Paged gallery image';
+    const body = gallerySearchBody(response.request());
+    return body?.prompt === 'Paged gallery image';
   });
   await page.getByLabel('Filter prompt').fill('Paged gallery image');
   await filterRequest;
@@ -347,12 +327,10 @@ test('cross-page batch delete refreshes filtered gallery state after the optimis
   await tokenRequest;
 
   const refreshRequest = page.waitForResponse((response) => {
-    const url = new URL(response.url());
+    const body = gallerySearchBody(response.request());
     return (
-      response.request().method() === 'GET' &&
-      url.pathname === '/api/gallery' &&
-      url.searchParams.get('prompt') === 'Paged gallery image' &&
-      url.searchParams.get('page') === '1'
+      body?.prompt === 'Paged gallery image' &&
+      body.page === 1
     );
   });
   await page.getByRole('button', { name: 'Delete selected' }).click();
@@ -370,8 +348,8 @@ test('favorites-only batch unfavorite reloads the page with the remaining matche
   });
 
   const favoritesRequest = page.waitForResponse((response) => {
-    const url = new URL(response.url());
-    return response.request().method() === 'GET' && url.pathname === '/api/gallery' && url.searchParams.get('favorite') === 'true';
+    const body = gallerySearchBody(response.request());
+    return body?.favorite === true;
   });
   await page.getByLabel('Favorites').check();
   await favoritesRequest;
@@ -379,12 +357,10 @@ test('favorites-only batch unfavorite reloads the page with the remaining matche
   await page.getByRole('button', { name: 'Select' }).click();
   await page.getByRole('button', { name: 'Select page' }).click();
   const refreshRequest = page.waitForResponse((response) => {
-    const url = new URL(response.url());
+    const body = gallerySearchBody(response.request());
     return (
-      response.request().method() === 'GET' &&
-      url.pathname === '/api/gallery' &&
-      url.searchParams.get('favorite') === 'true' &&
-      url.searchParams.get('page') === '1'
+      body?.favorite === true &&
+      body.page === 1
     );
   });
   await page.getByRole('button', { name: 'Unfavorite selected', exact: true }).click();
@@ -395,7 +371,7 @@ test('favorites-only batch unfavorite reloads the page with the remaining matche
   await expect(page.getByRole('button', { name: 'Show size' }).locator('..')).toContainText('1 image');
 });
 
-test('gallery queued thumbnails use source images until thumbnails are ready', async ({ page }) => {
+test('gallery queued thumbnails use lightweight placeholders until thumbnails are ready', async ({ page }) => {
   const fullImageRequests: string[] = [];
   page.on('request', (request) => {
     const url = new URL(request.url());
@@ -417,8 +393,9 @@ test('gallery queued thumbnails use source images until thumbnails are ready', a
 
   const image = page.getByRole('img', { name: 'Queued thumbnail image' });
   await expect(image).toBeVisible();
-  await expect(image).toHaveAttribute('src', '/api/image/queued-thumb.png');
-  expect(fullImageRequests).toContain('/api/image/queued-thumb.png');
+  await expect(image).toHaveAttribute('src', /^data:image\/gif;base64,/);
+  await page.waitForTimeout(250);
+  expect(fullImageRequests).toEqual([]);
 });
 
 test('gallery thumbnail refresh rotates queued probes across later pending ids', async ({ page }) => {
@@ -442,15 +419,14 @@ test('lightbox navigates across pages with 2000 mocked images', async ({ page })
   await loadApp(page, { galleryImages: manyGalleryImages(2000) });
 
   const nextPageRequest = page.waitForRequest((request) => {
-    const url = new URL(request.url());
+    const body = gallerySearchBody(request);
     return (
-      request.method() === 'GET' &&
-      url.pathname === '/api/gallery' &&
-      url.searchParams.get('page') === '2' &&
-      url.searchParams.get('direction') === 'next' &&
-      url.searchParams.get('include_counts') === 'false' &&
-      url.searchParams.get('include_filter_options') === 'false' &&
-      Boolean(url.searchParams.get('cursor'))
+      body?.page === 2 &&
+      body.direction === 'next' &&
+      body.include_counts === false &&
+      body.include_filter_options === false &&
+      typeof body.cursor === 'string' &&
+      body.cursor.length > 0
     );
   });
   await page.getByRole('img', { name: 'Paged gallery image 9', exact: true }).click();
@@ -505,15 +481,13 @@ test('single image delete is not revived by a stale gallery refresh', async ({ p
     resolveStaleRefreshFinished = resolve;
   });
 
-  await page.route('**/api/gallery?*', async (route) => {
+  await page.route('**/api/gallery/search', async (route) => {
     const request = route.request();
-    const url = new URL(request.url());
+    const body = gallerySearchBody(request);
     const isPageRefresh =
-      request.method() === 'GET' &&
-      url.pathname === '/api/gallery' &&
-      url.searchParams.get('page') === '1' &&
-      url.searchParams.get('page_size') === '9' &&
-      !url.searchParams.has('include_total_bytes');
+      body?.page === 1 &&
+      body.page_size === 9 &&
+      body.include_total_bytes === false;
 
     if (!interceptStaleRefresh || !isPageRefresh) {
       await route.fallback();

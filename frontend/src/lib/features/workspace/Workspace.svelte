@@ -30,6 +30,7 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
   import { toastStore, uiStore, type ToastOptions } from '$lib/stores/ui';
   import { versionStore } from '$lib/stores/version';
   import { copyText, displayImageSize, imageUrl } from '$lib/utils/format';
+  import { canPrefetchNonCritical } from '$lib/utils/network';
   import { buildPromptOptimizeRequest } from '$lib/utils/promptOptimizer';
   import {
     editPreviewPanel,
@@ -175,10 +176,13 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
       await lazyPanels[panel].load();
       return true;
     } catch {
+      const reloadRequired = lazyPanels[panel].retryRequiresReload();
       lazyPanels[panel].reset();
       showToast($t.common.loadFeatureFailed, 'error', {
         actionLabel: $t.common.retry,
-        onAction: onRetry || (() => void ensurePanel(panel))
+        onAction: reloadRequired
+          ? () => window.location.reload()
+          : onRetry || (() => void ensurePanel(panel))
       });
       return false;
     } finally {
@@ -187,6 +191,7 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
   }
 
   function prefetchPanel(panel: LazyPanel) {
+    if (!canPrefetchNonCritical()) return;
     void lazyPanels[panel].prefetch();
   }
 
@@ -1156,6 +1161,7 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
     return installWorkspaceLifecycle({
       onPopstate: popstate,
       onKeydown: keydown,
+      shouldPrefetch: canPrefetchNonCritical,
       prefetchCommonPanels: () => {
         prefetchPanel('settings');
         prefetchPanel('jobs');

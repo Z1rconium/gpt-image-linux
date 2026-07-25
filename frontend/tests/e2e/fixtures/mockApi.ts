@@ -708,23 +708,37 @@ async function mockApi(page: Page, options: MockOptions = {}) {
       return;
     }
     if (url.pathname === '/api/gallery' && request.method() === 'GET') {
-      const prompt = url.searchParams.get('prompt') || '';
-      const favoriteParam = url.searchParams.get('favorite');
       const requestedPage = Number.parseInt(url.searchParams.get('page') || '1', 10);
+      await route.fulfill(
+        json(
+          galleryResponse(
+            galleryImages,
+            url.searchParams.get('include_total_bytes') === 'true',
+            requestedPage
+          )
+        )
+      );
+      return;
+    }
+    if (url.pathname === '/api/gallery/search' && request.method() === 'POST') {
+      const body = request.postDataJSON() as Record<string, unknown>;
+      const prompt = String(body.prompt || '');
+      const favoriteParam = body.favorite;
+      const requestedPage = Number(body.page || 1);
       const images = galleryImages.filter((image) =>
         matchesGalleryFilters(image, {
           prompt,
-          favorite: favoriteParam === 'true' ? true : favoriteParam === 'false' ? false : null
+          favorite: typeof favoriteParam === 'boolean' ? favoriteParam : null
         })
       );
       await route.fulfill(
         json(
           galleryResponse(
             images,
-            url.searchParams.get('include_total_bytes') === 'true',
+            body.include_total_bytes === true,
             requestedPage,
-            url.searchParams.get('include_counts') !== 'false',
-            url.searchParams.get('include_filter_options') !== 'false'
+            body.include_counts !== false,
+            body.include_filter_options !== false
           )
         )
       );

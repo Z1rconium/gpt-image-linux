@@ -11,38 +11,14 @@ export type LazyPanel =
   | 'optimizer';
 
 export const lazyPanels = {
-  settings: createLazyComponent(
-    () => import('$lib/components/SettingsDrawer.svelte'),
-    () => import('$lib/components/SettingsDrawer.svelte?lazy-retry')
-  ),
-  jobs: createLazyComponent(
-    () => import('$lib/components/JobHistoryDrawer.svelte'),
-    () => import('$lib/components/JobHistoryDrawer.svelte?lazy-retry')
-  ),
-  snippets: createLazyComponent(
-    () => import('$lib/components/PromptSnippetsDrawer.svelte'),
-    () => import('$lib/components/PromptSnippetsDrawer.svelte?lazy-retry')
-  ),
-  imagePrompt: createLazyComponent(
-    () => import('$lib/components/ImagePromptDialog.svelte'),
-    () => import('$lib/components/ImagePromptDialog.svelte?lazy-retry')
-  ),
-  lightbox: createLazyComponent(
-    () => import('$lib/components/Lightbox.svelte'),
-    () => import('$lib/components/Lightbox.svelte?lazy-retry')
-  ),
-  size: createLazyComponent(
-    () => import('$lib/components/SizeDialog.svelte'),
-    () => import('$lib/components/SizeDialog.svelte?lazy-retry')
-  ),
-  editPreview: createLazyComponent(
-    () => import('$lib/components/EditPreviewModal.svelte'),
-    () => import('$lib/components/EditPreviewModal.svelte?lazy-retry')
-  ),
-  optimizer: createLazyComponent(
-    () => import('$lib/components/PromptOptimizerAssistant.svelte'),
-    () => import('$lib/components/PromptOptimizerAssistant.svelte?lazy-retry')
-  )
+  settings: createLazyComponent(() => import('$lib/components/SettingsDrawer.svelte')),
+  jobs: createLazyComponent(() => import('$lib/components/JobHistoryDrawer.svelte')),
+  snippets: createLazyComponent(() => import('$lib/components/PromptSnippetsDrawer.svelte')),
+  imagePrompt: createLazyComponent(() => import('$lib/components/ImagePromptDialog.svelte')),
+  lightbox: createLazyComponent(() => import('$lib/components/Lightbox.svelte')),
+  size: createLazyComponent(() => import('$lib/components/SizeDialog.svelte')),
+  editPreview: createLazyComponent(() => import('$lib/components/EditPreviewModal.svelte')),
+  optimizer: createLazyComponent(() => import('$lib/components/PromptOptimizerAssistant.svelte'))
 } satisfies Record<LazyPanel, ReturnType<typeof createLazyComponent>>;
 
 export const settingsPanel = lazyPanels.settings;

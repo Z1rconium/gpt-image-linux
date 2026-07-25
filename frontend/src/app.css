@@ -142,6 +142,10 @@
   --app-lightbox-bg: #fcfcfb;
   --app-lightbox-detail: rgba(250, 250, 249, 0.96);
   --app-shadow: 0 28px 90px rgba(15, 23, 42, 0.16);
+  --gallery-hover-shadow: 0 8px 24px rgba(28, 25, 23, 0.14);
+  --favorite-text: #b45309;
+  --favorite-soft: rgba(245, 158, 11, 0.12);
+  --favorite-inset: rgba(217, 119, 6, 0.18);
 }
 
 html.dark {
@@ -175,6 +179,10 @@ html.dark {
   --app-lightbox-bg: #09090b;
   --app-lightbox-detail: rgba(24, 24, 27, 0.96);
   --app-shadow: 0 28px 90px rgba(0, 0, 0, 0.65);
+  --gallery-hover-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
+  --favorite-text: #fbbf24;
+  --favorite-soft: rgba(245, 158, 11, 0.16);
+  --favorite-inset: rgba(245, 158, 11, 0.22);
 }
 
 * {
@@ -278,7 +286,7 @@ html.dark input::placeholder {
 }
 
 .fade-in {
-  animation: fadeIn 0.4s ease-out both;
+  animation: fadeIn 0.18s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
 .drawer-backdrop {
@@ -306,9 +314,11 @@ html.dark input::placeholder {
 }
 
 .gallery-card {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 420px;
   transition:
-    transform 0.2s,
-    box-shadow 0.2s;
+    transform 0.18s cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 0.18s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .gallery-icon-action {
@@ -321,7 +331,7 @@ html.dark input::placeholder {
   border-style: solid;
   border-color: currentColor;
   border-radius: 6px;
-  background: rgba(255, 255, 255, 0.5);
+  background: var(--surface-primary);
   transition:
     background-color 0.15s,
     border-color 0.15s,
@@ -329,20 +339,10 @@ html.dark input::placeholder {
     box-shadow 0.15s;
 }
 
-html.dark .gallery-icon-action {
-  background: rgba(9, 9, 11, 0.28);
-}
-
 .gallery-icon-action[aria-pressed='true'] {
-  color: #d97706;
-  background: rgba(245, 158, 11, 0.14);
-  box-shadow: inset 0 0 0 1px rgba(245, 158, 11, 0.16);
-}
-
-html.dark .gallery-icon-action[aria-pressed='true'] {
-  color: #fbbf24;
-  background: rgba(245, 158, 11, 0.16);
-  box-shadow: inset 0 0 0 1px rgba(245, 158, 11, 0.22);
+  color: var(--favorite-text);
+  background: var(--favorite-soft);
+  box-shadow: inset 0 0 0 1px var(--favorite-inset);
 }
 
 .gallery-icon-action svg {
@@ -362,7 +362,7 @@ html.dark .gallery-icon-action[aria-pressed='true'] {
 @media (hover: hover) and (pointer: fine) {
   .gallery-card:hover {
     transform: translateY(-2px);
-    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
+    box-shadow: var(--gallery-hover-shadow);
   }
 }
 

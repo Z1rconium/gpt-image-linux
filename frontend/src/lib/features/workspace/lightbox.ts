@@ -1,5 +1,6 @@
 import type { GalleryEntry, GalleryResponse } from '$lib/api/types/gallery';
 import { imageUrl } from '$lib/utils/format';
+import { canPrefetchLargeMedia } from '$lib/utils/network';
 
 type PrefetchPage = (page: number) => Promise<GalleryResponse | null>;
 
@@ -8,7 +9,7 @@ export function createLightboxPrefetch(prefetchPage: PrefetchPage) {
   let pendingPrefetch: ReturnType<typeof setTimeout> | number | null = null;
 
   function prefetchImage(image: GalleryEntry | null | undefined) {
-    if (!image || typeof window === 'undefined') return;
+    if (!image || typeof window === 'undefined' || !canPrefetchLargeMedia()) return;
     const url = imageUrl(image.filename, image.image_url);
     if (prefetchedImageUrls.has(url)) return;
     prefetchedImageUrls.add(url);
@@ -18,6 +19,7 @@ export function createLightboxPrefetch(prefetchPage: PrefetchPage) {
     }
     const img = new Image();
     img.decoding = 'async';
+    img.fetchPriority = 'low';
     img.src = url;
   }
 
@@ -32,7 +34,7 @@ export function createLightboxPrefetch(prefetchPage: PrefetchPage) {
   }
 
   function prefetchNeighbors(image: GalleryEntry | null, gallery: GalleryResponse | null) {
-    if (!image || !gallery || typeof window === 'undefined') return;
+    if (!image || !gallery || typeof window === 'undefined' || !canPrefetchLargeMedia()) return;
     const currentIndex = gallery.images.findIndex((candidate) => candidate.id === image.id);
     if (currentIndex < 0) return;
 
