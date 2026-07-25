@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48">
+  <title>GPT Image Panel</title>
+  <rect x="6" y="6" width="37" height="37" rx="10" fill="#18181b" />
+  <rect
+    x="16.5"
+    y="16.5"
+    width="16"
+    height="16"
+    rx="1.75"
+    fill="none"
+    stroke="#10b981"
+    stroke-width="3"
+  />
+  <path
+    d="M24.5 17.25 26.25 22.75 31.75 24.5 26.25 26.25 24.5 31.75 22.75 26.25 17.25 24.5 22.75 22.75Z"
+    fill="#34d399"
+  />
+</svg>

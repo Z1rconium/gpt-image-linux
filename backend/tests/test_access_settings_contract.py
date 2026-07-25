@@ -188,14 +188,19 @@ def test_frontend_build_assets_are_available_before_access_unlock(tmp_path, monk
     asset_path = build_dir / "_app" / "immutable" / "entry" / "app.js"
     asset_path.parent.mkdir(parents=True)
     asset_path.write_text("console.log('ok');", encoding="utf-8")
+    favicon_path = build_dir / "favicon.svg"
+    favicon_path.write_text("<svg xmlns='http://www.w3.org/2000/svg'/>", encoding="utf-8")
     monkeypatch.setattr(backend_main.app.state, "frontend_build_dir", build_dir, raising=False)
 
     with _test_client() as client:
         asset = client.get("/_app/immutable/entry/app.js")
+        favicon = client.get("/favicon.svg")
         api = client.get("/api/settings")
 
     assert asset.status_code == 200
     assert "console.log('ok')" in asset.text
+    assert favicon.status_code == 200
+    assert favicon.headers["content-type"].startswith("image/svg+xml")
     assert api.status_code == 401
 
 

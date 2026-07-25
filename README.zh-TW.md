@@ -1,6 +1,6 @@
 <div align="center">
   <br />
-  <img src="frontend/static/favicon-preview.png" alt="GPT Image Panel 標誌" width="128" height="128" />
+  <img src="frontend/static/favicon.svg" alt="GPT Image Panel 標誌" width="128" height="128" />
 
   <h1>GPT Image Panel</h1>
 
@@ -10,7 +10,7 @@
 
   <p>
     <a href="./README.md#english">English</a> ·
-    <a href="./README.md#中文文档">簡體中文</a> ·
+    <a href="./README.zh-CN.md">簡體中文</a> ·
     繁體中文
   </p>
 </div>
