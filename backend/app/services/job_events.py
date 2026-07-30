@@ -22,6 +22,7 @@ from ..repositories.image_jobs import (
     upsert_generate_job,
 )
 from . import webhook_service as webhooks
+from .blocking import run_db_operation
 
 def get_job_subscribers() -> dict[str, set[asyncio.Queue]]:
     subscribers = getattr(app.state, "generate_job_subscribers", None)
@@ -197,6 +198,18 @@ def dispatch_job_webhook(job: dict):
     asyncio.create_task(webhooks.deliver_webhook(webhook_url, public_generate_job(job)))
 
 
+async def dispatch_job_webhook_async(job: dict):
+    webhook_url = await run_db_operation(
+        pop_generate_job_webhook,
+        job["job_id"],
+        metric_name="pop_generate_job_webhook",
+    )
+    if webhook_url:
+        asyncio.create_task(
+            webhooks.deliver_webhook(webhook_url, public_generate_job(job))
+        )
+
+
 def build_job_update(job_id: str, updates: dict) -> dict:
     now = utc_now()
     existing = app.state.generate_jobs.get(job_id) or get_generate_job(job_id) or {}
@@ -248,4 +261,48 @@ def store_generate_job(job_id: str, updates: dict, *, persist: bool = True) -> d
         dispatch_job_webhook(job)
     return job
 
+
+async def store_generate_job_async(
+    job_id: str,
+    updates: dict,
+    *,
+    persist: bool = True,
+) -> dict:
+    existing = app.state.generate_jobs.get(job_id)
+    if existing is None:
+        existing = await run_db_operation(
+            get_generate_job,
+            job_id,
+            metric_name="get_generate_job_for_update",
+        ) or {}
+    now = utc_now()
+    job = {**existing, **updates, "job_id": job_id, "updated_at": now}
+    if "created_at" not in job:
+        job["created_at"] = now
+    if job.get("image_id"):
+        job["id"] = job["image_id"]
+
+    status = job.get("status")
+    if status in ACTIVE_GENERATE_JOB_STATUSES:
+        app.state.generate_jobs[job_id] = job
+    else:
+        app.state.generate_jobs.pop(job_id, None)
+        app.state.generate_job_last_persist_at.pop(job_id, None)
+
+    if should_persist_generate_job(job_id, job, persist):
+        await run_db_operation(
+            upsert_generate_job,
+            job,
+            metric_name="persist_generate_job",
+        )
+
+    is_terminal = status not in ACTIVE_GENERATE_JOB_STATUSES
+    publish_generate_job(
+        job,
+        list_debounce=not is_terminal,
+        list_reconcile=False,
+    )
+    if is_terminal:
+        await dispatch_job_webhook_async(job)
+    return job
 

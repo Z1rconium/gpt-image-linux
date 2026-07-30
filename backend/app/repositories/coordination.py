@@ -984,10 +984,6 @@ def get_runtime_coordination_metrics() -> dict[str, Any]:
     now_dt = datetime.now(timezone.utc)
     now = now_dt.isoformat()
     with _connect() as conn:
-        with _transaction(conn):
-            expired_sse_slots = _cleanup_expired_sse_slots_on_conn(conn, now)
-
-    with _connect() as conn:
         active_sse_slots = _count_active_sse_slots_on_conn(conn, now=now)
 
         heartbeat_rows = conn.execute(
@@ -1032,7 +1028,7 @@ def get_runtime_coordination_metrics() -> dict[str, Any]:
     return {
         "gauges": {
             "sse.active_connections": active_sse_slots,
-            "sse.expired_slots_cleaned": expired_sse_slots,
+            "sse.expired_slots_cleaned": 0,
             "workers.active": active_worker_count,
             "workers.heartbeat_age_max_seconds": round(max(heartbeat_ages), 3)
             if heartbeat_ages
@@ -1043,6 +1039,36 @@ def get_runtime_coordination_metrics() -> dict[str, Any]:
         "background_leases": active_leases,
         "workers": worker_snapshots,
     }
+
+
+def refresh_runtime_coordination_metrics(
+    worker_id: str,
+    snapshot: dict[str, Any],
+) -> dict[str, Any]:
+    """Perform low-frequency coordination maintenance and snapshot publication."""
+    _ensure_database()
+    normalized_worker_id = str(worker_id or "").strip()
+    now = utc_now()
+    payload = json.dumps(snapshot, sort_keys=True, separators=(",", ":"))
+    with _connect() as conn:
+        with _transaction(conn):
+            expired_sse_slots = _cleanup_expired_sse_slots_on_conn(conn, now)
+            if normalized_worker_id:
+                conn.execute(
+                    """
+                    INSERT INTO worker_metric_snapshots (
+                        worker_id, snapshot_json, updated_at
+                    )
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(worker_id) DO UPDATE SET
+                        snapshot_json = excluded.snapshot_json,
+                        updated_at = excluded.updated_at
+                    """,
+                    (normalized_worker_id, payload, now),
+                )
+        runtime = get_runtime_coordination_metrics()
+    runtime.setdefault("gauges", {})["sse.expired_slots_cleaned"] = expired_sse_slots
+    return runtime
 
 
 __all__ = [name for name in globals() if not name.startswith("_")]

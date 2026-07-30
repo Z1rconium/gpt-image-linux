@@ -52,6 +52,7 @@ from .image_files import (
     safe_image_path,
     safe_thumbnail_path,
     save_image_to_temp as _save_image_temp_unlocked,
+    save_image_to_temp_with_metadata as _save_image_temp_with_metadata_unlocked,
     scan_image_files as _scan_image_files,
     validate_image_file,
     validate_image_header_bytes,
@@ -445,6 +446,9 @@ class GalleryPage:
 class _PreparedGalleryFile:
     filename: str
     image_temp_path: Path
+    image_format: str | None = None
+    image_width: int | None = None
+    image_height: int | None = None
     thumbnail_filename: str | None = None
     thumbnail_temp_path: Path | None = None
 
@@ -852,25 +856,34 @@ def _connect() -> Iterator[sqlite3.Connection]:
         raise
     finally:
         _thread_local.connection_depth = depth
-        if depth == 0:
+        if depth == 0 and not bool(
+            getattr(_thread_local, "keep_connection_open", False)
+        ):
             _close_thread_connection()
 
 
 def _get_thread_connection() -> sqlite3.Connection:
     database_file = str(config.DATABASE_FILE)
+    busy_timeout_ms = int(getattr(_thread_local, "busy_timeout_ms", 30000))
     conn = getattr(_thread_local, "conn", None)
     conn_database_file = getattr(_thread_local, "database_file", None)
+    conn_busy_timeout_ms = getattr(_thread_local, "connection_busy_timeout_ms", None)
     if (
         conn is not None
         and conn_database_file == database_file
+        and conn_busy_timeout_ms == busy_timeout_ms
         and Path(database_file).exists()
     ):
         return conn
 
     _close_thread_connection()
-    conn = _open_connection()
+    conn = _open_connection(
+        timeout=max(0.01, busy_timeout_ms / 1000),
+        busy_timeout_ms=busy_timeout_ms,
+    )
     _thread_local.conn = conn
     _thread_local.database_file = database_file
+    _thread_local.connection_busy_timeout_ms = busy_timeout_ms
     _thread_local.connection_depth = 0
     return conn
 
@@ -886,7 +899,27 @@ def _close_thread_connection():
     finally:
         _thread_local.conn = None
         _thread_local.database_file = None
+        _thread_local.connection_busy_timeout_ms = None
         _thread_local.connection_depth = 0
+
+
+@contextmanager
+def persistent_connection_scope(busy_timeout_ms: int) -> Iterator[None]:
+    previous_keep_open = bool(getattr(_thread_local, "keep_connection_open", False))
+    previous_busy_timeout = getattr(_thread_local, "busy_timeout_ms", None)
+    _thread_local.keep_connection_open = True
+    _thread_local.busy_timeout_ms = max(1, int(busy_timeout_ms))
+    try:
+        yield
+    finally:
+        _thread_local.keep_connection_open = previous_keep_open
+        if previous_busy_timeout is None:
+            try:
+                delattr(_thread_local, "busy_timeout_ms")
+            except AttributeError:
+                pass
+        else:
+            _thread_local.busy_timeout_ms = previous_busy_timeout
 
 
 def close_database_connections():
@@ -895,7 +928,6 @@ def close_database_connections():
     _clear_verified_thumbnails()
     _invalidate_filter_options_cache()
     _invalidate_gallery_query_caches()
-
 
 
 @contextmanager
@@ -1344,6 +1376,7 @@ def _ensure_database():
             _run_schema_migrations(conn)
             _ensure_gallery_fts(conn)
             conn.commit()
+            conn.execute("PRAGMA optimize")
 
         _initialized_database_file = database_file
         _secure_data_storage_permissions(force=True)

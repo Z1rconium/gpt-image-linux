@@ -170,7 +170,7 @@ def _verify_pillow_image(
     opener,
     *,
     expected_format: str,
-) -> None:
+) -> tuple[int, int]:
     if Image is None:
         raise ValueError("Pillow is required to validate image data")
 
@@ -184,17 +184,13 @@ def _verify_pillow_image(
                 decoded_format = _pillow_format_key(getattr(image, "format", None))
                 if decoded_format and decoded_format != expected_format:
                     raise ValueError("Image decoder format does not match image data")
-                image.verify()
-            with opener() as image:
-                decoded_format = _pillow_format_key(getattr(image, "format", None))
-                if decoded_format and decoded_format != expected_format:
-                    raise ValueError("Image decoder format does not match image data")
                 if getattr(image, "is_animated", False):
                     image.seek(0)
                 image.load()
                 width, height = image.size
                 if width <= 0 or height <= 0:
                     raise ValueError("Image dimensions must be positive")
+                return int(width), int(height)
     except warning_type as e:
         _raise_image_validation_error(e)
     except (OSError, UnidentifiedImageError, SyntaxError, ValueError, bomb_error_type) as e:
@@ -220,6 +216,30 @@ def validate_image_file(
     )
     _verify_pillow_image(lambda: Image.open(path), expected_format=detected_format)
     return detected_format
+
+
+def validate_image_file_details(
+    path: Path,
+    *,
+    filename: str = "",
+    content_type: str = "",
+) -> tuple[str, int, int]:
+    try:
+        with path.open("rb") as file:
+            header = file.read(512)
+    except OSError as e:
+        raise ValueError("Image data could not be read") from e
+
+    detected_format = validate_image_header_bytes(
+        header,
+        filename=filename,
+        content_type=content_type,
+    )
+    width, height = _verify_pillow_image(
+        lambda: Image.open(path),
+        expected_format=detected_format,
+    )
+    return detected_format, width, height
 
 
 def validate_image_bytes(
@@ -342,6 +362,17 @@ def safe_thumbnail_path(filename: str) -> Path | None:
 
 
 def save_image_to_temp(image_bytes: bytes, filename: str) -> Path:
+    path, _format, _width, _height = save_image_to_temp_with_metadata(
+        image_bytes,
+        filename,
+    )
+    return path
+
+
+def save_image_to_temp_with_metadata(
+    image_bytes: bytes,
+    filename: str,
+) -> tuple[Path, str, int, int]:
     validate_image_header_bytes(image_bytes, filename=filename)
     path = safe_image_path(filename)
     if not path:
@@ -358,11 +389,14 @@ def save_image_to_temp(image_bytes: bytes, filename: str) -> Path:
     try:
         with temp_file:
             temp_file.write(image_bytes)
-        validate_image_file(temp_path, filename=filename)
+        detected_format, width, height = validate_image_file_details(
+            temp_path,
+            filename=filename,
+        )
     except BaseException:
         temp_path.unlink(missing_ok=True)
         raise
-    return temp_path
+    return temp_path, detected_format, width, height
 
 
 def promote_image_temp(filename: str, temp_path: Path) -> Path:

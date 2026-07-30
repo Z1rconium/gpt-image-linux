@@ -183,6 +183,12 @@ Most runtime options live in `.env.example`. API presets, prompt optimizer, R2 b
 | `DEFAULT_RESPONSES_MODEL` | Fallback model for `/v1/responses` when no request/preset model is provided. |
 | `AIOHTTP_CONNECTION_LIMIT` / `AIOHTTP_CONNECTION_LIMIT_PER_HOST` | Shared aiohttp connector limits for upstream/probe/download calls. |
 | `APP_VERSION` / `GITHUB_REPO` / `ENABLE_VERSION_CHECK` | UI/API version reporting and latest-release checks. |
+| `VERSION_CHECK_CACHE_SECONDS` | Per-process cache TTL for successful latest-release checks. |
+| `MAX_UPSTREAM_IMAGE_BYTES_PER_TASK_MB` / `UPSTREAM_MEMORY_BUDGET_MB` | Per-task decoded-image cap and process-local weighted upstream-memory admission budget. |
+| `DB_EXECUTOR_WORKERS` / `SQLITE_BUSY_*` | Dedicated SQLite executor size and short-timeout jittered retry controls. |
+| `IMAGE_CPU_CONCURRENCY` / `FILE_IO_CONCURRENCY` | Bounded full-image decode and blocking file-I/O concurrency per process. |
+| `IMAGE_JOB_PROGRESS_PERSIST_INTERVAL_SECONDS` | Minimum interval for coalesced image-unit progress writes. |
+| `RUNTIME_METRICS_REFRESH_SECONDS` / `EVENT_LOOP_LAG_SAMPLE_SECONDS` | Background coordination snapshot and event-loop lag sampling intervals. |
 | `MAX_ACTIVE_GENERATE_JOBS` | Global running generation/edit image-unit limit. |
 | `MAX_QUEUED_GENERATE_JOBS` | Queue capacity before new jobs return `429`. |
 | `MAX_PENDING_EDIT_SOURCE_MB` | Global pending edit-source byte reservation cap. |

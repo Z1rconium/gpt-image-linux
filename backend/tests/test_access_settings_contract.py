@@ -23,18 +23,16 @@ def test_version_reads_current_app_version_each_request(client, monkeypatch):
     assert second.json()["version"] == "v0.4.8"
 
 
-def test_latest_version_fetches_release_api_each_request(client, monkeypatch):
+def test_latest_version_uses_process_cache(client, monkeypatch):
     monkeypatch.setattr(config, "ENABLE_VERSION_CHECK", True)
     monkeypatch.setattr(config, "GITHUB_REPO", "test/repo")
     monkeypatch.setattr(config, "read_app_version", lambda: "v0.4.7")
 
     calls = {"release": 0, "branch": 0}
-    release_versions = iter(["0.4.7", "0.4.8"])
-
     async def fake_release(repo: str):
         calls["release"] += 1
         assert repo == "test/repo"
-        return next(release_versions)
+        return "0.4.7"
 
     async def fake_branch(repo: str):
         calls["branch"] += 1
@@ -52,9 +50,10 @@ def test_latest_version_fetches_release_api_each_request(client, monkeypatch):
 
     second = client.get("/api/version/latest")
     assert second.status_code == 200
-    assert second.json()["latest_version"] == "0.4.8"
-    assert second.json()["has_update"] is True
-    assert calls == {"release": 2, "branch": 0}
+    assert second.json()["latest_version"] == "0.4.7"
+    assert second.json()["has_update"] is False
+    assert second.json()["checked_at"] == first_body["checked_at"]
+    assert calls == {"release": 1, "branch": 0}
 
 
 def test_latest_version_falls_back_to_branch_version(client, monkeypatch):

@@ -11,6 +11,7 @@ from ..repositories.coordination import mark_worker_heartbeat
 from ..repositories.image_jobs import claim_next_image_job_unit
 from .job_executor import image_unit_lease_expires_at, run_claimed_image_unit
 from .job_queue import get_image_unit_dispatcher_kick_event
+from .blocking import run_db_operation
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +45,7 @@ async def run_image_unit_dispatcher(worker_id: str):
     last_heartbeat_active_units: int | None = None
     idle_delay = config.IMAGE_JOB_UNIT_POLL_INTERVAL_SECONDS
 
-    def heartbeat_if_needed(*, force: bool = False):
+    async def heartbeat_if_needed(*, force: bool = False):
         nonlocal last_heartbeat_active_units, last_heartbeat_at
         active_units = len(active_tasks)
         now = time.monotonic()
@@ -53,21 +54,28 @@ async def run_image_unit_dispatcher(worker_id: str):
             or active_units != last_heartbeat_active_units
             or now - last_heartbeat_at >= IMAGE_DISPATCHER_HEARTBEAT_INTERVAL_SECONDS
         ):
-            mark_worker_heartbeat(worker_id, active_units)
+            await run_db_operation(
+                mark_worker_heartbeat,
+                worker_id,
+                active_units,
+                metric_name="worker_heartbeat",
+            )
             last_heartbeat_active_units = active_units
             last_heartbeat_at = now
 
     try:
         while True:
             active_tasks = {task for task in active_tasks if not task.done()}
-            heartbeat_if_needed()
+            await heartbeat_if_needed()
             claimed_count = 0
             while len(active_tasks) < config.MAX_ACTIVE_GENERATE_JOBS:
-                unit = claim_next_image_job_unit(
+                unit = await run_db_operation(
+                    claim_next_image_job_unit,
                     worker_id=worker_id,
                     lease_expires_at=image_unit_lease_expires_at(),
                     now=utc_now(),
                     running_limit=config.MAX_ACTIVE_GENERATE_JOBS,
+                    metric_name="claim_image_job_unit",
                 )
                 if not unit:
                     break
@@ -75,7 +83,7 @@ async def run_image_unit_dispatcher(worker_id: str):
                 active_tasks.add(task)
                 claimed_count += 1
             if claimed_count > 0:
-                heartbeat_if_needed(force=True)
+                await heartbeat_if_needed(force=True)
                 idle_delay = config.IMAGE_JOB_UNIT_POLL_INTERVAL_SECONDS
             elif len(active_tasks) < config.MAX_ACTIVE_GENERATE_JOBS:
                 metrics.increment("image_jobs.claim_miss")
@@ -101,4 +109,3 @@ async def run_image_unit_dispatcher(worker_id: str):
         if active_tasks:
             await asyncio.gather(*active_tasks, return_exceptions=True)
         raise
-

@@ -37,6 +37,7 @@ from ..repositories.image_jobs import (
 from ..repositories.gallery.queries import image_url_for_filename
 from ..schemas.gallery import GalleryEntry
 from ..schemas.generation import EditRequest, GenerateJobResponse, GenerateRequest
+from .blocking import run_db_operation
 from .job_events import (
     get_job_subscribers,
     get_jobs_subscribers,
@@ -44,6 +45,7 @@ from .job_events import (
     store_generate_job,
     validate_job_webhook_url,
 )
+
 
 def kick_thumbnail_dispatcher() -> None:
     task = getattr(app.state, "thumbnail_dispatcher_task", None)
@@ -121,7 +123,9 @@ def request_image_units(req: GenerateRequest | EditRequest) -> int:
 
 def snapshot_queue_metrics() -> dict[str, int]:
     jobs = app.state.generate_jobs or {}
-    running_units, queued_units = count_pending_image_job_units()
+    repository_metrics = getattr(app.state, "image_queue_runtime_metrics", {})
+    running_units = int(repository_metrics.get("running", 0))
+    queued_units = int(repository_metrics.get("queued", 0))
     counts: dict[str, int] = {
         "image_jobs.active": 0,
         "image_jobs.active_units": running_units + queued_units,
@@ -137,7 +141,9 @@ def snapshot_queue_metrics() -> dict[str, int]:
             for subscribers in get_job_subscribers().values()
         ),
         "image_jobs.sse_jobs_subscribers": len(get_jobs_subscribers()),
-        "edit_sources.pending_bytes": get_pending_edit_source_bytes(),
+        "edit_sources.pending_bytes": int(
+            repository_metrics.get("pending_edit_source_bytes", 0)
+        ),
         "edit_sources.pending_capacity_bytes": get_max_pending_edit_source_bytes(),
     }
     for operation in ("generation", "edit"):
@@ -315,7 +321,7 @@ def build_edit_request_from_form(
         raise HTTPException(status_code=422, detail=str(e)) from e
 
 
-def queue_image_job(
+async def queue_image_job(
     *,
     req: GenerateRequest | EditRequest,
     operation: Literal["generation", "edit"],
@@ -324,7 +330,7 @@ def queue_image_job(
     pending_edit_source_bytes: int = 0,
     edit_sources_payload: list[dict] | None = None,
 ) -> GenerateJobResponse:
-    load_api_settings()
+    await run_db_operation(load_api_settings, metric_name="load_api_settings")
     active_preset = get_active_preset()
     active_preset_id = str(active_preset.get("id") or "default")
     api_url = str(active_preset.get("api_url") or "").rstrip("/")
@@ -338,6 +344,9 @@ def queue_image_job(
     req.model = requested_model or normalize_default_model(
         active_preset.get("default_model"),
         resolved_api_path,
+    )
+    req.response_format = req.response_format or str(
+        active_preset.get("default_response_format") or "url"
     )
 
     if not api_url:
@@ -366,7 +375,8 @@ def queue_image_job(
     )
     pending_job["webhook_url"] = webhook_url
     try:
-        stored_job, _units = enqueue_image_job(
+        stored_job, _units = await run_db_operation(
+            enqueue_image_job,
             parent_job=pending_job,
             operation=operation,
             request=build_request_payload(req),
@@ -379,6 +389,7 @@ def queue_image_job(
             max_active_generate_jobs=config.MAX_ACTIVE_GENERATE_JOBS,
             max_queued_generate_jobs=config.MAX_QUEUED_GENERATE_JOBS,
             max_pending_edit_source_bytes=get_max_pending_edit_source_bytes(),
+            metric_name="enqueue_image_job",
         )
     except ImageJobQueueFullError as e:
         metrics.increment("image_jobs.rejected.queue_full")
@@ -404,13 +415,13 @@ def queue_image_job(
     )
 
 
-def queue_edit_job(
+async def queue_edit_job(
     req: EditRequest,
     image_sources: list[EditImageSource],
 ) -> GenerateJobResponse:
     image_source_bytes = sum(source.byte_size for source in image_sources)
 
-    return queue_image_job(
+    return await queue_image_job(
         req=req,
         operation="edit",
         api_path="/v1/images/edits",
@@ -418,4 +429,3 @@ def queue_edit_job(
         pending_edit_source_bytes=image_source_bytes,
         edit_sources_payload=[edit_source_to_payload(source) for source in image_sources],
     )
-

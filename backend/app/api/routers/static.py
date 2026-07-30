@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 from typing import Any
 
 import aiohttp
@@ -11,6 +12,7 @@ from ..csp import frontend_index_response
 from ...core import settings as config
 from ...core.utils import utc_now
 from ...schemas.access import LatestVersionResponse, VersionResponse
+from ...integrations.session_pool import TIMEOUT_VERSION_CHECK, get_pool
 
 
 logger = logging.getLogger(__name__)
@@ -52,20 +54,16 @@ def _compare_versions(a: str, b: str) -> int:
 
 async def _fetch_latest_release_version(repo: str) -> str | None:
     url = _LATEST_RELEASE_URL_TEMPLATE.format(repo=repo)
-    timeout = aiohttp.ClientTimeout(
-        total=config.VERSION_CHECK_TIMEOUT_SECONDS,
-        connect=config.VERSION_CHECK_TIMEOUT_SECONDS,
-    )
     try:
-        async with aiohttp.ClientSession(timeout=timeout, headers=_VERSION_CHECK_HEADERS) as session:
-            async with session.get(url) as response:
-                if response.status != 200:
-                    return None
-                payload: Any = await response.json(content_type=None)
-                if not isinstance(payload, dict):
-                    return None
-                tag_name = str(payload.get("tag_name") or "").strip()
-                return _normalize_version(tag_name) or None
+        session = get_pool().get(timeout_kind=TIMEOUT_VERSION_CHECK)
+        async with session.get(url, headers=_VERSION_CHECK_HEADERS) as response:
+            if response.status != 200:
+                return None
+            payload: Any = await response.json(content_type=None)
+            if not isinstance(payload, dict):
+                return None
+            tag_name = str(payload.get("tag_name") or "").strip()
+            return _normalize_version(tag_name) or None
     except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as e:
         logger.debug("Latest-release fetch failed: %s", e)
         return None
@@ -76,17 +74,13 @@ async def _fetch_branch_version_text(repo: str) -> str | None:
         repo=repo,
         branch=config.VERSION_CHECK_BRANCH,
     )
-    timeout = aiohttp.ClientTimeout(
-        total=config.VERSION_CHECK_TIMEOUT_SECONDS,
-        connect=config.VERSION_CHECK_TIMEOUT_SECONDS,
-    )
     try:
-        async with aiohttp.ClientSession(timeout=timeout, headers=_VERSION_CHECK_HEADERS) as session:
-            async with session.get(url) as response:
-                if response.status != 200:
-                    return None
-                text = (await response.text()).strip()
-                return _normalize_version(text) or None
+        session = get_pool().get(timeout_kind=TIMEOUT_VERSION_CHECK)
+        async with session.get(url, headers=_VERSION_CHECK_HEADERS) as response:
+            if response.status != 200:
+                return None
+            text = (await response.text()).strip()
+            return _normalize_version(text) or None
     except (aiohttp.ClientError, asyncio.TimeoutError) as e:
         logger.debug("Latest-version fetch failed: %s", e)
         return None
@@ -153,7 +147,32 @@ async def latest_version():
 
     repo = config.GITHUB_REPO
     current_version = _current_app_version()
-    latest = await _fetch_latest_version_text(repo)
+    cache = getattr(app.state, "latest_version_cache", {})
+    cached = cache.get(repo) if isinstance(cache, dict) else None
+    now = time.monotonic()
+    if cached and now - float(cached[0]) < config.VERSION_CHECK_CACHE_SECONDS:
+        latest = cached[1]
+        checked_at = cached[2]
+    else:
+        lock = getattr(app.state, "latest_version_check_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            app.state.latest_version_check_lock = lock
+        async with lock:
+            cache = getattr(app.state, "latest_version_cache", {})
+            cached = cache.get(repo) if isinstance(cache, dict) else None
+            now = time.monotonic()
+            if cached and now - float(cached[0]) < config.VERSION_CHECK_CACHE_SECONDS:
+                latest = cached[1]
+                checked_at = cached[2]
+            else:
+                latest = await _fetch_latest_version_text(repo)
+                checked_at = utc_now() if latest else None
+                if latest:
+                    app.state.latest_version_cache = {
+                        **cache,
+                        repo: (now, latest, checked_at),
+                    }
 
     if not latest:
         return LatestVersionResponse(latest_version=None, has_update=False, checked_at=None)
@@ -162,7 +181,7 @@ async def latest_version():
     return LatestVersionResponse(
         latest_version=latest,
         has_update=has_update,
-        checked_at=utc_now(),
+        checked_at=checked_at,
     )
 
 

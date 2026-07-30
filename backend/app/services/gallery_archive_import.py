@@ -13,6 +13,7 @@ from typing import Any
 
 from fastapi import HTTPException, UploadFile
 from zipstream import ZipStream
+from .blocking import run_file_operation
 
 from ..core import settings as config
 from ..core.utils import utc_now
@@ -181,30 +182,38 @@ async def stream_upload_to_tempfile(
 ) -> Path:
     if directory is not None:
         directory.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(
-        prefix="gallery-import-",
-        suffix=".zip",
-        dir=str(directory) if directory is not None else None,
+    def copy_upload() -> tuple[Path, int]:
+        fd, tmp_name = tempfile.mkstemp(
+            prefix="gallery-import-",
+            suffix=".zip",
+            dir=str(directory) if directory is not None else None,
+        )
+        tmp_path = Path(tmp_name)
+        total = 0
+        chunk_size = 1024 * 1024
+        try:
+            archive.file.seek(0)
+            with os.fdopen(fd, "wb") as out:
+                while True:
+                    chunk = archive.file.read(chunk_size)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise HTTPException(
+                            status_code=400,
+                            detail="Uploaded archive is too large",
+                        )
+                    out.write(chunk)
+        except BaseException:
+            tmp_path.unlink(missing_ok=True)
+            raise
+        return tmp_path, total
+
+    tmp_path, total = await run_file_operation(
+        copy_upload,
+        metric_name="copy_gallery_import_upload",
     )
-    tmp_path = Path(tmp_name)
-    total = 0
-    chunk_size = 1024 * 1024
-    try:
-        with os.fdopen(fd, "wb") as out:
-            while True:
-                chunk = await archive.read(chunk_size)
-                if not chunk:
-                    break
-                total += len(chunk)
-                if total > max_bytes:
-                    raise HTTPException(
-                        status_code=400,
-                        detail="Uploaded archive is too large",
-                    )
-                out.write(chunk)
-    except BaseException:
-        tmp_path.unlink(missing_ok=True)
-        raise
 
     if total == 0:
         tmp_path.unlink(missing_ok=True)
@@ -412,4 +421,3 @@ def _iter_zip_import_entries(
         importable_count += 1
         _emit_import_progress(progress, processed_count, importable_count, skipped_count)
         yield image_bytes, entry
-

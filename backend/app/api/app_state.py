@@ -209,6 +209,20 @@ async def lifespan(app: FastAPI):
     app.state.generate_jobs_sse_poller_task = None
     app.state.generate_job_sse_poller_task = None
     app.state.generate_job_last_persist_at = {}
+    app.state.image_queue_runtime_metrics = {
+        "running": 0,
+        "queued": 0,
+        "pending_edit_source_bytes": 0,
+    }
+    app.state.runtime_coordination_metrics = {
+        "gauges": {},
+        "background_leases": [],
+        "workers": [],
+    }
+    app.state.runtime_resource_gauges = {}
+    app.state.event_loop_lag_last_ms = 0.0
+    app.state.latest_version_cache = {}
+    app.state.latest_version_check_lock = asyncio.Lock()
     app.state.image_unit_dispatcher_kick = asyncio.Event()
     app.state.image_unit_dispatcher_task = asyncio.create_task(
         job_scheduler.run_image_unit_dispatcher(app.state.worker_id)
@@ -245,6 +259,13 @@ async def lifespan(app: FastAPI):
     )
     app.state.access_failures: OrderedDict[str, tuple[int, float]] = OrderedDict()
     job_events.reconcile_active_generate_jobs_from_storage()
+    from ..services import runtime_metrics
+    app.state.runtime_metrics_refresher_task = asyncio.create_task(
+        runtime_metrics.run_runtime_metrics_refresher(app.state.worker_id)
+    )
+    app.state.event_loop_lag_observer_task = asyncio.create_task(
+        runtime_metrics.run_event_loop_lag_observer()
+    )
     try:
         yield
     finally:
@@ -295,6 +316,16 @@ async def lifespan(app: FastAPI):
         ai_analyze_dispatcher_task = getattr(app.state, "gallery_ai_analyze_dispatcher_task", None)
         if ai_analyze_dispatcher_task and not ai_analyze_dispatcher_task.done():
             ai_analyze_dispatcher_task.cancel()
+        runtime_metrics_refresher_task = getattr(
+            app.state, "runtime_metrics_refresher_task", None
+        )
+        if runtime_metrics_refresher_task and not runtime_metrics_refresher_task.done():
+            runtime_metrics_refresher_task.cancel()
+        event_loop_lag_observer_task = getattr(
+            app.state, "event_loop_lag_observer_task", None
+        )
+        if event_loop_lag_observer_task and not event_loop_lag_observer_task.done():
+            event_loop_lag_observer_task.cancel()
         gallery_job_sse_poller_tasks = list(
             getattr(app.state, "gallery_job_sse_poller_tasks", {}).values()
         )
@@ -320,6 +351,8 @@ async def lifespan(app: FastAPI):
                 file_gc_task,
                 scheduled_sync_task,
                 ai_analyze_dispatcher_task,
+                runtime_metrics_refresher_task,
+                event_loop_lag_observer_task,
                 *gallery_job_sse_poller_tasks,
                 *tasks,
             )
@@ -328,7 +361,9 @@ async def lifespan(app: FastAPI):
         if awaitables:
             await asyncio.gather(*awaitables, return_exceptions=True)
         from ..integrations.session_pool import close_pool
+        from ..services.blocking import close_blocking_executors
         await close_pool()
+        await close_blocking_executors()
         close_database_connections()
 
 

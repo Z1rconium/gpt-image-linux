@@ -24,6 +24,7 @@ from ...core import settings as config
 from ...repositories.gallery.queries import get_gallery_entry
 from ...repositories.image_files import safe_image_path, validate_image_file
 from ...schemas.generation import EditRequest, GenerateJobResponse
+from ...services.blocking import run_db_operation, run_image_operation
 
 
 router = APIRouter()
@@ -105,12 +106,38 @@ def copy_edit_source_file_to_temp(
     too_large_detail: str,
     read_error_detail: str,
 ) -> EditImageSource:
+    try:
+        with path.open("rb") as source:
+            return copy_edit_source_stream_to_temp(
+                source,
+                filename,
+                content_type,
+                empty_detail=empty_detail,
+                too_large_detail=too_large_detail,
+                read_error_detail=read_error_detail,
+            )
+    except HTTPException:
+        raise
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=read_error_detail) from e
+
+
+def copy_edit_source_stream_to_temp(
+    source,
+    filename: str,
+    content_type: str,
+    *,
+    empty_detail: str,
+    too_large_detail: str,
+    read_error_detail: str,
+) -> EditImageSource:
     fd, temp_path = create_edit_source_temp_path(filename)
     total = 0
     header = bytearray()
 
     try:
-        with os.fdopen(fd, "wb") as target, path.open("rb") as source:
+        source.seek(0)
+        with os.fdopen(fd, "wb") as target:
             while True:
                 chunk = source.read(EDIT_SOURCE_CHUNK_BYTES)
                 if not chunk:
@@ -167,44 +194,18 @@ async def read_upload_edit_source(image: UploadFile) -> EditImageSource:
 
     image_content_type = resolve_upload_content_type(image)
     filename = image.filename or "image.png"
-    fd, temp_path = create_edit_source_temp_path(filename)
-    total = 0
-    header = bytearray()
-
-    try:
-        with os.fdopen(fd, "wb") as target:
-            while True:
-                chunk = await image.read(EDIT_SOURCE_CHUNK_BYTES)
-                if not chunk:
-                    break
-                total += len(chunk)
-                if total > max_upload_bytes():
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Uploaded image is too large. Max size is {config.MAX_FILE_SIZE_MB} MB.",
-                    )
-                if len(header) < EDIT_SOURCE_SNIFF_BYTES:
-                    header.extend(chunk[: EDIT_SOURCE_SNIFF_BYTES - len(header)])
-                target.write(chunk)
-    except BaseException:
-        temp_path.unlink(missing_ok=True)
-        raise
-
-    try:
-        validate_edit_source_header(
-            bytes(header),
-            total,
-            filename,
-            image_content_type,
-            empty_detail="Uploaded image is empty.",
-            too_large_detail=f"Uploaded image is too large. Max size is {config.MAX_FILE_SIZE_MB} MB.",
-        )
-        validate_edit_source_file(temp_path, filename, image_content_type)
-    except BaseException:
-        temp_path.unlink(missing_ok=True)
-        raise
-
-    return EditImageSource(temp_path, total, filename, image_content_type)
+    return await run_image_operation(
+        copy_edit_source_stream_to_temp,
+        image.file,
+        filename,
+        image_content_type,
+        empty_detail="Uploaded image is empty.",
+        too_large_detail=(
+            f"Uploaded image is too large. Max size is {config.MAX_FILE_SIZE_MB} MB."
+        ),
+        read_error_detail="Failed to read uploaded image",
+        metric_name="copy_validate_edit_upload",
+    )
 
 
 async def read_upload_edit_sources(request: Request) -> list[EditImageSource]:
@@ -222,21 +223,31 @@ async def read_upload_edit_sources(request: Request) -> list[EditImageSource]:
         )
 
     sources: list[EditImageSource] = []
-    try:
-        for upload in uploads:
-            sources.append(await read_upload_edit_source(upload))
-    except BaseException:
+    results = await asyncio.gather(
+        *(read_upload_edit_source(upload) for upload in uploads),
+        return_exceptions=True,
+    )
+    sources = [result for result in results if isinstance(result, EditImageSource)]
+    error = next(
+        (result for result in results if isinstance(result, BaseException)),
+        None,
+    )
+    if error is not None:
         cleanup_edit_sources(sources)
-        raise
+        raise error
     return sources
 
 
 async def read_gallery_edit_source(image_id: str) -> EditImageSource:
-    entry = await asyncio.to_thread(get_gallery_entry, image_id)
+    entry = await run_db_operation(
+        get_gallery_entry,
+        image_id,
+        metric_name="get_gallery_edit_source",
+    )
     if not entry:
         raise HTTPException(status_code=404, detail="Gallery entry not found")
 
-    path = await asyncio.to_thread(safe_image_path, entry.filename)
+    path = safe_image_path(entry.filename)
     if not path or not path.exists():
         raise HTTPException(status_code=404, detail="Gallery image file not found")
 
@@ -245,7 +256,7 @@ async def read_gallery_edit_source(image_id: str) -> EditImageSource:
         or IMAGE_UPLOAD_CONTENT_TYPES.get(path.suffix.lower(), "application/octet-stream")
     )
 
-    return await asyncio.to_thread(
+    return await run_image_operation(
         copy_edit_source_file_to_temp,
         path,
         path.name,
@@ -253,6 +264,7 @@ async def read_gallery_edit_source(image_id: str) -> EditImageSource:
         empty_detail="Gallery image is empty",
         too_large_detail=f"Gallery image is too large. Max size is {config.MAX_FILE_SIZE_MB} MB.",
         read_error_detail="Failed to read gallery image",
+        metric_name="copy_validate_gallery_edit_source",
     )
 
 
@@ -266,7 +278,7 @@ async def edit_image(
         raise HTTPException(status_code=422, detail="Upload image is required.")
     validate_edit_source_count(sources)
     try:
-        return queue_edit_job(
+        return await queue_edit_job(
             req=req,
             image_sources=sources,
         )
@@ -298,7 +310,7 @@ async def edit_image_from_gallery(
         cleanup_edit_sources(sources)
         raise
     try:
-        return queue_edit_job(
+        return await queue_edit_job(
             req=req,
             image_sources=sources,
         )

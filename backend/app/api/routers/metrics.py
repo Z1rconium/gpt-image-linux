@@ -6,10 +6,7 @@ from ..app_state import app
 from ...services.job_queue import snapshot_queue_metrics
 from ...core import settings as config
 from ...core.observability import build_metrics_snapshot, format_prometheus_metrics
-from ...repositories.coordination import (
-    get_runtime_coordination_metrics,
-    record_worker_metrics_snapshot,
-)
+from ...services.blocking import executor_gauges
 
 
 router = APIRouter()
@@ -46,8 +43,14 @@ def _merge_current_worker_snapshot(workers: list, worker_snapshot: dict) -> list
 
 def _metrics_snapshot() -> dict:
     worker_id = str(getattr(app.state, "worker_id", "unknown"))
-    runtime = get_runtime_coordination_metrics()
+    runtime = getattr(
+        app.state,
+        "runtime_coordination_metrics",
+        {"gauges": {}, "background_leases": [], "workers": []},
+    )
     gauges = snapshot_queue_metrics()
+    gauges.update(executor_gauges())
+    gauges.update(getattr(app.state, "runtime_resource_gauges", {}))
     gauges.update(runtime.get("gauges", {}))
     snapshot = build_metrics_snapshot(gauges=gauges)
     snapshot["rates"] = _failure_rates(snapshot["counters"])
@@ -59,10 +62,6 @@ def _metrics_snapshot() -> dict:
         "rates": snapshot["rates"],
         "timings_ms": snapshot["timings_ms"],
     }
-    record_worker_metrics_snapshot(
-        worker_id,
-        worker_payload,
-    )
     snapshot["workers"] = _merge_current_worker_snapshot(
         runtime.get("workers", []),
         _current_worker_snapshot(worker_id, worker_payload),

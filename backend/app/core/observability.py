@@ -150,7 +150,7 @@ def format_prometheus_metrics(
         base_name = f"{namespace}_{_metric_name(name)}"
         lines.append(f"# TYPE {base_name}_count gauge")
         lines.append(f"{base_name}_count {int(summary.get('count', 0))}")
-        for field in ("p50", "p95", "max"):
+        for field in ("p50", "p95", "p99", "max"):
             metric_name = f"{base_name}_{field}_ms"
             lines.append(f"# TYPE {metric_name} gauge")
             lines.append(f"{metric_name} {_format_metric_value(summary.get(field, 0.0))}")
@@ -197,12 +197,13 @@ def _percentile(sorted_values: list[float], percentile: float) -> float:
 
 def _summarize_samples(values: list[float]) -> dict[str, float | int]:
     if not values:
-        return {"count": 0, "p50": 0.0, "p95": 0.0, "max": 0.0}
+        return {"count": 0, "p50": 0.0, "p95": 0.0, "p99": 0.0, "max": 0.0}
     sorted_values = sorted(values)
     return {
         "count": len(sorted_values),
         "p50": round(_percentile(sorted_values, 0.50), 2),
         "p95": round(_percentile(sorted_values, 0.95), 2),
+        "p99": round(_percentile(sorted_values, 0.99), 2),
         "max": round(sorted_values[-1], 2),
     }
 

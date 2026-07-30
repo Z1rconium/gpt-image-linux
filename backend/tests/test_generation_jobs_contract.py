@@ -309,7 +309,7 @@ def test_job_stage_timings_and_optional_metrics(client):
     assert job["status"] == "success"
     assert job["stage_timings"]["upstream_wait"] == 1.25
     assert job["stage_timings"]["download_decode"] == 2.5
-    assert job["stage_timings"]["validate"] == 0.75
+    assert job["stage_timings"]["validate"] >= 0.75
     assert "db_insert" in job["stage_timings"]
 
     metrics_resp = client.get("/api/metrics")
@@ -337,14 +337,22 @@ def test_job_stage_timings_and_optional_metrics(client):
     assert "gpt_image_panel_image_jobs_generation_failure_ratio" in prometheus_resp.text
 
 
-def test_metrics_snapshot_reads_sqlite_runtime_once(monkeypatch):
-    calls = 0
-    recorded: list[tuple[str, dict]] = []
-
-    def fake_runtime():
-        nonlocal calls
-        calls += 1
-        return {
+def test_metrics_snapshot_uses_cached_runtime_without_writes(monkeypatch):
+    monkeypatch.setattr(
+        metrics_router,
+        "snapshot_queue_metrics",
+        lambda: {"image_jobs.active": 0},
+    )
+    monkeypatch.setattr(
+        metrics_router.app.state,
+        "worker_id",
+        "local-worker",
+        raising=False,
+    )
+    monkeypatch.setattr(
+        metrics_router.app.state,
+        "runtime_coordination_metrics",
+        {
             "gauges": {"sse.active_connections": 3},
             "background_leases": [{"name": "lease"}],
             "workers": [
@@ -361,37 +369,15 @@ def test_metrics_snapshot_reads_sqlite_runtime_once(monkeypatch):
                     "snapshot": {"stale": True},
                 },
             ],
-        }
-
-    monkeypatch.setattr(
-        metrics_router,
-        "get_runtime_coordination_metrics",
-        fake_runtime,
-    )
-    monkeypatch.setattr(
-        metrics_router,
-        "snapshot_queue_metrics",
-        lambda: {"image_jobs.active": 0},
-    )
-    monkeypatch.setattr(
-        metrics_router,
-        "record_worker_metrics_snapshot",
-        lambda worker_id, payload: recorded.append((worker_id, payload)),
-    )
-    monkeypatch.setattr(
-        metrics_router.app.state,
-        "worker_id",
-        "local-worker",
+        },
         raising=False,
     )
 
     snapshot = metrics_router._metrics_snapshot()
 
-    assert calls == 1
-    assert recorded and recorded[0][0] == "local-worker"
     assert snapshot["gauges"]["sse.active_connections"] == 3
     assert snapshot["workers"][0]["worker_id"] == "local-worker"
-    assert snapshot["workers"][0]["snapshot"] == recorded[0][1]
+    assert snapshot["workers"][0]["snapshot"]["gauges"]["image_jobs.active"] == 0
     assert [worker["worker_id"] for worker in snapshot["workers"]] == [
         "local-worker",
         "peer-worker",

@@ -15,8 +15,16 @@ def _attach_gallery_thumbnail_url(entry: dict[str, Any]) -> dict[str, Any]:
 
 
 def _prepare_gallery_file(image_bytes: bytes, filename: str) -> _PreparedGalleryFile:
-    image_temp_path = _save_image_temp_unlocked(image_bytes, filename)
-    return _PreparedGalleryFile(filename=filename, image_temp_path=image_temp_path)
+    image_temp_path, image_format, width, height = (
+        _save_image_temp_with_metadata_unlocked(image_bytes, filename)
+    )
+    return _PreparedGalleryFile(
+        filename=filename,
+        image_temp_path=image_temp_path,
+        image_format=image_format,
+        image_width=width,
+        image_height=height,
+    )
 
 
 def _cleanup_prepared_gallery_files(prepared_files: Iterable[_PreparedGalleryFile]):
@@ -473,4 +481,3 @@ def _set_thumbnail_filename_for_image(filename: str, thumbnail_filename: str):
 
 
 __all__ = [name for name in globals() if not name.startswith("__")]
-

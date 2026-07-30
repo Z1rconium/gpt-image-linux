@@ -24,6 +24,7 @@ _PROBE_TIMEOUT = aiohttp.ClientTimeout(
 TIMEOUT_UPSTREAM = "upstream"
 TIMEOUT_PROBE = "probe"
 TIMEOUT_PROMPT_OPTIMIZER = "prompt_optimizer"
+TIMEOUT_VERSION_CHECK = "version_check"
 
 _TIMEOUTS = {
     TIMEOUT_UPSTREAM: _UPSTREAM_TIMEOUT,
@@ -45,6 +46,9 @@ def _prompt_optimizer_timeout() -> aiohttp.ClientTimeout:
 def _timeout_for_kind(timeout_kind: str) -> aiohttp.ClientTimeout:
     if timeout_kind == TIMEOUT_PROMPT_OPTIMIZER:
         return _prompt_optimizer_timeout()
+    if timeout_kind == TIMEOUT_VERSION_CHECK:
+        total = max(float(config.VERSION_CHECK_TIMEOUT_SECONDS or 3), 0.1)
+        return aiohttp.ClientTimeout(total=total, connect=total, sock_connect=total)
     return _TIMEOUTS.get(timeout_kind, _UPSTREAM_TIMEOUT)
 
 

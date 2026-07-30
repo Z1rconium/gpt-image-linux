@@ -3,6 +3,7 @@
 from ..db import *
 from ..thumbnail_jobs import *
 from .queries import *
+from ...services.blocking import run_db_operation, run_image_operation
 
 
 def _insert_gallery_entries_on_conn(
@@ -192,19 +193,50 @@ async def add_to_gallery_async(
     filename: str,
     metadata: dict[str, Any] | None = None,
 ) -> GalleryEntry:
-    entry = _build_gallery_entry(
-        image_id=image_id,
-        prompt=prompt,
-        size=size,
-        filename=filename,
-        metadata=metadata,
-        image_bytes=image_bytes,
+    def prepare() -> tuple[_PreparedGalleryFile, dict[str, Any]]:
+        with observe_job_stage("validate"):
+            prepared = _prepare_gallery_file(image_bytes, filename)
+        entry = _build_gallery_entry(
+            image_id=image_id,
+            prompt=prompt,
+            size=size,
+            filename=filename,
+            metadata=metadata,
+            image_bytes=None,
+        )
+        entry["bytes"] = len(image_bytes)
+        entry["sha256"] = hashlib.sha256(image_bytes).hexdigest()
+        if prepared.image_width and prepared.image_height:
+            entry["image_width"] = prepared.image_width
+            entry["image_height"] = prepared.image_height
+        if prepared.image_format:
+            entry["output_format"] = prepared.image_format
+        return prepared, entry
+
+    prepared, entry = await run_image_operation(
+        prepare,
+        metric_name="prepare_gallery_image",
     )
-    await asyncio.to_thread(
-        _save_images_and_insert_gallery_entries,
-        [(image_bytes, filename)],
-        [entry],
-    )
+
+    def commit() -> None:
+        _ensure_database()
+        with _gallery_file_write_lock:
+            with _storage_lock:
+                with _connect() as conn:
+                    with _transaction(conn):
+                        _promote_prepared_images([prepared])
+                        with observe_job_stage("db_insert"):
+                            _insert_gallery_entries_on_conn(conn, [entry])
+
+    try:
+        await run_db_operation(commit, metric_name="insert_gallery_image")
+    except BaseException:
+        await run_image_operation(
+            _cleanup_prepared_gallery_files,
+            [prepared],
+            metric_name="cleanup_gallery_image",
+        )
+        raise
     return GalleryEntry(**_attach_gallery_thumbnail_url(entry))
 
 

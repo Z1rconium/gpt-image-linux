@@ -1,6 +1,7 @@
 from urllib.parse import urlsplit
 import re
 import logging
+import time
 import uuid
 
 from fastapi import HTTPException, Request, Response
@@ -14,6 +15,7 @@ from .csp import CONTENT_SECURITY_POLICY
 from ..core.redaction import redact_sensitive_text
 from ..core import security as auth
 from ..core import settings as config
+from ..core.observability import metrics
 
 
 logger = logging.getLogger(__name__)
@@ -442,6 +444,7 @@ def csrf_origin_allowed(request: Request) -> bool:
 def register_middleware(app):
     @app.middleware("http")
     async def access_control_middleware(request: Request, call_next):
+        request_started_at = time.perf_counter()
         correlation_id = _correlation_id(request)
         host_allowed, host_detail = request_host_allowed(request)
         if not host_allowed:
@@ -510,7 +513,11 @@ def register_middleware(app):
                     "Admin re-authentication required",
                 )
 
-        response = await call_next(request)
+        try:
+            response = await call_next(request)
+        finally:
+            elapsed_ms = (time.perf_counter() - request_started_at) * 1000
+            metrics.observe_ms("http.request", elapsed_ms)
 
         if request.url.path.startswith("/api/") or response.status_code >= 400:
             response.headers["Cache-Control"] = "private, no-store"

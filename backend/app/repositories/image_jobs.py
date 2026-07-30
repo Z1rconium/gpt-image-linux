@@ -154,6 +154,33 @@ def get_pending_edit_source_bytes() -> int:
     return int(row[0] or 0) if row else 0
 
 
+def get_image_queue_runtime_metrics() -> dict[str, int]:
+    """Read queue counts and edit-source reservations on one connection."""
+    _ensure_database()
+    with _connect() as conn:
+        unit_row = conn.execute(
+            """
+            SELECT
+                COALESCE(SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END), 0)
+                    AS running_count,
+                COALESCE(SUM(CASE WHEN status = 'queued' THEN 1 ELSE 0 END), 0)
+                    AS queued_count
+            FROM image_job_units
+            WHERE status IN ('queued', 'running')
+            """
+        ).fetchone()
+        edit_row = conn.execute(
+            "SELECT COALESCE(SUM(byte_count), 0) AS byte_count FROM edit_source_reservations"
+        ).fetchone()
+    return {
+        "running": int(unit_row["running_count"] or 0) if unit_row else 0,
+        "queued": int(unit_row["queued_count"] or 0) if unit_row else 0,
+        "pending_edit_source_bytes": int(edit_row["byte_count"] or 0)
+        if edit_row
+        else 0,
+    }
+
+
 def release_edit_source_reservation(job_id: str) -> int:
     _ensure_database()
     with _connect() as conn:
@@ -624,6 +651,15 @@ def aggregate_image_job_units(parent_job_id: str) -> dict[str, Any]:
     }
 
 
+def get_generate_job_with_unit_aggregate(
+    parent_job_id: str,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """Read parent and unit state on one executor connection."""
+    _ensure_database()
+    with _connect():
+        return get_generate_job(parent_job_id), aggregate_image_job_units(parent_job_id)
+
+
 def _get_generate_job_rows_on_conn(
     conn: sqlite3.Connection,
     *,
@@ -820,4 +856,3 @@ def trim_generate_jobs(max_jobs: int):
 
 
 __all__ = [name for name in globals() if not name.startswith("_")]
-

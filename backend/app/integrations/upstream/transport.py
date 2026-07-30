@@ -3,7 +3,9 @@ import asyncio
 import base64
 import json
 import logging
+import os
 import re
+import tempfile
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, Protocol
@@ -26,6 +28,7 @@ from ...repositories.image_files import (
 )
 from ...schemas.gallery import GalleryEntry
 from ...schemas.generation import EditRequest, GenerateRequest
+from ...services.blocking import run_file_operation, run_image_operation
 from ..session_pool import TIMEOUT_PROBE, TIMEOUT_UPSTREAM, get_pool
 
 ProgressCallback = Callable[[str, str], None]
@@ -115,6 +118,82 @@ async def read_limited_text_response(
         raise UpstreamApiError(f"{label} is not valid {encoding} text") from e
 
 
+async def spool_limited_response(
+    response: aiohttp.ClientResponse,
+    max_bytes: int,
+    *,
+    label: str,
+) -> tuple[Path, str, str]:
+    content_length = response.headers.get("Content-Length")
+    if content_length:
+        try:
+            if int(content_length) > max_bytes:
+                raise UpstreamApiError(
+                    f"{label} too large: {content_length} bytes (max {max_bytes})"
+                )
+        except ValueError:
+            pass
+
+    fd, temp_name = tempfile.mkstemp(prefix="upstream-json-", suffix=".tmp")
+    path = Path(temp_name)
+    total = 0
+    preview = bytearray()
+    try:
+        with os.fdopen(fd, "wb") as output:
+            content = getattr(response, "content", None)
+            if content is None or not hasattr(content, "iter_chunked"):
+                response_text = await response.text()
+                chunks = (response_text.encode(get_response_charset(response)),)
+            else:
+                chunks = content.iter_chunked(UPSTREAM_RESPONSE_CHUNK_SIZE)
+
+            async def iter_chunks():
+                if hasattr(chunks, "__aiter__"):
+                    async for item in chunks:
+                        yield item
+                else:
+                    for item in chunks:
+                        yield item
+
+            async for chunk in iter_chunks():
+                total += len(chunk)
+                if total > max_bytes:
+                    raise UpstreamApiError(
+                        f"{label} too large: {total} bytes (max {max_bytes})"
+                    )
+                if len(preview) < 2048:
+                    preview.extend(chunk[: 2048 - len(preview)])
+                await run_file_operation(
+                    output.write,
+                    chunk,
+                    metric_name="spool_upstream_response",
+                )
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+
+    encoding = get_response_charset(response)
+    try:
+        preview_text = bytes(preview).decode(encoding)
+    except (LookupError, UnicodeDecodeError) as e:
+        path.unlink(missing_ok=True)
+        raise UpstreamApiError(f"{label} is not valid {encoding} text") from e
+    return path, preview_text, encoding
+
+
+def _load_json_file(path: Path, encoding: str) -> Any:
+    try:
+        with path.open("r", encoding=encoding) as stream:
+            return json.load(stream)
+    except (LookupError, UnicodeDecodeError) as e:
+        raise UpstreamApiError(f"Upstream response is not valid {encoding} text") from e
+
+
+def _read_response_file(path: Path, encoding: str, max_chars: int | None = None) -> str:
+    with path.open("r", encoding=encoding) as stream:
+        return stream.read(max_chars) if max_chars is not None else stream.read()
+
+
 async def download_image_url(
     session: aiohttp.ClientSession,
     image_url: str,
@@ -161,7 +240,11 @@ async def extract_image_bytes(
                 f"Image too large: base64 payload is {len(b64_json)} chars "
                 f"(max {max_b64_chars})"
             )
-        return base64.b64decode(b64_json)
+        return await run_image_operation(
+            base64.b64decode,
+            b64_json,
+            metric_name="decode_upstream_base64",
+        )
 
     if "url" in image_data and image_data["url"]:
         return await download_image_url(download_session, image_data["url"])
@@ -292,38 +375,49 @@ async def parse_upstream_json_response(
 ) -> tuple[dict[str, Any], str]:
     status = resp.status
     max_response_bytes = config.MAX_UPSTREAM_JSON_MB * 1024 * 1024
-    response_text = await read_limited_text_response(
+    response_path, response_preview, encoding = await spool_limited_response(
         resp,
         max_response_bytes,
         label="Upstream JSON response",
     )
-    if progress:
-        progress("received_api_response", "Received upstream API response")
-
-    content_type = resp.headers.get("Content-Type", "")
-    is_json_response = is_json_content_type(content_type) or looks_like_json_body(
-        response_text
-    )
-
-    if status >= 400:
-        raise_upstream_error(status, response_text, is_json_response, api_path)
-
-    if not is_json_response:
-        raise UpstreamApiError(
-            f"Upstream returned non-JSON content-type ({status}): {response_text[:200]}"
-        )
-
-    if progress:
-        progress("parsing_json_response", "Parsing JSON response")
     try:
-        result = json.loads(response_text)
-    except json.JSONDecodeError:
-        raise UpstreamApiError(
-            f"Upstream returned non-JSON ({status}): {response_text[:200]}"
+        if progress:
+            progress("received_api_response", "Received upstream API response")
+        content_type = resp.headers.get("Content-Type", "")
+        is_json_response = is_json_content_type(content_type) or looks_like_json_body(
+            response_preview
         )
-    if not isinstance(result, dict):
-        raise UpstreamApiError("Upstream JSON response must be an object")
-    return result, response_text
+        if status >= 400:
+            error_text = await run_file_operation(
+                _read_response_file,
+                response_path,
+                encoding,
+                65536,
+                metric_name="read_upstream_error",
+            )
+            raise_upstream_error(status, error_text, is_json_response, api_path)
+        if not is_json_response:
+            raise UpstreamApiError(
+                f"Upstream returned non-JSON content-type ({status}): {response_preview[:200]}"
+            )
+        if progress:
+            progress("parsing_json_response", "Parsing JSON response")
+        try:
+            result = await run_file_operation(
+                _load_json_file,
+                response_path,
+                encoding,
+                metric_name="parse_upstream_json",
+            )
+        except json.JSONDecodeError as e:
+            raise UpstreamApiError(
+                f"Upstream returned non-JSON ({status}): {response_preview[:200]}"
+            ) from e
+        if not isinstance(result, dict):
+            raise UpstreamApiError("Upstream JSON response must be an object")
+        return result, response_preview
+    finally:
+        response_path.unlink(missing_ok=True)
 
 
 async def parse_upstream_chat_completion_response(
@@ -333,52 +427,71 @@ async def parse_upstream_chat_completion_response(
 ) -> tuple[dict[str, Any], str]:
     status = resp.status
     max_response_bytes = config.MAX_UPSTREAM_JSON_MB * 1024 * 1024
-    response_text = await read_limited_text_response(
+    response_path, response_preview, encoding = await spool_limited_response(
         resp,
         max_response_bytes,
         label="Upstream chat response",
     )
-    if progress:
-        progress("received_api_response", "Received upstream API response")
-
-    content_type = resp.headers.get("Content-Type", "")
-    is_json_response = is_json_content_type(content_type) or looks_like_json_body(
-        response_text
-    )
-    is_sse_response = "text/event-stream" in content_type or response_text.lstrip().startswith(
-        "data:"
-    )
-
-    if status >= 400:
-        raise_upstream_error(status, response_text, is_json_response, api_path)
-
-    if progress:
-        progress("parsing_json_response", "Parsing upstream response")
-
-    if is_json_response:
-        try:
-            result = json.loads(response_text)
+    try:
+        if progress:
+            progress("received_api_response", "Received upstream API response")
+        content_type = resp.headers.get("Content-Type", "")
+        is_json_response = is_json_content_type(content_type) or looks_like_json_body(
+            response_preview
+        )
+        is_sse_response = (
+            "text/event-stream" in content_type
+            or response_preview.lstrip().startswith("data:")
+        )
+        if status >= 400:
+            error_text = await run_file_operation(
+                _read_response_file,
+                response_path,
+                encoding,
+                65536,
+                metric_name="read_upstream_chat_error",
+            )
+            raise_upstream_error(status, error_text, is_json_response, api_path)
+        if progress:
+            progress("parsing_json_response", "Parsing upstream response")
+        if is_json_response:
+            try:
+                result = await run_file_operation(
+                    _load_json_file,
+                    response_path,
+                    encoding,
+                    metric_name="parse_upstream_chat_json",
+                )
+            except json.JSONDecodeError as e:
+                raise UpstreamApiError(
+                    f"Upstream returned non-JSON ({status}): {response_preview[:200]}"
+                ) from e
             if not isinstance(result, dict):
                 raise UpstreamApiError("Upstream chat response must be an object")
-            return result, response_text
-        except json.JSONDecodeError as e:
-            raise UpstreamApiError(
-                f"Upstream returned non-JSON ({status}): {response_text[:200]}"
-            ) from e
-
-    if is_sse_response:
-        events = parse_sse_events(response_text)
-        if not events:
-            raise UpstreamApiError(
-                f"No SSE chat completion events in upstream response: {response_text[:200]}"
+            return result, response_preview
+        if is_sse_response:
+            response_text = await run_file_operation(
+                _read_response_file,
+                response_path,
+                encoding,
+                metric_name="read_upstream_chat_sse",
             )
-        return {"_sse_events": events}, response_text
-
-    raise UpstreamApiError(
-        f"Upstream returned unsupported content-type ({status}): {response_text[:200]}"
-    )
+            events = await run_file_operation(
+                parse_sse_events,
+                response_text,
+                metric_name="parse_upstream_chat_sse",
+            )
+            if not events:
+                raise UpstreamApiError(
+                    "No SSE chat completion events in upstream response: "
+                    f"{response_preview[:200]}"
+                )
+            return {"_sse_events": events}, response_preview
+        raise UpstreamApiError(
+            f"Upstream returned unsupported content-type ({status}): {response_preview[:200]}"
+        )
+    finally:
+        response_path.unlink(missing_ok=True)
 
 
 __all__ = [name for name in globals() if not name.startswith("__")]
-
-

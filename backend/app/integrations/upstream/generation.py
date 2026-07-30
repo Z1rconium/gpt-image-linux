@@ -22,14 +22,23 @@ from ...repositories.gallery.mutations import add_to_gallery_async
 from ...repositories.image_files import (
     detect_image_format,
     generate_image_id,
-    validate_image_bytes,
+    validate_image_header_bytes,
 )
+from ...services.blocking import run_image_operation, upstream_memory_lease
 from ...schemas.gallery import GalleryEntry
 from ...schemas.generation import EditRequest, GenerateRequest
 from ..session_pool import TIMEOUT_PROBE, TIMEOUT_UPSTREAM, get_pool
 
 ProgressCallback = Callable[[str, str], None]
 logger = logging.getLogger(__name__)
+
+
+def upstream_task_memory_weight(response_format: str | None) -> int:
+    image_bytes = config.MAX_UPSTREAM_IMAGE_BYTES_PER_TASK_MB * 1024 * 1024
+    if response_format == "url":
+        return image_bytes + 1024 * 1024
+    response_bytes = config.MAX_UPSTREAM_JSON_MB * 1024 * 1024
+    return response_bytes + image_bytes
 
 
 from .errors import *
@@ -49,9 +58,12 @@ async def save_gallery_entries_from_upstream_data(
 ) -> list[GalleryEntry]:
     data = validate_upstream_image_data(data, payload.n)
     max_bytes = config.MAX_FILE_SIZE_MB * 1024 * 1024
+    max_task_bytes = config.MAX_UPSTREAM_IMAGE_BYTES_PER_TASK_MB * 1024 * 1024
+    decoded_task_bytes = 0
     total = len(data)
 
     async def process_one(image_index: int, image_data: dict) -> GalleryEntry:
+        nonlocal decoded_task_bytes
         transfer_stage, transfer_message = get_image_transfer_stage(image_data)
         if progress:
             progress(
@@ -76,6 +88,12 @@ async def save_gallery_entries_from_upstream_data(
                     raise UpstreamImageDownloadError(
                         f"Image too large: {len(image_bytes)} bytes (max {max_bytes})"
                     )
+                decoded_task_bytes += len(image_bytes)
+                if decoded_task_bytes > max_task_bytes:
+                    raise UpstreamImageDownloadError(
+                        "Decoded images exceed per-task byte budget: "
+                        f"{decoded_task_bytes} bytes (max {max_task_bytes})"
+                    )
 
                 detected_format = detect_image_format(image_bytes)
                 detected_extension = DETECTED_FORMAT_EXTENSIONS.get(
@@ -84,7 +102,7 @@ async def save_gallery_entries_from_upstream_data(
                 )
                 image_id = generate_image_id()
                 filename = f"{image_id}.{detected_extension}"
-                validate_generated_image_bytes(image_bytes, filename)
+                validate_image_header_bytes(image_bytes, filename=filename)
             entry_metadata = {**gallery_metadata}
             if detected_format:
                 entry_metadata["output_format"] = detected_format
@@ -106,8 +124,10 @@ async def save_gallery_entries_from_upstream_data(
         finally:
             del image_bytes
 
-    if total <= 1:
+    if total <= 1 or any(item.get("b64_json") for item in data):
         entries = [await process_one(0, data[0])]
+        for image_index, image_data in enumerate(data[1:], start=1):
+            entries.append(await process_one(image_index, image_data))
     else:
         sem = asyncio.Semaphore(DOWNLOAD_CONCURRENCY)
 
@@ -167,62 +187,75 @@ async def call_image_generation_api(
 
     if progress:
         progress("waiting_for_api", "Waiting for upstream API response")
-    with observe_job_stage("upstream_wait"):
-        async with upstream_session.post(
-            upstream_url,
-            json=request_data,
-            headers=headers,
-            allow_redirects=False,
-        ) as resp:
-            if not socks5_proxy:
-                ssrf.validate_response_peer_ip(resp, "Upstream API")
-            if api_path == CHAT_COMPLETIONS_API_PATH:
-                result, response_text = await parse_upstream_chat_completion_response(
-                    resp, api_path, progress
-                )
-            else:
-                result, response_text = await parse_upstream_json_response(
-                    resp, api_path, progress
-                )
-
-    if api_path == RESPONSES_API_PATH:
-        if progress:
-            progress(
-                "extracting_response_image_output",
-                "Extracting image_generation_call output",
-            )
-        data = extract_response_image_results(result)
-    elif api_path == CHAT_COMPLETIONS_API_PATH:
-        if progress:
-            progress(
-                "extracting_chat_completion_image_output",
-                "Extracting Chat Completions image output",
-            )
-        data = extract_chat_completion_image_results(result)
-    else:
-        if progress:
-            progress("extracting_generation_data", "Extracting image data array")
-        data = result.get("data", [])
-    data = validate_upstream_image_data(data, payload.n)
-    if not data:
-        text_preview = response_text[:200] if isinstance(response_text, str) else str(response_text)[:200]
-        raise UpstreamApiError(f"No image data in upstream response: {text_preview}")
-
-    response_preview = response_text[:200]
-    del response_text
-    del result
-    entries = await save_gallery_entries_from_upstream_data(
-        download_session=download_session,
-        data=data,
-        response_preview=response_preview,
-        payload=payload,
-        format_extension=format_info["extension"],
-        gallery_metadata=gallery_metadata,
-        save_message="Saving generated images",
-        progress=progress,
+    response_format = (
+        None
+        if api_path in {RESPONSES_API_PATH, CHAT_COMPLETIONS_API_PATH}
+        else payload.response_format
     )
+    memory_lease = upstream_memory_lease(
+        upstream_task_memory_weight(response_format)
+    )
+    await memory_lease.__aenter__()
+    try:
+        with observe_job_stage("upstream_wait"):
+            async with upstream_session.post(
+                upstream_url,
+                json=request_data,
+                headers=headers,
+                allow_redirects=False,
+            ) as resp:
+                if not socks5_proxy:
+                    ssrf.validate_response_peer_ip(resp, "Upstream API")
+                if api_path == CHAT_COMPLETIONS_API_PATH:
+                    result, response_text = (
+                        await parse_upstream_chat_completion_response(
+                            resp, api_path, progress
+                        )
+                    )
+                else:
+                    result, response_text = await parse_upstream_json_response(
+                        resp, api_path, progress
+                    )
 
-    return entries
+        if api_path == RESPONSES_API_PATH:
+            if progress:
+                progress(
+                    "extracting_response_image_output",
+                    "Extracting image_generation_call output",
+                )
+            data = extract_response_image_results(result)
+        elif api_path == CHAT_COMPLETIONS_API_PATH:
+            if progress:
+                progress(
+                    "extracting_chat_completion_image_output",
+                    "Extracting Chat Completions image output",
+                )
+            data = extract_chat_completion_image_results(result)
+        else:
+            if progress:
+                progress("extracting_generation_data", "Extracting image data array")
+            data = result.get("data", [])
+        data = validate_upstream_image_data(data, payload.n)
+        if not data:
+            raise UpstreamApiError(
+                f"No image data in upstream response: {response_text[:200]}"
+            )
+
+        response_preview = response_text[:200]
+        del response_text
+        del result
+        return await save_gallery_entries_from_upstream_data(
+            download_session=download_session,
+            data=data,
+            response_preview=response_preview,
+            payload=payload,
+            format_extension=format_info["extension"],
+            gallery_metadata=gallery_metadata,
+            save_message="Saving generated images",
+            progress=progress,
+        )
+    finally:
+        await memory_lease.__aexit__(None, None, None)
 
 
 async def call_image_generation_preview_api(
@@ -246,35 +279,50 @@ async def call_image_generation_preview_api(
 
     pool = get_pool()
     upstream_session = pool.get(timeout_kind=TIMEOUT_UPSTREAM, socks5_proxy=socks5_proxy)
-    async with upstream_session.post(
-        upstream_url,
-        json=_build_image_params(payload),
-        headers=headers,
-        allow_redirects=False,
-    ) as resp:
-        if not socks5_proxy:
-            ssrf.validate_response_peer_ip(resp, "Upstream API")
-        result, response_text = await parse_upstream_json_response(resp, api_path, None)
-
-    data = validate_upstream_image_data(result.get("data", []), 1)
-    if not data:
-        raise UpstreamApiError(f"No image data in upstream response: {response_text[:200]}")
-
-    image_bytes = await extract_image_bytes(
-        pool.get(timeout_kind=TIMEOUT_UPSTREAM),
-        data[0],
-        response_text[:200],
-        config.MAX_FILE_SIZE_MB * 1024 * 1024,
+    memory_lease = upstream_memory_lease(
+        upstream_task_memory_weight(payload.response_format)
     )
-    if len(image_bytes) > config.MAX_FILE_SIZE_MB * 1024 * 1024:
-        raise UpstreamImageDownloadError(
-            f"Image too large: {len(image_bytes)} bytes "
-            f"(max {config.MAX_FILE_SIZE_MB * 1024 * 1024})"
+    await memory_lease.__aenter__()
+    try:
+        async with upstream_session.post(
+            upstream_url,
+            json=_build_image_params(payload),
+            headers=headers,
+            allow_redirects=False,
+        ) as resp:
+            if not socks5_proxy:
+                ssrf.validate_response_peer_ip(resp, "Upstream API")
+            result, response_text = await parse_upstream_json_response(
+                resp, api_path, None
+            )
+
+        data = validate_upstream_image_data(result.get("data", []), 1)
+        if not data:
+            raise UpstreamApiError(
+                f"No image data in upstream response: {response_text[:200]}"
+            )
+        image_bytes = await extract_image_bytes(
+            pool.get(timeout_kind=TIMEOUT_UPSTREAM),
+            data[0],
+            response_text[:200],
+            config.MAX_FILE_SIZE_MB * 1024 * 1024,
         )
-    detected_format = detect_image_format(image_bytes) or payload.output_format
-    extension = DETECTED_FORMAT_EXTENSIONS.get(detected_format, "png")
-    validate_generated_image_bytes(image_bytes, f"assistant-preview.{extension}")
-    return image_bytes
+        if len(image_bytes) > config.MAX_FILE_SIZE_MB * 1024 * 1024:
+            raise UpstreamImageDownloadError(
+                f"Image too large: {len(image_bytes)} bytes "
+                f"(max {config.MAX_FILE_SIZE_MB * 1024 * 1024})"
+            )
+        detected_format = detect_image_format(image_bytes) or payload.output_format
+        extension = DETECTED_FORMAT_EXTENSIONS.get(detected_format, "png")
+        await run_image_operation(
+            validate_generated_image_bytes,
+            image_bytes,
+            f"assistant-preview.{extension}",
+            metric_name="validate_assistant_preview",
+        )
+        return image_bytes
+    finally:
+        await memory_lease.__aexit__(None, None, None)
 
 
 async def call_image_edit_api(
@@ -305,6 +353,7 @@ async def call_image_edit_api(
     if progress:
         progress("building_edit_form", "Building multipart edit request")
     image_files = []
+    memory_lease = None
     try:
         form = aiohttp.FormData()
         image_field_name = "image" if len(image_sources) == 1 else "image[]"
@@ -322,6 +371,10 @@ async def call_image_edit_api(
 
         pool = get_pool()
         upstream_session = pool.get(timeout_kind=TIMEOUT_UPSTREAM, socks5_proxy=socks5_proxy)
+        memory_lease = upstream_memory_lease(
+            upstream_task_memory_weight(payload.response_format)
+        )
+        await memory_lease.__aenter__()
         if progress:
             upload_message = (
                 "Uploading source image and edit parameters"
@@ -363,5 +416,7 @@ async def call_image_edit_api(
             progress=progress,
         )
     finally:
+        if memory_lease is not None:
+            await memory_lease.__aexit__(None, None, None)
         for image_file in image_files:
             image_file.close()

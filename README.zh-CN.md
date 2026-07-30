@@ -168,6 +168,12 @@ ALLOW_UNAUTHENTICATED=true .venv/bin/granian --interface asgi backend.app.main:a
 | `DEFAULT_RESPONSES_MODEL` | `/v1/responses` 在请求/预设未提供模型时使用的 fallback 模型。 |
 | `AIOHTTP_CONNECTION_LIMIT` / `AIOHTTP_CONNECTION_LIMIT_PER_HOST` | 上游请求、探测、下载共用的 aiohttp connector 限制。 |
 | `APP_VERSION` / `GITHUB_REPO` / `ENABLE_VERSION_CHECK` | UI/API 版本显示和 latest release 检查。 |
+| `VERSION_CHECK_CACHE_SECONDS` | 每个进程成功版本检查的缓存时间。 |
+| `MAX_UPSTREAM_IMAGE_BYTES_PER_TASK_MB` / `UPSTREAM_MEMORY_BUDGET_MB` | 单任务解码图片上限和进程内上游内存加权准入预算。 |
+| `DB_EXECUTOR_WORKERS` / `SQLITE_BUSY_*` | SQLite 专用执行器大小，以及短超时和抖动重试参数。 |
+| `IMAGE_CPU_CONCURRENCY` / `FILE_IO_CONCURRENCY` | 每个进程完整图片解码和阻塞文件 I/O 的有界并发数。 |
+| `IMAGE_JOB_PROGRESS_PERSIST_INTERVAL_SECONDS` | 合并 image unit 进度写入的最小间隔。 |
+| `RUNTIME_METRICS_REFRESH_SECONDS` / `EVENT_LOOP_LAG_SAMPLE_SECONDS` | 后台协调快照和事件循环延迟采样间隔。 |
 | `MAX_ACTIVE_GENERATE_JOBS` | 全局运行中的生成/编辑 image unit 上限。 |
 | `MAX_QUEUED_GENERATE_JOBS` | 队列容量，超过后新任务返回 `429`。 |
 | `MAX_PENDING_EDIT_SOURCE_MB` | 全局待处理编辑源图片字节预留上限。 |
