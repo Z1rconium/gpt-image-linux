@@ -50,8 +50,6 @@ const en = {
     jobs: 'Jobs',
     jobHistory: 'Job History',
     settingsShort: 'Set',
-    themeToggleToDark: 'Switch to dark mode',
-    themeToggleToLight: 'Switch to light mode',
     newVersion: 'New',
     versionTitle: (version: string) => `Current ${version}`,
     versionUpdateTitle: (version: string, latestVersion: string) => `Current ${version}. Latest v${latestVersion}.`

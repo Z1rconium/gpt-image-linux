@@ -1,6 +1,5 @@
 <script lang="ts">
   import { language, t, toggleLanguage } from '$lib/i18n';
-  import { themeStore } from '$lib/stores/theme';
 
   export let activeJobsCount = 0;
   export let version = '';
@@ -24,7 +23,6 @@
     ? $t.header.versionUpdateTitle(version, latestVersion)
     : $t.header.versionTitle(version);
   $: safeReleaseUrl = releaseUrl?.startsWith('https://github.com/') ? releaseUrl : null;
-  $: themeToggleTitle = $themeStore === 'dark' ? $t.header.themeToggleToLight : $t.header.themeToggleToDark;
 </script>
 
 <header class="app-header sticky top-0 z-40 border-b border-stone-200/80 bg-stone-50/88 backdrop-blur-sm dark:border-zinc-800 dark:bg-zinc-950/80">
@@ -68,25 +66,6 @@
     </div>
 
     <div class="flex w-full flex-wrap items-center justify-end gap-2 sm:w-auto sm:flex-none">
-      <button
-        type="button"
-        class="mobile-touch-target control-focus inline-flex h-10 min-w-10 items-center justify-center rounded-lg border border-stone-300 px-2 text-stone-500 transition-colors hover:bg-stone-100 hover:text-stone-950 dark:border-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
-        title={themeToggleTitle}
-        aria-label={themeToggleTitle}
-        aria-pressed={$themeStore === 'dark'}
-        on:click={() => themeStore.toggle()}
-      >
-        {#if $themeStore === 'dark'}
-          <svg viewBox="0 0 24 24" class="h-4 w-4 fill-none stroke-current stroke-[1.8]">
-            <circle cx="12" cy="12" r="4.5"></circle>
-            <path d="M12 2.5v2.5M12 19v2.5M4.93 4.93l1.77 1.77M17.3 17.3l1.77 1.77M2.5 12H5m14 0h2.5M4.93 19.07l1.77-1.77M17.3 6.7l1.77-1.77"></path>
-          </svg>
-        {:else}
-          <svg viewBox="0 0 24 24" class="h-4 w-4 fill-none stroke-current stroke-[1.8]">
-            <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"></path>
-          </svg>
-        {/if}
-      </button>
       <button
         type="button"
         class="mobile-touch-target control-focus inline-flex h-10 min-w-10 items-center justify-center rounded-lg border border-emerald-500/35 px-2 text-emerald-700 transition-colors hover:bg-emerald-500/10 dark:text-emerald-200"

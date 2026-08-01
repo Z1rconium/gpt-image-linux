@@ -24,28 +24,30 @@ test('access gate unlocks before loading the app', async ({ page }) => {
   await expect(page.getByRole('textbox', { name: 'Prompt', exact: true })).toBeVisible();
 });
 
-test('theme follows system preference, toggles, and persists after reload', async ({ page }) => {
+test('theme ignores legacy overrides and follows system preference changes in real time', async ({ page }) => {
   await page.emulateMedia({ colorScheme: 'dark' });
   await loadApp(page);
 
   const root = page.locator('html');
-  const themeButton = page.getByRole('button', { name: 'Switch to light mode' });
 
   await expect(root).toHaveAttribute('data-theme', 'dark');
   await expect(root).toHaveClass(/dark/);
-  await expect(themeButton).toBeVisible();
 
-  await themeButton.click();
-  await expect(root).toHaveAttribute('data-theme', 'light');
-  await expect(root).not.toHaveClass(/dark/);
-  await expect(page.getByRole('button', { name: 'Switch to dark mode' })).toBeVisible();
-  await expect.poll(() => page.evaluate(() => window.localStorage.getItem('gpt-image-panel-theme'))).toBe('light');
-
+  await page.evaluate(() => window.localStorage.setItem('gpt-image-panel-theme', 'light'));
   await page.reload();
   await expect(page.getByRole('heading', { name: 'Prompt', exact: true })).toBeVisible();
+  await expect(root).toHaveAttribute('data-theme', 'dark');
+  await expect(root).toHaveClass(/dark/);
+  await expect.poll(() => page.evaluate(() => window.localStorage.getItem('gpt-image-panel-theme'))).toBeNull();
+
+  await page.emulateMedia({ colorScheme: 'light' });
   await expect(root).toHaveAttribute('data-theme', 'light');
   await expect(root).not.toHaveClass(/dark/);
-  await expect(page.getByRole('button', { name: 'Switch to dark mode' })).toBeVisible();
+
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await expect(root).toHaveAttribute('data-theme', 'dark');
+  await expect(root).toHaveClass(/dark/);
+  await expect(page.locator('meta[name="theme-color"]')).toHaveAttribute('content', '#09090b');
 });
 
 test('image size dialog follows the light theme and preserves its dark palette', async ({ page }) => {
@@ -65,7 +67,7 @@ test('image size dialog follows the light theme and preserves its dark palette',
   await page.screenshot({ path: '/tmp/gpt-image-size-light-desktop.png' });
 
   await sizeDialog.getByRole('button', { name: 'Close' }).click();
-  await page.getByRole('button', { name: 'Switch to dark mode' }).click();
+  await page.emulateMedia({ colorScheme: 'dark' });
   await page.getByRole('button', { name: 'Size', exact: true }).click();
 
   await expect(sizeDialog).toHaveCSS('background-color', 'rgb(24, 24, 27)');
@@ -113,9 +115,7 @@ test('settings and prompt snippets follow the active theme while open and after 
   await expect(promptsSearch).toHaveCSS('color', 'rgb(28, 25, 23)');
   await expect.poll(() => page.evaluate(() => window.localStorage.getItem('gpt-image-panel-theme'))).toBeNull();
 
-  await page.getByRole('button', { name: 'Switch to dark mode' }).evaluate((button) =>
-    button.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
-  );
+  await page.emulateMedia({ colorScheme: 'dark' });
   await expect(root).toHaveAttribute('data-theme', 'dark');
   await expect(promptsDrawer).toHaveCSS('background-color', 'rgb(24, 24, 27)');
   await expect(promptsTitle).toHaveCSS('color', 'rgb(244, 244, 245)');
@@ -128,13 +128,11 @@ test('settings and prompt snippets follow the active theme while open and after 
   await expect(settingsDrawer).toHaveCSS('background-color', 'rgb(24, 24, 27)');
   await expect(settingsTitle).toHaveCSS('color', 'rgb(244, 244, 245)');
   await expect(settingsApiUrl).toHaveCSS('background-color', 'rgb(9, 9, 11)');
-  await page.getByRole('button', { name: 'Switch to light mode' }).evaluate((button) =>
-    button.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
-  );
+  await page.emulateMedia({ colorScheme: 'light' });
   await expect(root).toHaveAttribute('data-theme', 'light');
   await expect(settingsDrawer).toHaveCSS('background-color', 'rgb(255, 255, 255)');
   await expect(settingsApiUrl).toHaveCSS('background-color', 'rgb(250, 250, 249)');
-  await expect.poll(() => page.evaluate(() => window.localStorage.getItem('gpt-image-panel-theme'))).toBe('light');
+  await expect.poll(() => page.evaluate(() => window.localStorage.getItem('gpt-image-panel-theme'))).toBeNull();
   await settingsDrawer.getByRole('button', { name: 'Close settings' }).click();
 
   await promptsButton.click();

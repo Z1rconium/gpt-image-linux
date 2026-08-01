@@ -8,14 +8,7 @@
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <script>
       (() => {
-        const storageKey = 'gpt-image-panel-theme';
-        const stored = window.localStorage.getItem(storageKey);
-        const theme =
-          stored === 'light' || stored === 'dark'
-            ? stored
-            : window.matchMedia('(prefers-color-scheme: dark)').matches
-              ? 'dark'
-              : 'light';
+        const theme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
         const root = document.documentElement;
         root.classList.toggle('dark', theme === 'dark');
         root.dataset.theme = theme;

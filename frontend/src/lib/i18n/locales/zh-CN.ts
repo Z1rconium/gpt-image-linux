@@ -52,8 +52,6 @@ const zh: Translation = {
     jobs: '任务',
     jobHistory: '任务历史',
     settingsShort: '设置',
-    themeToggleToDark: '切换到夜间模式',
-    themeToggleToLight: '切换到白天模式',
     newVersion: '新版',
     versionTitle: (version) => `当前 ${version}`,
     versionUpdateTitle: (version, latestVersion) => `当前 ${version}，最新 v${latestVersion}。`

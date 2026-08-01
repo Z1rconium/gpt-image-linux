@@ -472,6 +472,10 @@ async function mockApi(page: Page, options: MockOptions = {}) {
       await route.fulfill(json({ authenticated, expires_at: authenticated ? '2026-05-18T14:00:00Z' : null }));
       return;
     }
+    if (url.pathname === '/api/access/admin/status') {
+      await route.fulfill(json({ authenticated: true, expires_at: '2026-05-18T14:00:00Z' }));
+      return;
+    }
     if (url.pathname === '/api/access') {
       const body = JSON.parse(request.postData() || '{}');
       authenticated = body.access_key === 'open-sesame';

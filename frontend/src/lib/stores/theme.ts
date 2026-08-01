@@ -16,12 +16,6 @@ function systemTheme(): Theme {
   return window.matchMedia(MEDIA_QUERY).matches ? 'dark' : 'light';
 }
 
-function readStoredTheme(): Theme | null {
-  if (!browser) return null;
-  const value = window.localStorage.getItem(STORAGE_KEY);
-  return value === 'light' || value === 'dark' ? value : null;
-}
-
 function applyTheme(nextTheme: Theme) {
   if (!browser) return;
   const root = document.documentElement;
@@ -31,10 +25,9 @@ function applyTheme(nextTheme: Theme) {
   document.querySelector('meta[name="theme-color"]')?.setAttribute('content', nextTheme === 'dark' ? '#09090b' : '#fafaf9');
 }
 
-function setTheme(nextTheme: Theme, persist = true) {
+function setTheme(nextTheme: Theme) {
   theme.set(nextTheme);
   applyTheme(nextTheme);
-  if (browser && persist) window.localStorage.setItem(STORAGE_KEY, nextTheme);
 }
 
 function cleanupMediaListener() {
@@ -45,37 +38,28 @@ function cleanupMediaListener() {
 }
 
 function init() {
-  if (!browser) return;
+  if (!browser) return () => {};
 
   cleanupMediaListener();
 
-  const initialTheme = readStoredTheme() || systemTheme();
-  theme.set(initialTheme);
-  applyTheme(initialTheme);
+  // Remove the former manual override so existing installations resume following the system.
+  try {
+    window.localStorage.removeItem(STORAGE_KEY);
+  } catch {
+    // Theme synchronization still works when storage is unavailable.
+  }
+  setTheme(systemTheme());
 
   mediaQueryList = window.matchMedia(MEDIA_QUERY);
   mediaListener = (event) => {
-    if (readStoredTheme()) return;
-    const nextTheme: Theme = event.matches ? 'dark' : 'light';
-    theme.set(nextTheme);
-    applyTheme(nextTheme);
+    setTheme(event.matches ? 'dark' : 'light');
   };
   mediaQueryList.addEventListener('change', mediaListener);
-}
 
-function toggle() {
-  let nextTheme: Theme = 'dark';
-  theme.update((current) => {
-    nextTheme = current === 'dark' ? 'light' : 'dark';
-    return nextTheme;
-  });
-  applyTheme(nextTheme);
-  if (browser) window.localStorage.setItem(STORAGE_KEY, nextTheme);
+  return cleanupMediaListener;
 }
 
 export const themeStore = {
   subscribe: theme.subscribe,
-  init,
-  set: setTheme,
-  toggle
+  init
 };

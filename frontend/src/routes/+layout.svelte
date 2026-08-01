@@ -5,8 +5,9 @@
   import { themeStore } from '$lib/stores/theme';
 
   onMount(() => {
-    themeStore.init();
+    const cleanupTheme = themeStore.init();
     void initI18n();
+    return cleanupTheme;
   });
 </script>
 
