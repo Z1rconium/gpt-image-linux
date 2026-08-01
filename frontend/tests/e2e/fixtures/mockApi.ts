@@ -559,8 +559,9 @@ async function mockApi(page: Page, options: MockOptions = {}) {
       await route.fulfill(json(mockedSettings));
       return;
     }
-    if (url.pathname === '/api/prompt-snippets' && request.method() === 'GET') {
-      const query = (url.searchParams.get('query') || '').toLowerCase();
+    if (url.pathname === '/api/prompt-snippets/search' && request.method() === 'POST') {
+      const body = JSON.parse(request.postData() || '{}');
+      const query = String(body.query || '').toLowerCase();
       const snippets = (query
         ? promptSnippets.filter(
             (snippet) => snippet.title.toLowerCase().includes(query) || snippet.prompt.toLowerCase().includes(query)

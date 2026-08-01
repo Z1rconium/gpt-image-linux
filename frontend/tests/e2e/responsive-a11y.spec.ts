@@ -86,7 +86,7 @@ test('main workspace hierarchy stays ordered and touch-safe across viewports', a
   await page.screenshot({ path: '/tmp/gpt-image-workspace-mobile.png', fullPage: true });
 });
 
-test('lazy settings module retries after a first-load failure and reopens instantly', async ({ page }) => {
+test('lazy settings module reloads after a first-load failure and then reopens instantly', async ({ page }) => {
   const settingsModulePattern = /SettingsDrawer/;
   await mockApi(page);
   await page.route(settingsModulePattern, async (route) => {
@@ -99,7 +99,11 @@ test('lazy settings module retries after a first-load failure and reopens instan
   await settingsButton.click();
   await expect(page.getByText('This panel could not be loaded.')).toBeVisible();
   await page.unroute(settingsModulePattern);
+  const reload = page.waitForEvent('framenavigated');
   await page.getByRole('button', { name: 'Retry' }).click();
+  await reload;
+  await expect(page.getByRole('heading', { name: 'Prompt', exact: true })).toBeVisible();
+  await settingsButton.click();
 
   const drawer = page.getByRole('dialog', { name: 'Settings' });
   await expect(drawer).toBeVisible();

@@ -1351,6 +1351,51 @@ def test_generate_uses_active_preset_default_model_when_model_is_omitted(client)
     assert job["model"] == "gpt-image-3"
 
 
+def test_generate_distinguishes_omitted_and_null_response_format(client):
+    settings = client.get("/api/settings").json()
+    update = client.post(
+        "/api/settings",
+        json=_settings_payload(
+            settings,
+            default_response_format="b64_json",
+        ),
+    )
+    assert update.status_code == 200
+
+    omitted = client.post(
+        "/api/generate",
+        json={"prompt": "use preset response format"},
+    )
+    assert omitted.status_code == 202
+    omitted_job = _wait_for_job(client, omitted.json()["job_id"])
+    assert omitted_job["status"] == "success"
+    assert omitted_job["response_format"] == "b64_json"
+
+    explicit_null = client.post(
+        "/api/generate",
+        json={
+            "prompt": "omit response format",
+            "response_format": None,
+        },
+    )
+    assert explicit_null.status_code == 202
+    explicit_null_job = _wait_for_job(client, explicit_null.json()["job_id"])
+    assert explicit_null_job["status"] == "success"
+    assert explicit_null_job["response_format"] is None
+
+
+def test_image_request_omits_null_response_format(tmp_path):
+    _configure_runtime(tmp_path)
+    from backend.app.integrations.upstream import generation as upstream_client_module
+    from backend.app.schemas.generation import GenerateRequest
+
+    payload = GenerateRequest(prompt="omit response format", response_format=None)
+
+    request_data = upstream_client_module._build_image_params(payload)
+
+    assert "response_format" not in request_data
+
+
 def test_chat_completions_request_uses_prompt_and_model(tmp_path):
     _configure_runtime(tmp_path)
     from backend.app.integrations.upstream import generation as upstream_client_module

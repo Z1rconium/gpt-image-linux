@@ -20,7 +20,7 @@ from ..api.presets import (
 )
 from ..core import settings as config
 from ..core import validators as ssrf
-from ..core.api_paths import normalize_default_model
+from ..core.api_paths import normalize_default_model, normalize_default_response_format
 from ..core.constants import ACTIVE_GENERATE_JOB_STATUSES
 from ..core.observability import metrics
 from ..core.utils import utc_now
@@ -345,9 +345,11 @@ async def queue_image_job(
         active_preset.get("default_model"),
         resolved_api_path,
     )
-    req.response_format = req.response_format or str(
-        active_preset.get("default_response_format") or "url"
-    )
+    if "response_format" not in getattr(req, "model_fields_set", set()):
+        default_response_format = normalize_default_response_format(
+            active_preset.get("default_response_format")
+        )
+        req.response_format = default_response_format or None
 
     if not api_url:
         raise HTTPException(

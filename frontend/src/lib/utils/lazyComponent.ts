@@ -51,6 +51,7 @@ export function createLazyComponent(loader: () => Promise<ComponentModule>) {
     load,
     prefetch: () => load().catch(() => undefined),
     reset,
-    retryRequiresReload: () => loadFailures > 1
+    // Browsers cache failed dynamic imports, so a reload is required before retrying the same chunk URL.
+    retryRequiresReload: () => loadFailures > 0
   };
 }
