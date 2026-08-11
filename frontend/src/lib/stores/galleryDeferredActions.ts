@@ -6,14 +6,19 @@ import { confirmStore } from '$lib/stores/confirm';
 import type { ToastOptions, ToastVariant } from '$lib/stores/ui';
 import { formatBytes } from '$lib/utils/format';
 import type { GalleryBatchResponse, GalleryEntry, GalleryExportJobStatus, GalleryImportJobStatus, GalleryResponse, GallerySyncJobStatus } from '$lib/api/types/gallery';
-import type { GalleryNavigation, GalleryOperationStatus, GalleryState } from '$lib/stores/gallery';
+import type { GalleryLoadOptions, GalleryNavigation, GalleryOperationStatus, GalleryState } from '$lib/stores/gallery';
 
 const STREAMING_ZIP_DOWNLOAD_BYTES_THRESHOLD = 64 * 1024 * 1024;
 const GALLERY_JOB_EVENT_NETWORK_TIMEOUT_MS = 30_000;
 
 export type GalleryActionDeps = {
   getState: () => GalleryState;
-  loadGallery: (page?: number, includeTotalBytes?: boolean | GalleryNavigation, navigation?: GalleryNavigation) => Promise<void>;
+  loadGallery: (
+    page?: number,
+    includeTotalBytes?: boolean | GalleryNavigation,
+    navigation?: GalleryNavigation,
+    options?: GalleryLoadOptions
+  ) => Promise<void>;
   patchGalleryEntries: (ids: Iterable<string>, updater: (image: GalleryEntry) => GalleryEntry | null) => void;
   clearSelection: () => void;
   setOperationStatus: (operationStatus: GalleryOperationStatus | null) => void;
@@ -21,7 +26,7 @@ export type GalleryActionDeps = {
   registerAbortController: (controller: AbortController) => () => void;
 };
 
-type GalleryWaitOptions = {
+export type GalleryWaitOptions = {
   eventsUrl: string;
   eventNames: string[];
   signal?: AbortSignal;
@@ -189,7 +194,7 @@ function networkTimeoutError() {
   return new Error(get(t).messages.requestFailed);
 }
 
-function waitForGalleryJob<T extends { status: string; error?: string | null; message?: string | null }>(
+export function waitForGalleryJob<T extends { status: string; error?: string | null; message?: string | null }>(
   options: GalleryWaitOptions,
   onJob: (job: T) => void
 ): Promise<T> {

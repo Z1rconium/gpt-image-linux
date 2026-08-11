@@ -333,16 +333,6 @@ function createAssistantStore() {
     return job;
   }
 
-  async function loadBatchAnalyzeJob(jobId: string) {
-    const job = await apiFetch<AssistantGalleryBatchJobStatus>(
-      `/api/assistant/gallery/batch/analyze/${encodeURIComponent(jobId)}`,
-      {},
-      'loading gallery AI analysis job'
-    );
-    update((state) => ({ ...state, batchJob: job }));
-    return job;
-  }
-
   function reset() {
     for (const controller of operationControllers.values()) controller.abort();
     operationControllers.clear();
@@ -364,7 +354,6 @@ function createAssistantStore() {
     analyzeGalleryImage,
     loadGalleryMetadata,
     batchAnalyzeGallery,
-    loadBatchAnalyzeJob,
     reset
   };
 }

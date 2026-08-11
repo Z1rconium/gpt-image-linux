@@ -63,6 +63,53 @@ test('multi-image job results can be previewed individually', async ({ page }) =
   await expect(preview.getByRole('link', { name: 'Download' })).toHaveAttribute('href', '/api/download/multi-2.png');
 });
 
+test('successful jobs refresh page one lightly without opening a per-job event stream', async ({ page }) => {
+  const galleryRefreshes: Array<Record<string, unknown>> = [];
+  const perJobEventRequests: string[] = [];
+  page.on('request', (request) => {
+    const url = new URL(request.url());
+    if (request.method() === 'POST' && url.pathname === '/api/gallery/search') {
+      galleryRefreshes.push(request.postDataJSON() as Record<string, unknown>);
+    }
+    if (/^\/api\/generate\/(?!jobs\/)[^/]+\/events$/.test(url.pathname)) {
+      perJobEventRequests.push(url.pathname);
+    }
+  });
+  await loadApp(page);
+  galleryRefreshes.length = 0;
+
+  await page.getByRole('textbox', { name: 'Prompt', exact: true }).fill('light refresh prompt');
+  await page.getByRole('button', { name: 'Generate', exact: true }).click();
+
+  await expect(page.getByRole('img', { name: 'Generated preview' })).toBeVisible();
+  await expect.poll(() => galleryRefreshes.length).toBe(1);
+  expect(galleryRefreshes[0]).toMatchObject({
+    page: 1,
+    include_counts: false,
+    include_filter_options: false
+  });
+  expect(perJobEventRequests).toEqual([]);
+});
+
+test('successful jobs keep a later gallery page in place and announce new images', async ({ page }) => {
+  const galleryRequests: Array<Record<string, unknown>> = [];
+  page.on('request', (request) => {
+    if (request.method() !== 'POST' || new URL(request.url()).pathname !== '/api/gallery/search') return;
+    galleryRequests.push(request.postDataJSON() as Record<string, unknown>);
+  });
+  await loadApp(page, { galleryImages: manyGalleryImages(20) });
+  await page.getByRole('button', { name: 'Next', exact: true }).click();
+  await expect(page).toHaveURL(/page=2/);
+  galleryRequests.length = 0;
+
+  await page.getByRole('textbox', { name: 'Prompt', exact: true }).fill('later page prompt');
+  await page.getByRole('button', { name: 'Generate', exact: true }).click();
+
+  await expect(page.getByRole('status')).toContainText('New images are available in the gallery');
+  await expect(page).toHaveURL(/page=2/);
+  expect(galleryRequests).toEqual([]);
+});
+
 test('job history shows detailed terminal statuses', async ({ page }) => {
   const detailedUpstreamError = 'Upstream API error (400): Invalid model';
   await loadApp(page, {
@@ -187,4 +234,21 @@ test('job drawer open baseline with 500 running rows', async ({ page }) => {
   const elapsedMs = await page.evaluate((start) => performance.now() - start, startedAt);
 
   expect(elapsedMs).toBeLessThan(500);
+});
+
+test('job history keeps a bounded render window for 500 cached rows', async ({ page }) => {
+  test.skip(process.env.RUN_PERFORMANCE_TESTS !== 'true', 'set RUN_PERFORMANCE_TESTS=true to run performance baselines');
+  await loadApp(page, { historyJobs: manyJobs(500) });
+
+  await page.getByRole('button', { name: 'Job History' }).click();
+  const jobsDrawer = page.getByRole('dialog', { name: 'Job History' });
+  await jobsDrawer.getByRole('button', { name: 'History', exact: true }).click();
+
+  const historyScroller = jobsDrawer.locator('.mobile-drawer-scroll');
+  await expect(jobsDrawer.getByText('history prompt 0')).toBeVisible();
+  expect(await jobsDrawer.locator('article').count()).toBeLessThanOrEqual(40);
+
+  await historyScroller.evaluate((node) => node.scrollTo({ top: node.scrollHeight }));
+  await expect(jobsDrawer.getByText('history prompt 499')).toBeVisible();
+  expect(await jobsDrawer.locator('article').count()).toBeLessThanOrEqual(40);
 });

@@ -24,6 +24,60 @@ test('access gate unlocks before loading the app', async ({ page }) => {
   await expect(page.getByRole('textbox', { name: 'Prompt', exact: true })).toBeVisible();
 });
 
+test('startup data and latest version requests do not wait for access or current version responses', async ({ page }) => {
+  await mockApi(page);
+
+  let markAccessStarted: () => void = () => {};
+  let releaseAccess: () => void = () => {};
+  const accessStarted = new Promise<void>((resolve) => {
+    markAccessStarted = resolve;
+  });
+  const accessGate = new Promise<void>((resolve) => {
+    releaseAccess = resolve;
+  });
+  await page.route('**/api/access/status', async (route) => {
+    markAccessStarted();
+    await accessGate;
+    await route.fulfill(json({ authenticated: true, expires_at: '2026-05-18T14:00:00Z' }));
+  });
+
+  let markVersionStarted: () => void = () => {};
+  let releaseVersion: () => void = () => {};
+  const versionStarted = new Promise<void>((resolve) => {
+    markVersionStarted = resolve;
+  });
+  const versionGate = new Promise<void>((resolve) => {
+    releaseVersion = resolve;
+  });
+  await page.route('**/api/version', async (route) => {
+    markVersionStarted();
+    await versionGate;
+    await route.fulfill(json({ version: 'v0.test', github_repo: 'test/repo', release_url: null }));
+  });
+
+  const settingsRequest = page.waitForRequest((request) => new URL(request.url()).pathname === '/api/settings');
+  const jobsRequest = page.waitForRequest((request) => new URL(request.url()).pathname === '/api/generate/jobs');
+  const galleryRequest = page.waitForRequest((request) => new URL(request.url()).pathname === '/api/gallery/search');
+  const latestVersionRequest = page.waitForRequest((request) => new URL(request.url()).pathname === '/api/version/latest');
+
+  try {
+    await page.goto('/');
+    await Promise.all([
+      accessStarted,
+      versionStarted,
+      settingsRequest,
+      jobsRequest,
+      galleryRequest,
+      latestVersionRequest
+    ]);
+  } finally {
+    releaseAccess();
+    releaseVersion();
+  }
+
+  await expect(page.getByRole('heading', { name: 'Prompt', exact: true })).toBeVisible();
+});
+
 test('theme ignores legacy overrides and follows system preference changes in real time', async ({ page }) => {
   await page.emulateMedia({ colorScheme: 'dark' });
   await loadApp(page);

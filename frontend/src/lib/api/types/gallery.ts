@@ -44,6 +44,11 @@ export type GalleryResponse = {
   };
 };
 
+export type GalleryThumbnailState = Pick<
+  GalleryEntry,
+  'id' | 'thumbnail_filename' | 'thumbnail_url' | 'thumbnail_status'
+>;
+
 export type MessageResponse = {
   status: string;
   message: string;
@@ -120,4 +125,3 @@ export type GalleryImportJobStatus = {
   updated_at?: string | null;
   error?: string | null;
 };
-

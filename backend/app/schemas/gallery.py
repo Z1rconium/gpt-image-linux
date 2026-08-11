@@ -41,6 +41,25 @@ class GalleryFavoriteRequest(StrictRequestModel):
     favorite: bool
 
 
+class GalleryThumbnailStatusRequest(StrictRequestModel):
+    ids: list[ShortId] = Field(min_length=1, max_length=100)
+
+    @field_validator("ids")
+    @classmethod
+    def validate_ids(cls, value: list[str]) -> list[str]:
+        ids = [image_id.strip() for image_id in value if image_id.strip()]
+        if len(set(ids)) != len(ids):
+            raise ValueError("ids must not contain duplicates")
+        return ids
+
+
+class GalleryThumbnailState(BaseModel):
+    id: str
+    thumbnail_filename: Optional[str] = None
+    thumbnail_url: Optional[str] = None
+    thumbnail_status: GalleryThumbnailStatus = "missing"
+
+
 class GallerySelectionFilterRequest(StrictRequestModel):
     prompt: Optional[str] = Field(default="", max_length=4000)
     model: Optional[str] = Field(default="", max_length=200)
@@ -222,5 +241,4 @@ class GalleryResponse(BaseModel):
     prev_cursor: Optional[str] = None
     images: list[GalleryEntry]
     filter_options: GalleryFilterOptions = Field(default_factory=GalleryFilterOptions)
-
 

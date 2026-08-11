@@ -257,6 +257,13 @@ async def stream_generate_jobs(request: Request):
                     event = await asyncio.wait_for(queue.get(), timeout=wait_seconds)
                 except asyncio.TimeoutError:
                     continue
+                if event.get("event") == "job":
+                    job = event.get("data")
+                    if not isinstance(job, dict):
+                        continue
+                    last_sent = time.monotonic()
+                    yield serialize_sse_event("job", job)
+                    continue
                 if event.get("event") != "jobs":
                     continue
                 jobs = event.get("data") or []

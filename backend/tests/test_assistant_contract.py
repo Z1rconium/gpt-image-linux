@@ -701,6 +701,12 @@ def test_ai_assistant_gallery_batch_analysis_jobs_and_limits(client, monkeypatch
     assert settings_repo.get_gallery_ai_metadata("assistant-batch-2") is not None
     assert len(seen) == 2
 
+    events = client.get(f"/api/assistant/gallery/batch/analyze/{job_id}/events")
+    assert events.status_code == 200
+    assert events.headers["content-type"].startswith("text/event-stream")
+    assert "event: analysis" in events.text
+    assert job_id in events.text
+
     coordination_repo.create_gallery_job(
         job_id="assistant-batch-running",
         kind="ai_analyze",

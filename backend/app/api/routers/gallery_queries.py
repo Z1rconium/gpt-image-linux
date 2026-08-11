@@ -108,6 +108,8 @@ from ...schemas.gallery import (
     GallerySelectionTokenResponse,
     GallerySyncRequest,
     GallerySyncJobStatus,
+    GalleryThumbnailState,
+    GalleryThumbnailStatusRequest,
 )
 from ...services.gallery_common import *
 from ...services.gallery_maintenance import kick_thumbnail_dispatcher
@@ -254,6 +256,20 @@ async def search_gallery_handler(req: GallerySearchRequest):
         cursor=req.cursor,
         direction=req.direction,
     )
+
+
+@router.post("/api/gallery/thumbnails/status", response_model=list[GalleryThumbnailState])
+async def get_gallery_thumbnail_statuses(req: GalleryThumbnailStatusRequest):
+    entries = await asyncio.to_thread(get_gallery_entries_by_ids, req.ids)
+    return [
+        GalleryThumbnailState(
+            id=entry.id,
+            thumbnail_filename=entry.thumbnail_filename,
+            thumbnail_url=entry.thumbnail_url,
+            thumbnail_status=entry.thumbnail_status,
+        )
+        for entry in entries
+    ]
 
 
 @router.patch("/api/gallery/{image_id}/favorite", response_model=GalleryEntry)

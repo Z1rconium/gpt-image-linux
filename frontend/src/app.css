@@ -366,11 +366,6 @@ html.dark input::placeholder {
   }
 }
 
-.deferred-list-item {
-  content-visibility: auto;
-  contain-intrinsic-size: 180px;
-}
-
 .preview-empty {
   background:
     linear-gradient(135deg, var(--app-preview-pattern) 25%, transparent 25%) 0 0 / 28px 28px,

@@ -26,6 +26,29 @@ def test_generate_and_sse_contract(client):
     assert job_id in events.text
 
 
+def test_global_jobs_feed_receives_tracked_job_updates(client):
+    queue = asyncio.Queue()
+    subscribers = job_events.get_jobs_subscribers()
+    subscribers.add(queue)
+    try:
+        job_events.publish_generate_job(
+            {
+                "job_id": "global-feed-job",
+                "status": "success",
+                "stage": "completed",
+                "message": "done",
+            },
+            list_debounce=False,
+        )
+        event = queue.get_nowait()
+    finally:
+        subscribers.discard(queue)
+
+    assert event["event"] == "job"
+    assert event["data"]["job_id"] == "global-feed-job"
+    assert event["data"]["status"] == "success"
+
+
 def test_generate_request_api_path_overrides_active_preset(client):
     resp = client.post(
         "/api/generate",

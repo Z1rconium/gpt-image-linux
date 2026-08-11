@@ -4,7 +4,7 @@ import { t } from '$lib/i18n';
 import { confirmStore } from '$lib/stores/confirm';
 import { createGalleryActions } from '$lib/stores/galleryActions';
 import type { ToastOptions, ToastVariant } from '$lib/stores/ui';
-import type { GalleryEntry, GalleryResponse, GallerySelectionTokenResponse } from '$lib/api/types/gallery';
+import type { GalleryEntry, GalleryResponse, GallerySelectionTokenResponse, GalleryThumbnailState } from '$lib/api/types/gallery';
 
 export type GalleryFilters = {
   prompt: string;
@@ -39,6 +39,10 @@ export type GalleryOperationStatus = {
 
 export type GalleryNavigation = 'next' | 'prev' | 'jump';
 
+export type GalleryLoadOptions = {
+  lightweight?: boolean;
+};
+
 export type GallerySelectionToken = {
   token: string;
   count: number;
@@ -71,7 +75,6 @@ const initialGalleryActivityState: GalleryActivityState = {
 };
 
 const THUMBNAIL_REFRESH_DELAYS_MS = [1500, 3000, 6000, 12000, 24000];
-const THUMBNAIL_REFRESH_BATCH_SIZE = 4;
 
 function createGalleryActivityStore() {
   const { subscribe, update } = writable<GalleryActivityState>(initialGalleryActivityState);
@@ -96,7 +99,7 @@ function createGalleryActivityStore() {
 
 export const galleryActivityStore = createGalleryActivityStore();
 
-function sameGalleryEntryThumbnail(left: GalleryEntry, right: GalleryEntry) {
+function sameGalleryEntryThumbnail(left: GalleryThumbnailState, right: GalleryThumbnailState) {
   return (
     left.id === right.id &&
     left.thumbnail_status === right.thumbnail_status &&
@@ -196,9 +199,9 @@ function createGalleryStore() {
   let thumbnailRefreshKey = '';
   let thumbnailRefreshAttempts = 0;
   let thumbnailRefreshPendingIds: string[] = [];
-  let thumbnailRefreshPendingOffset = 0;
   const prefetchedPages = new Map<string, GalleryResponse>();
   const prefetchRequests = new Map<string, Promise<GalleryResponse | null>>();
+  let prefetchGeneration = 0;
   const pendingSingleDeletes = new Map<string, { image: GalleryEntry; timer: ReturnType<typeof setTimeout> }>();
   const activeActionControllers = new Set<AbortController>();
 
@@ -224,13 +227,18 @@ function createGalleryStore() {
     activeActionControllers.clear();
   }
 
+  function invalidateGalleryPrefetch() {
+    prefetchGeneration += 1;
+    prefetchedPages.clear();
+    prefetchRequests.clear();
+  }
+
   function clearThumbnailRefresh() {
     if (thumbnailRefreshTimer) clearTimeout(thumbnailRefreshTimer);
     thumbnailRefreshTimer = null;
     thumbnailRefreshKey = '';
     thumbnailRefreshAttempts = 0;
     thumbnailRefreshPendingIds = [];
-    thumbnailRefreshPendingOffset = 0;
   }
 
   function pendingThumbnailRefreshState(gallery: GalleryResponse, filters: GalleryFilters) {
@@ -248,22 +256,25 @@ function createGalleryStore() {
     expectedKey: string,
     page: number,
     filters: GalleryFilters,
-    probeIds: string[]
+    pendingIds: string[]
   ) {
     if (!state.gallery || state.gallery.page !== page || !sameGalleryFilters(filters, state.filters)) return;
     if (expectedKey !== thumbnailRefreshKey) return;
 
     try {
-      const refreshedEntries = await Promise.all(
-        probeIds.map((imageId) =>
-          apiFetch<GalleryEntry>(`/api/gallery/${encodeURIComponent(imageId)}`, {}, 'refreshing gallery thumbnail').catch(() => null)
-        )
+      const refreshedEntries = await apiFetch<GalleryThumbnailState[]>(
+        '/api/gallery/thumbnails/status',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ids: pendingIds })
+        },
+        'refreshing gallery thumbnails'
       );
       if (!state.gallery || state.gallery.page !== page || !sameGalleryFilters(filters, state.filters)) return;
       if (expectedKey !== thumbnailRefreshKey) return;
-      const updates = refreshedEntries.filter((entry): entry is GalleryEntry => Boolean(entry));
-      if (!updates.length) return;
-      const updatesById = new Map(updates.map((entry) => [entry.id, entry]));
+      if (!refreshedEntries.length) return;
+      const updatesById = new Map(refreshedEntries.map((entry) => [entry.id, entry]));
       update((current) => ({
         ...current,
         gallery: current.gallery
@@ -272,7 +283,12 @@ function createGalleryStore() {
               images: current.gallery.images.map((image) => {
                 const refreshed = updatesById.get(image.id);
                 if (!refreshed || sameGalleryEntryThumbnail(image, refreshed)) return image;
-                return refreshed;
+                return {
+                  ...image,
+                  thumbnail_filename: refreshed.thumbnail_filename,
+                  thumbnail_url: refreshed.thumbnail_url,
+                  thumbnail_status: refreshed.thumbnail_status
+                };
               })
             }
           : current.gallery
@@ -281,15 +297,6 @@ function createGalleryStore() {
     } catch {
       // A failed background thumbnail refresh should not disturb the visible gallery state.
     }
-  }
-
-  function nextThumbnailRefreshProbeIds(pendingIds: string[]) {
-    if (pendingIds.length <= THUMBNAIL_REFRESH_BATCH_SIZE) return [...pendingIds];
-    const start = Math.min(thumbnailRefreshPendingOffset, pendingIds.length - 1);
-    const end = Math.min(start + THUMBNAIL_REFRESH_BATCH_SIZE, pendingIds.length);
-    const probeIds = pendingIds.slice(start, end);
-    thumbnailRefreshPendingOffset = end >= pendingIds.length ? 0 : end;
-    return probeIds;
   }
 
   function scheduleThumbnailRefresh(gallery: GalleryResponse) {
@@ -310,16 +317,15 @@ function createGalleryStore() {
     const page = gallery.page;
     const filters = { ...state.filters };
     const pendingIds = [...thumbnailRefreshPendingIds];
-    const probeIds = nextThumbnailRefreshProbeIds(pendingIds);
-    if (!probeIds.length) return;
+    if (!pendingIds.length) return;
     thumbnailRefreshTimer = setTimeout(() => {
       thumbnailRefreshTimer = null;
-      void refreshPendingThumbnails(thumbnailRefreshKey, page, filters, probeIds);
+      void refreshPendingThumbnails(thumbnailRefreshKey, page, filters, pendingIds);
     }, delay);
   }
 
   function setPageAndFilters(page: number, filters: GalleryFilters) {
-    prefetchedPages.clear();
+    invalidateGalleryPrefetch();
     clearThumbnailRefresh();
     update((current) => ({
       ...current,
@@ -360,25 +366,35 @@ function createGalleryStore() {
     };
   }
 
-  async function loadGallery(page = state.page, includeTotalBytes: boolean | GalleryNavigation = false, navigation: GalleryNavigation = 'jump') {
+  async function loadGallery(
+    page = state.page,
+    includeTotalBytes: boolean | GalleryNavigation = false,
+    navigation: GalleryNavigation = 'jump',
+    options: GalleryLoadOptions = {}
+  ) {
     if (typeof includeTotalBytes === 'string') {
       navigation = includeTotalBytes;
       includeTotalBytes = false;
     }
+    if (navigation === 'jump') invalidateGalleryPrefetch();
     clearThumbnailRefresh();
     const filters = { ...state.filters };
     const cursor =
       navigation === 'next' ? state.gallery?.next_cursor : navigation === 'prev' ? state.gallery?.prev_cursor : null;
     const direction = navigation === 'next' || navigation === 'prev' ? navigation : undefined;
-    const lightweightCursorPage = Boolean(cursor && direction && !includeTotalBytes && state.gallery);
+    const lightweightPage = Boolean(
+      !includeTotalBytes &&
+        state.gallery &&
+        (options.lightweight || (cursor && direction))
+    );
     const params = buildGalleryParams(
       page,
       filters,
       includeTotalBytes,
       cursor,
       direction,
-      !lightweightCursorPage,
-      !lightweightCursorPage
+      !lightweightPage,
+      !lightweightPage
     );
     const requestBody = gallerySearchBody(params, filters);
     const requestKey = JSON.stringify(requestBody);
@@ -387,7 +403,7 @@ function createGalleryStore() {
     if (cachedGallery) {
       prefetchedPages.delete(requestKey);
       const mergedGallery =
-        lightweightCursorPage && state.gallery
+        lightweightPage && state.gallery
           ? {
               ...cachedGallery,
               total: state.gallery.total,
@@ -408,31 +424,28 @@ function createGalleryStore() {
     const pendingPrefetch = prefetchRequests.get(requestKey);
     if (pendingPrefetch) {
       update((current) => ({ ...current, loading: true, page }));
-      try {
-        const gallery = await pendingPrefetch;
-        if (seq !== requestSeq) return;
-        if (gallery) {
-          const mergedGallery =
-            lightweightCursorPage && state.gallery
-              ? {
-                  ...gallery,
-                  total: state.gallery.total,
-                  total_bytes: state.gallery.total_bytes,
-                  total_pages: state.gallery.total_pages,
-                  filter_options: state.gallery.filter_options
-                }
-              : gallery;
-          const filteredGallery = filterPendingGallery(mergedGallery, includeTotalBytes, filters);
-          update((current) => ({
-            ...current,
-            gallery: filteredGallery,
-            page: filteredGallery.page
-          }));
-          scheduleThumbnailRefresh(filteredGallery);
-          return;
-        }
-      } finally {
-        if (seq === requestSeq) update((current) => ({ ...current, loading: false }));
+      const gallery = await pendingPrefetch;
+      if (seq !== requestSeq) return;
+      if (gallery) {
+        const mergedGallery =
+          lightweightPage && state.gallery
+            ? {
+                ...gallery,
+                total: state.gallery.total,
+                total_bytes: state.gallery.total_bytes,
+                total_pages: state.gallery.total_pages,
+                filter_options: state.gallery.filter_options
+              }
+            : gallery;
+        const filteredGallery = filterPendingGallery(mergedGallery, includeTotalBytes, filters);
+        update((current) => ({
+          ...current,
+          gallery: filteredGallery,
+          page: filteredGallery.page,
+          loading: false
+        }));
+        scheduleThumbnailRefresh(filteredGallery);
+        return;
       }
     }
     abortController?.abort();
@@ -451,7 +464,7 @@ function createGalleryStore() {
       );
       if (seq !== requestSeq) return;
       const mergedGallery =
-        lightweightCursorPage && state.gallery
+        lightweightPage && state.gallery
           ? {
               ...gallery,
               total: state.gallery.total,
@@ -495,7 +508,9 @@ function createGalleryStore() {
     const pending = prefetchRequests.get(requestKey);
     if (pending) return pending;
 
-    const request = apiFetch<GalleryResponse>(
+    const generation = prefetchGeneration;
+    let request: Promise<GalleryResponse | null>;
+    request = apiFetch<GalleryResponse>(
       '/api/gallery/search',
       {
         method: 'POST',
@@ -505,7 +520,8 @@ function createGalleryStore() {
       'prefetching gallery'
     ).then(
       (gallery) => {
-        prefetchRequests.delete(requestKey);
+        if (prefetchRequests.get(requestKey) === request) prefetchRequests.delete(requestKey);
+        if (generation !== prefetchGeneration) return null;
         prefetchedPages.set(requestKey, gallery);
         while (prefetchedPages.size > 4) {
           const oldestKey = prefetchedPages.keys().next().value;
@@ -515,7 +531,7 @@ function createGalleryStore() {
         return gallery;
       },
       () => {
-        prefetchRequests.delete(requestKey);
+        if (prefetchRequests.get(requestKey) === request) prefetchRequests.delete(requestKey);
         return null;
       }
     );
@@ -524,6 +540,7 @@ function createGalleryStore() {
   }
 
   function removeGalleryEntryFromCurrentPage(image: GalleryEntry) {
+    invalidateGalleryPrefetch();
     update((current) => {
       if (!current.gallery) return current;
       if (!current.gallery.images.some((entry) => entry.id === image.id)) {
@@ -552,6 +569,7 @@ function createGalleryStore() {
   ) {
     const idSet = new Set(ids);
     if (!idSet.size) return;
+    invalidateGalleryPrefetch();
     update((current) => {
       if (!current.gallery) return current;
       let changed = false;
@@ -588,7 +606,7 @@ function createGalleryStore() {
   }
 
   function updateFilter(key: keyof GalleryFilters, value: string | boolean) {
-    prefetchedPages.clear();
+    invalidateGalleryPrefetch();
     clearThumbnailRefresh();
     update((current) => ({
       ...current,
@@ -608,7 +626,7 @@ function createGalleryStore() {
   }
 
   function resetFilters() {
-    prefetchedPages.clear();
+    invalidateGalleryPrefetch();
     clearThumbnailRefresh();
     update((current) => ({
       ...current,
@@ -776,8 +794,7 @@ function createGalleryStore() {
     abortController?.abort();
     abortController = null;
     abortActiveActions();
-    prefetchedPages.clear();
-    prefetchRequests.clear();
+    invalidateGalleryPrefetch();
     setOperationStatus(null);
   }
 

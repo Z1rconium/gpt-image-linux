@@ -11,7 +11,7 @@
   import ToastHost from '$lib/components/ToastHost.svelte';
   import { apiFetch } from '$lib/api/client';
   import { language, t } from '$lib/i18n';
-import type { AssistantGalleryMetadataResponse, AssistantJobDiagnoseResponse, AssistantRecommendParamsResponse, PromptOptimizeResponse } from '$lib/api/types/assistant';
+import type { AssistantJobDiagnoseResponse, AssistantRecommendParamsResponse, PromptOptimizeResponse } from '$lib/api/types/assistant';
 import type { ApiPath, ResponseFormatDefault } from '$lib/api/types/common';
 import type { GalleryEntry } from '$lib/api/types/gallery';
 import type { GenerateJobStatus } from '$lib/api/types/jobs';
@@ -44,7 +44,8 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
     snippetsPanel,
     type LazyPanel
   } from '$lib/features/workspace/panels';
-  import { createLightboxPrefetch } from '$lib/features/workspace/lightbox';
+  import { createAdminGate } from '$lib/features/workspace/adminGate';
+  import { createLightboxController } from '$lib/features/workspace/lightbox';
   import { installWorkspaceLifecycle } from '$lib/features/workspace/lifecycle';
   import { waitForGalleryAnalysis } from '$lib/features/workspace/gallery';
   import {
@@ -71,19 +72,13 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
   let lastActivePresetId = '';
   let lastActivePresetDefaultModel = DEFAULT_PROMPT_MODEL;
   let lastActivePresetDefaultResponseFormat: ResponseFormatDefault = initialPromptFormState.responseFormat;
-  let lightboxLookupSeq = 0;
-  let lightboxAiMetadataSeq = 0;
-  let lightboxAiController: AbortController | null = null;
-  let lightboxNavigating = false;
-  let lightboxAiMetadata: AssistantGalleryMetadataResponse | null = null;
   let jobDiagnoses: Record<string, AssistantJobDiagnoseResponse> = {};
   let lastActivePresetApiPath: ApiPath = initialPromptFormState.apiPath;
   let optimizingPrompt = false;
   let loadingPanel: LazyPanel | null = null;
   let lazyLoadSequence = 0;
-  let adminGateVisible = false;
-  let adminUnlocking = false;
-  let adminUnlockError = '';
+  let gallerySuccessRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+  const handledTerminalJobIds = new Set<string>();
   const panelFocusTargets: Partial<Record<LazyPanel, HTMLElement>> = {};
   const urlSync = createUrlSyncScheduler((mode) => {
     writePageUrl(
@@ -96,19 +91,28 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
       mode
     );
   });
+  const lightboxController = createLightboxController({
+    getImage: () => $lightboxStore.image,
+    getGallery: () => $galleryStore.gallery,
+    isAiAvailable: () => aiAssistantAvailable,
+    setImage: lightboxStore.setImage,
+    loadGalleryPage: (page, direction) => galleryStore.loadGallery(page, false, direction),
+    prefetchPage: (page) => galleryStore.prefetchGalleryPage(page, 'next'),
+    loadAiMetadata: assistantStore.loadGalleryMetadata,
+    describeImage: assistantStore.describeGalleryImage,
+    analyzeImage: assistantStore.analyzeGalleryImage,
+    isAbortError,
+    onNavigate: () => urlSync.schedule('replace'),
+    onImageNotFound: () => showToast($t.messages.galleryImageNotFound, 'error'),
+    onAnalyzed: () => showToast($t.messages.aiAssistantGalleryAnalyzed),
+    onError: showError
+  });
+  const adminGate = createAdminGate({
+    openSettings: () => openUiPanel('settings', 'settingsOpen'),
+    fallbackError: () => $t.messages.requestFailed
+  });
 
   $: activeJobsCount = $jobsStore.jobs.length;
-  $: lightboxImages = $galleryStore.gallery?.images || [];
-  $: lightboxImageIndex = lightboxImages.findIndex((image) => image.id === $lightboxStore.image?.id);
-  $: lightboxImageInCurrentPage = lightboxImageIndex >= 0;
-  $: canNavigatePrevious = Boolean(
-    $lightboxStore.image && lightboxImageInCurrentPage && (lightboxImageIndex > 0 || $galleryStore.gallery?.has_prev)
-  );
-  $: canNavigateNext = Boolean(
-    $lightboxStore.image &&
-      lightboxImageInCurrentPage &&
-      (lightboxImageIndex < lightboxImages.length - 1 || $galleryStore.gallery?.has_next)
-  );
   $: optimizerSettings = $settingsStore.settings?.prompt_optimizer || null;
   $: promptOptimizerConfigAvailable = Boolean(
     optimizerSettings?.api_url.trim() &&
@@ -134,6 +138,7 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
       promptOptimizerConfigAvailable &&
       (aiAssistantSettings.vision_model.trim() || optimizerSettings?.model.trim())
   );
+  $: lightboxController.sync($lightboxStore.image, $galleryStore.gallery, aiAssistantAvailable);
   $: r2BackupSettings = $settingsStore.settings?.r2_backup || null;
   $: r2BackupAvailable = Boolean(
     r2BackupSettings?.enabled &&
@@ -226,66 +231,26 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
   async function syncLightboxFromUrl(imageId: string | null | undefined) {
     const nextImageId = String(imageId || '').trim();
     if (!nextImageId) {
-      lightboxStore.close();
+      lightboxController.close();
       return;
     }
 
     if (!(await ensurePanel('lightbox'))) return;
-
-    const existing = $galleryStore.gallery?.images.find((image) => image.id === nextImageId);
-    if (existing) {
-      lightboxStore.open(existing);
-      void loadLightboxAiMetadata(existing.id);
-      return;
-    }
-
-    const seq = ++lightboxLookupSeq;
-    try {
-      const image = await apiFetch<GalleryEntry>(`/api/gallery/${encodeURIComponent(nextImageId)}`, {}, 'loading gallery image');
-      if (seq === lightboxLookupSeq) {
-        lightboxStore.open(image);
-        void loadLightboxAiMetadata(image.id);
-      }
-    } catch {
-      if (seq !== lightboxLookupSeq) return;
-      lightboxStore.close();
-      showToast($t.messages.galleryImageNotFound, 'error');
-    }
+    await lightboxController.openFromId(nextImageId, $galleryStore.gallery?.images || []);
   }
 
   async function openLightbox(image: GalleryEntry) {
     rememberPanelFocus('lightbox');
     if (!(await ensurePanel('lightbox'))) return;
-    lightboxStore.open(image);
-    void loadLightboxAiMetadata(image.id);
+    lightboxController.open(image);
     urlSync.schedule('push');
   }
 
   function closeLightbox() {
-    lightboxStore.close();
-    lightboxAiMetadataSeq += 1;
-    lightboxAiController?.abort();
-    lightboxAiController = null;
-    lightboxAiMetadata = null;
+    lightboxController.close();
     urlSync.schedule('replace');
     restorePanelFocus('lightbox');
   }
-
-  async function loadLightboxAiMetadata(imageId: string) {
-    const seq = ++lightboxAiMetadataSeq;
-    if (!aiAssistantAvailable) {
-      if (seq === lightboxAiMetadataSeq && $lightboxStore.image?.id === imageId) lightboxAiMetadata = null;
-      return;
-    }
-    try {
-      const metadata = await assistantStore.loadGalleryMetadata(imageId);
-      if (seq === lightboxAiMetadataSeq && $lightboxStore.image?.id === imageId) lightboxAiMetadata = metadata;
-    } catch {
-      if (seq === lightboxAiMetadataSeq && $lightboxStore.image?.id === imageId) lightboxAiMetadata = null;
-    }
-  }
-
-  const lightboxPrefetch = createLightboxPrefetch((page) => galleryStore.prefetchGalleryPage(page, 'next'));
   function lightboxNavigationBlocked() {
     return Boolean(
       $confirmStore.request ||
@@ -296,42 +261,6 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
         $uiStore.jobsOpen ||
         $uiStore.settingsOpen
     );
-  }
-
-  async function navigateLightbox(direction: -1 | 1) {
-    if (lightboxNavigating || !$lightboxStore.image || !$galleryStore.gallery) return;
-
-    const gallery = $galleryStore.gallery;
-    const images = gallery.images;
-    const currentIndex = images.findIndex((image) => image.id === $lightboxStore.image?.id);
-    if (currentIndex < 0) return;
-
-    const nextIndex = currentIndex + direction;
-    if (nextIndex >= 0 && nextIndex < images.length) {
-      lightboxStore.open(images[nextIndex]);
-      void loadLightboxAiMetadata(images[nextIndex].id);
-      urlSync.schedule('replace');
-      return;
-    }
-
-    const nextPage = gallery.page + direction;
-    if ((direction < 0 && !gallery.has_prev) || (direction > 0 && !gallery.has_next)) return;
-
-    lightboxNavigating = true;
-    try {
-      await galleryStore.loadGallery(nextPage, false, direction > 0 ? 'next' : 'prev');
-      const nextImages = $galleryStore.gallery?.images || [];
-      const nextImage = direction < 0 ? nextImages[nextImages.length - 1] : nextImages[0];
-      if (nextImage) {
-        lightboxStore.open(nextImage);
-        void loadLightboxAiMetadata(nextImage.id);
-        urlSync.schedule('replace');
-      }
-    } catch (error) {
-      showError(error);
-    } finally {
-      lightboxNavigating = false;
-    }
   }
 
   async function openJobsDrawer(tab: JobsTab = jobsTab) {
@@ -450,46 +379,6 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
     });
   }
 
-  async function openSettingsSecure() {
-    try {
-      const status = await apiFetch<{ authenticated: boolean }>(
-        '/api/access/admin/status',
-        {},
-        'checking management access'
-      );
-      if (status.authenticated) {
-        await openUiPanel('settings', 'settingsOpen');
-        return;
-      }
-    } catch {
-      // The step-up form handles a missing or expired management session.
-    }
-    adminUnlockError = '';
-    adminGateVisible = true;
-  }
-
-  async function unlockAdmin(adminKey: string) {
-    adminUnlocking = true;
-    adminUnlockError = '';
-    try {
-      await apiFetch(
-        '/api/access/admin',
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ admin_key: adminKey })
-        },
-        'unlocking management settings'
-      );
-      adminGateVisible = false;
-      await openUiPanel('settings', 'settingsOpen');
-    } catch (error) {
-      adminUnlockError = error instanceof Error ? error.message : $t.messages.requestFailed;
-    } finally {
-      adminUnlocking = false;
-    }
-  }
-
   function createPreset() {
     void settingsStore.createPreset(showToast);
   }
@@ -546,12 +435,41 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
     return settingsStore.saveOverallConfig(body, showToast);
   }
 
+  function showNewGalleryImagesToast() {
+    showToast($t.messages.newGalleryImagesAvailable, 'status', {
+      actionLabel: $t.common.refresh,
+      durationMs: 8000,
+      onAction: () => {
+        void galleryStore.loadGallery(1, false, 'jump', { lightweight: true });
+        syncAfterGalleryMutation();
+      }
+    });
+  }
+
+  function scheduleGalleryRefreshAfterSuccess() {
+    if (gallerySuccessRefreshTimer) clearTimeout(gallerySuccessRefreshTimer);
+    gallerySuccessRefreshTimer = setTimeout(() => {
+      gallerySuccessRefreshTimer = null;
+      if ($galleryStore.page !== 1) {
+        showNewGalleryImagesToast();
+        return;
+      }
+      void galleryStore.loadGallery(1, false, 'jump', { lightweight: true });
+    }, 350);
+  }
+
   function updatePreviewFromJob(job: GenerateJobStatus) {
     previewStore.setPreview(jobsStore.previewFromJob(job, $previewStore));
     if (job.status !== 'queued' && job.status !== 'running') {
+      if (handledTerminalJobIds.has(job.job_id)) return;
+      handledTerminalJobIds.add(job.job_id);
+      if (handledTerminalJobIds.size > 200) {
+        const oldestJobId = handledTerminalJobIds.values().next().value;
+        if (oldestJobId) handledTerminalJobIds.delete(oldestJobId);
+      }
       if (jobsStore.shouldRefreshJobsAfterSubmit()) void jobsStore.loadJobs();
       jobsStore.markHistoryStale();
-      if (job.status === 'success') void galleryStore.loadGallery(1);
+      if (job.status === 'success') scheduleGalleryRefreshAfterSuccess();
     }
   }
 
@@ -665,7 +583,6 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
   async function createPromptSnippet(input: PromptSnippetCreateInput) {
     try {
       await promptSnippetsStore.createSnippet(input);
-      await promptSnippetsStore.loadSnippets($promptSnippetsStore.query);
       showToast($t.messages.promptSnippetSaved);
     } catch (error) {
       showError(error);
@@ -675,7 +592,6 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
   async function updatePromptSnippet(snippetId: string, input: PromptSnippetUpdateInput) {
     try {
       await promptSnippetsStore.updateSnippet(snippetId, input);
-      await promptSnippetsStore.loadSnippets($promptSnippetsStore.query);
       showToast($t.messages.promptSnippetUpdated);
     } catch (error) {
       showError(error);
@@ -849,53 +765,6 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
     showToast($t.messages.galleryImageReady);
   }
 
-  function nextLightboxAiSignal() {
-    lightboxAiController?.abort();
-    lightboxAiController = new AbortController();
-    return lightboxAiController.signal;
-  }
-
-  async function describeLightboxImage(image: GalleryEntry) {
-    const seq = ++lightboxAiMetadataSeq;
-    const signal = nextLightboxAiSignal();
-    try {
-      const result = await assistantStore.describeGalleryImage(image.id, signal);
-      if (seq !== lightboxAiMetadataSeq || $lightboxStore.image?.id !== image.id) return;
-      lightboxAiMetadata = {
-        image_id: image.id,
-        description: result.description,
-        prompt: lightboxAiMetadata?.image_id === image.id ? lightboxAiMetadata.prompt : '',
-        analysis: lightboxAiMetadata?.image_id === image.id ? lightboxAiMetadata.analysis : {},
-        model: result.model,
-        created_at: lightboxAiMetadata?.image_id === image.id ? lightboxAiMetadata.created_at : null,
-        updated_at: null
-      };
-    } catch (error) {
-      if (!isAbortError(error) && seq === lightboxAiMetadataSeq && $lightboxStore.image?.id === image.id) showError(error);
-    }
-  }
-
-  async function analyzeLightboxImage(image: GalleryEntry) {
-    const seq = ++lightboxAiMetadataSeq;
-    const signal = nextLightboxAiSignal();
-    try {
-      const result = await assistantStore.analyzeGalleryImage(image.id, signal);
-      if (seq !== lightboxAiMetadataSeq || $lightboxStore.image?.id !== image.id) return;
-      lightboxAiMetadata = {
-        image_id: image.id,
-        description: result.description,
-        prompt: result.prompt,
-        analysis: result.analysis,
-        model: result.model,
-        created_at: lightboxAiMetadata?.image_id === image.id ? lightboxAiMetadata.created_at : null,
-        updated_at: null
-      };
-      showToast($t.messages.aiAssistantGalleryAnalyzed);
-    } catch (error) {
-      if (!isAbortError(error) && seq === lightboxAiMetadataSeq && $lightboxStore.image?.id === image.id) showError(error);
-    }
-  }
-
   function handleEditFile(event: Event) {
     editSourceStore.handleFile(event, previewStore.setError);
   }
@@ -916,12 +785,17 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
     }
   }
 
-  function clearEditSource() {
-    editSourceStore.clear();
-    editPicker?.reset();
+  function closeEditPreview() {
     setUi('editPreviewOpen', false);
     editPreviewUrl = '';
     editPreviewLabel = '';
+    restorePanelFocus('editPreview');
+  }
+
+  function clearEditSource() {
+    editSourceStore.clear();
+    editPicker?.reset();
+    closeEditPreview();
   }
 
   async function batchFavoriteGallery(favorite: boolean) {
@@ -935,9 +809,7 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
       if ($lightboxStore.image && ids.includes($lightboxStore.image.id)) closeLightbox();
       if ($editSourceStore.selectedGalleryImageId && ids.includes($editSourceStore.selectedGalleryImageId)) {
         editSourceStore.clearGallerySource($editSourceStore.selectedGalleryImageId);
-        setUi('editPreviewOpen', false);
-        editPreviewUrl = '';
-        editPreviewLabel = '';
+        closeEditPreview();
       }
     });
   }
@@ -956,7 +828,6 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
       const job = await assistantStore.batchAnalyzeGallery({ ...batchBody, target_language: $language });
       const currentJob = await waitForGalleryAnalysis(
         job,
-        assistantStore.loadBatchAnalyzeJob,
         (nextJob) => {
           galleryActivityStore.setOperationStatus({
             kind: 'ai_analyze',
@@ -1005,9 +876,7 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
       () => {
         if ($editSourceStore.selectedGalleryImageId === image.id) {
           editSourceStore.clearGallerySource(image.id);
-          setUi('editPreviewOpen', false);
-          editPreviewUrl = '';
-          editPreviewLabel = '';
+          closeEditPreview();
         }
       }
     );
@@ -1017,9 +886,7 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
     await galleryStore.deleteAll(showToast, () => {
       closeLightbox();
       editSourceStore.clearGallerySource($editSourceStore.selectedGalleryImageId);
-      setUi('editPreviewOpen', false);
-      editPreviewUrl = '';
-      editPreviewLabel = '';
+      closeEditPreview();
       clearPreview();
     });
   }
@@ -1124,17 +991,11 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
     }
   }
 
-  $: if ($lightboxStore.image && $galleryStore.gallery) {
-    $lightboxStore.image.id;
-    $galleryStore.gallery.page;
-    $galleryStore.gallery.next_cursor;
-    $galleryStore.gallery.prev_cursor;
-    lightboxPrefetch.prefetchNeighbors($lightboxStore.image, $galleryStore.gallery);
-  }
-
   onMount(() => {
     accessStore.installUnauthorizedHandler();
-    void accessStore.checkAccess(loadAuthenticatedData);
+    const initialData = loadAuthenticatedData();
+    void initialData.catch(() => undefined);
+    void accessStore.checkAccess(() => initialData);
 
     const popstate = () => {
       void applyUrlStateToApp();
@@ -1143,19 +1004,19 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
     const keydown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         if ($uiStore.imagePromptOpen) closeImagePromptDialog();
-        else if ($uiStore.editPreviewOpen) setUi('editPreviewOpen', false);
+        else if ($uiStore.editPreviewOpen) closeEditPreview();
         else if ($lightboxStore.image) closeLightbox();
         else if ($uiStore.sizeDialogOpen) setUi('sizeDialogOpen', false);
         return;
       }
 
       if (!$lightboxStore.image || lightboxNavigationBlocked()) return;
-      if (event.key === 'ArrowLeft' && canNavigatePrevious) {
+      if (event.key === 'ArrowLeft' && $lightboxController.canNavigatePrevious) {
         event.preventDefault();
-        void navigateLightbox(-1);
-      } else if (event.key === 'ArrowRight' && canNavigateNext) {
+        void lightboxController.navigate(-1);
+      } else if (event.key === 'ArrowRight' && $lightboxController.canNavigateNext) {
         event.preventDefault();
-        void navigateLightbox(1);
+        void lightboxController.navigate(1);
       }
     };
     return installWorkspaceLifecycle({
@@ -1168,14 +1029,14 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
         prefetchPanel('snippets');
       },
       cleanup: () => {
+        if (gallerySuccessRefreshTimer) clearTimeout(gallerySuccessRefreshTimer);
+        gallerySuccessRefreshTimer = null;
         urlSync.destroy();
         jobsStore.cleanup();
         galleryStore.cleanup();
         previewStore.cleanup();
         uiStore.cleanup();
-        lightboxAiController?.abort();
-        lightboxAiController = null;
-        lightboxPrefetch.clear();
+        lightboxController.destroy();
         optimizingPrompt = false;
       }
     });
@@ -1189,7 +1050,7 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
 <a class="skip-link control-focus" href="#main-content">{$t.common.skipToMain}</a>
 
 <AccessGate visible={$accessStore.gateVisible} error={$accessStore.error} loading={$accessStore.loading} onUnlock={(key) => accessStore.unlockAccess(key, loadAuthenticatedData)} />
-<AccessGate visible={adminGateVisible} error={adminUnlockError} loading={adminUnlocking} onUnlock={unlockAdmin} />
+<AccessGate visible={$adminGate.visible} error={$adminGate.error} loading={$adminGate.loading} onUnlock={adminGate.unlock} />
 <Header
   version={$versionStore.version}
   latestVersion={$versionStore.latestVersion}
@@ -1203,7 +1064,7 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
   onOpenPromptSnippets={openPromptSnippetsDrawer}
   onOpenImagePrompt={openImagePromptDialog}
   onOpenJobs={openJobsDrawer}
-  onOpenSettings={() => void openSettingsSecure()}
+  onOpenSettings={() => void adminGate.openSettingsSecure()}
   onPrefetchPromptSnippets={() => prefetchPanel('snippets')}
   onPrefetchImagePrompt={() => prefetchPanel('imagePrompt')}
   onPrefetchJobs={() => prefetchPanel('jobs')}
@@ -1438,16 +1299,16 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
   onCopyUrl={copyImageUrl}
   onUsePrompt={useGalleryPrompt}
   onUseAll={useGalleryParams}
-  canNavigatePrevious={canNavigatePrevious}
-  canNavigateNext={canNavigateNext}
-  navigating={lightboxNavigating}
+  canNavigatePrevious={$lightboxController.canNavigatePrevious}
+  canNavigateNext={$lightboxController.canNavigateNext}
+  navigating={$lightboxController.navigating}
   aiAssistantEnabled={aiAssistantAvailable}
-  aiMetadata={lightboxAiMetadata}
+  aiMetadata={$lightboxController.aiMetadata}
   aiLoadingImageId={$assistantStore.galleryLoadingImageId}
-  onAiDescribe={describeLightboxImage}
-  onAiAnalyze={analyzeLightboxImage}
-  onNavigatePrevious={() => navigateLightbox(-1)}
-  onNavigateNext={() => navigateLightbox(1)}
+  onAiDescribe={lightboxController.describe}
+  onAiAnalyze={lightboxController.analyze}
+  onNavigatePrevious={() => lightboxController.navigate(-1)}
+  onNavigateNext={() => lightboxController.navigate(1)}
 />
 {/if}
 
@@ -1457,7 +1318,7 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
   open={$uiStore.editPreviewOpen}
   url={editPreviewUrl}
   label={editPreviewLabel}
-  onClose={() => closeUiPanel('editPreview', 'editPreviewOpen')}
+  onClose={closeEditPreview}
 />
 {/if}
 

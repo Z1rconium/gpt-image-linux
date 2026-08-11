@@ -1,6 +1,5 @@
 <script lang="ts">
-  import { onDestroy } from 'svelte';
-import type { GalleryEntry, GalleryResponse } from '$lib/api/types/gallery';
+  import type { GalleryEntry, GalleryResponse } from '$lib/api/types/gallery';
   import GalleryFilterToolbar from '$lib/components/gallery/GalleryFilterToolbar.svelte';
   import GalleryPagination from '$lib/components/gallery/GalleryPagination.svelte';
   import { t } from '$lib/i18n';
@@ -42,15 +41,13 @@ import type { GalleryEntry, GalleryResponse } from '$lib/api/types/gallery';
 
   const skeletonCards = Array.from({ length: 6 });
   const EAGER_THUMB_COUNT = 3;
-  const THUMBNAIL_RETRY_DELAYS_MS = [1200, 2400, 4800, 9600, 16000];
   const THUMBNAIL_PLACEHOLDER_SRC = 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=';
 
   let importInput: HTMLInputElement;
-  let failedThumbnailIds = new Set<string>();
-  const thumbnailRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
-  const thumbnailRetryCounts = new Map<string, number>();
+  let failedThumbnailUrls = new Map<string, string>();
 
   $: images = gallery?.images || [];
+  $: pruneFailedThumbnailUrls(images);
   $: currentPage = gallery?.page || 1;
   $: totalPages = Math.max(gallery?.total_pages || 1, 1);
   $: initialLoading = loading && images.length === 0;
@@ -96,75 +93,37 @@ import type { GalleryEntry, GalleryResponse } from '$lib/api/types/gallery';
 
   function galleryImageSrc(image: GalleryEntry) {
     if (!thumbnailReady(image)) return THUMBNAIL_PLACEHOLDER_SRC;
-    if (failedThumbnailIds.has(image.id)) {
-      return THUMBNAIL_PLACEHOLDER_SRC;
-    }
-    const retryAttempt = thumbnailRetryCounts.get(image.id) || 0;
-    return retryAttempt > 0 ? thumbnailRequestUrl(image, retryAttempt) : thumbnailUrl(image.filename, image.thumbnail_url);
+    const src = thumbnailUrl(image.filename, image.thumbnail_url);
+    return failedThumbnailUrls.get(image.id) === src ? THUMBNAIL_PLACEHOLDER_SRC : src;
+  }
+
+  function pruneFailedThumbnailUrls(visibleImages: GalleryEntry[]) {
+    const visibleIds = new Set(visibleImages.map((image) => image.id));
+    if ([...failedThumbnailUrls.keys()].every((imageId) => visibleIds.has(imageId))) return;
+    failedThumbnailUrls = new Map(
+      [...failedThumbnailUrls].filter(([imageId]) => visibleIds.has(imageId))
+    );
   }
 
   function thumbnailReady(image: GalleryEntry) {
     return !image.thumbnail_status || image.thumbnail_status === 'ready';
   }
 
-  function thumbnailRequestUrl(image: GalleryEntry, attempt: number) {
-    const base = thumbnailUrl(image.filename, image.thumbnail_url);
-    if (!attempt) return base;
-    try {
-      const url = new URL(base, window.location.origin);
-      url.searchParams.set('retry', String(attempt));
-      return url.origin === window.location.origin ? `${url.pathname}${url.search}${url.hash}` : url.toString();
-    } catch {
-      return base;
-    }
-  }
-
-  function clearThumbnailRetry(imageId: string) {
-    const timer = thumbnailRetryTimers.get(imageId);
-    if (timer) clearTimeout(timer);
-    thumbnailRetryTimers.delete(imageId);
-    thumbnailRetryCounts.delete(imageId);
-    failedThumbnailIds = new Set([...failedThumbnailIds].filter((id) => id !== imageId));
-  }
-
-  function scheduleThumbnailRetry(image: GalleryEntry) {
-    const attempt = thumbnailRetryCounts.get(image.id) || 0;
-    if (attempt >= THUMBNAIL_RETRY_DELAYS_MS.length) return;
-    if (thumbnailRetryTimers.has(image.id)) return;
-
-    failedThumbnailIds = new Set(failedThumbnailIds).add(image.id);
-    const delay = THUMBNAIL_RETRY_DELAYS_MS[attempt];
-    const timer = setTimeout(() => {
-      thumbnailRetryTimers.delete(image.id);
-      failedThumbnailIds = new Set([...failedThumbnailIds].filter((id) => id !== image.id));
-      thumbnailRetryCounts.set(image.id, attempt + 1);
-    }, delay);
-    thumbnailRetryTimers.set(image.id, timer);
-  }
-
   function handleThumbnailLoad(image: GalleryEntry) {
     if (!thumbnailReady(image)) return;
-    clearThumbnailRetry(image.id);
+    if (!failedThumbnailUrls.has(image.id)) return;
+    failedThumbnailUrls = new Map(failedThumbnailUrls);
+    failedThumbnailUrls.delete(image.id);
   }
 
-  function handleThumbnailError(event: Event, image: GalleryEntry) {
-    if (!thumbnailReady(image)) {
-      failedThumbnailIds = new Set(failedThumbnailIds).add(image.id);
-      return;
-    }
-    scheduleThumbnailRetry(image);
+  function handleThumbnailError(image: GalleryEntry) {
+    if (!thumbnailReady(image)) return;
+    failedThumbnailUrls = new Map(failedThumbnailUrls).set(image.id, thumbnailUrl(image.filename, image.thumbnail_url));
   }
 
   function isImageSelected(image: GalleryEntry) {
     return selectedAllFiltered || selectedIds.has(image.id);
   }
-
-  onDestroy(() => {
-    thumbnailRetryTimers.forEach((timer) => clearTimeout(timer));
-    thumbnailRetryTimers.clear();
-    thumbnailRetryCounts.clear();
-    failedThumbnailIds = new Set();
-  });
 </script>
 
 <section class="app-section px-1 py-1 sm:px-0">
@@ -305,7 +264,7 @@ import type { GalleryEntry, GalleryResponse } from '$lib/api/types/gallery';
                   width={image.image_width || undefined}
                   height={image.image_height || undefined}
                   on:load={() => handleThumbnailLoad(image)}
-                  on:error={(event) => handleThumbnailError(event, image)}
+                  on:error={() => handleThumbnailError(image)}
                 />
               </picture>
             </button>

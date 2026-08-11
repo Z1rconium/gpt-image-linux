@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import APIRouter, Body, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Body, File, Form, HTTPException, Request, UploadFile
 
 from ..api import presets
 from ..api.app_state import app
@@ -71,6 +71,7 @@ from ..schemas.settings import AIAssistantSettingsRequest
 logger = logging.getLogger(__name__)
 from .assistant_runtime import *
 from .assistant_vision import *
+from .gallery_jobs import stream_gallery_job
 
 async def _analyze_gallery_image_with_lease_renewal(
     image_id: str,
@@ -166,6 +167,18 @@ async def get_batch_analyze_job(job_id: str):
     if not job:
         raise HTTPException(status_code=404, detail="Gallery AI analysis job not found")
     return AssistantGalleryBatchJobStatus(**_ai_analyze_payload(job))
+
+
+async def stream_batch_analyze_job(job_id: str, request: Request):
+    return await stream_gallery_job(
+        kind=AI_ANALYZE_JOB_KIND,
+        job_id=job_id,
+        request=request,
+        event_name="analysis",
+        terminal_statuses={"success", "error"},
+        payload_builder=_ai_analyze_payload,
+        not_found_detail="Gallery AI analysis job not found",
+    )
 
 
 def _ai_analyze_payload(job: dict[str, Any]) -> dict[str, Any]:
@@ -536,4 +549,3 @@ def _kick_ai_analyze_dispatcher() -> None:
     app.state.gallery_ai_analyze_dispatcher_task = asyncio.create_task(
         run_ai_analyze_dispatcher(worker_id)
     )
-

@@ -4,6 +4,8 @@ type UnauthorizedHandler = (message?: string) => void;
 
 let unauthorizedHandler: UnauthorizedHandler | null = null;
 
+export const DEFAULT_API_TIMEOUT_MS = 30_000;
+
 export class ApiError extends Error {
   status: number;
   body: unknown;
@@ -45,9 +47,11 @@ async function readErrorBody(response: Response, isJson: boolean): Promise<{ bod
 export async function apiFetch<T>(url: string, options: RequestInit = {}, action = 'request'): Promise<T> {
   let response: Response;
   try {
+    const signal = options.signal || AbortSignal.timeout(DEFAULT_API_TIMEOUT_MS);
     response = await fetch(url, {
       credentials: 'same-origin',
       ...options,
+      signal,
       headers: {
         Accept: 'application/json',
         ...(options.headers || {})

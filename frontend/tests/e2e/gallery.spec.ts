@@ -398,12 +398,16 @@ test('gallery queued thumbnails use lightweight placeholders until thumbnails ar
   expect(fullImageRequests).toEqual([]);
 });
 
-test('gallery thumbnail refresh rotates queued probes across later pending ids', async ({ page }) => {
-  const refreshedIds = new Set<string>();
+test('gallery thumbnail refresh batches all queued statuses without per-image requests', async ({ page }) => {
+  const statusBatches: string[][] = [];
+  const individualRequests: string[] = [];
   page.on('request', (request) => {
     const url = new URL(request.url());
+    if (request.method() === 'POST' && url.pathname === '/api/gallery/thumbnails/status') {
+      statusBatches.push((request.postDataJSON() as { ids?: string[] }).ids || []);
+    }
     if (request.method() === 'GET' && url.pathname.startsWith('/api/gallery/paged-img-')) {
-      refreshedIds.add(url.pathname.split('/').pop() || '');
+      individualRequests.push(url.pathname);
     }
   });
 
@@ -412,7 +416,27 @@ test('gallery thumbnail refresh rotates queued probes across later pending ids',
   });
 
   await expect(page.getByRole('img', { name: 'Paged gallery image 1', exact: true })).toBeVisible();
-  await expect.poll(() => refreshedIds.has('paged-img-5'), { timeout: 6000 }).toBe(true);
+  await expect.poll(() => statusBatches.some((ids) => ids.includes('paged-img-5')), { timeout: 6000 }).toBe(true);
+  expect(statusBatches[0]).toHaveLength(5);
+  expect(individualRequests).toEqual([]);
+});
+
+test('gallery AI batch analysis uses SSE without status polling', async ({ page }) => {
+  const statusPolls: string[] = [];
+  page.on('request', (request) => {
+    const url = new URL(request.url());
+    if (request.method() === 'GET' && url.pathname === '/api/assistant/gallery/batch/analyze/assistant-analysis-job') {
+      statusPolls.push(url.pathname);
+    }
+  });
+  await loadApp(page);
+
+  await page.getByRole('button', { name: 'Select', exact: true }).click();
+  await page.getByRole('img', { name: 'First gallery image', exact: true }).click();
+  await page.getByRole('button', { name: 'AI analyze', exact: true }).click();
+
+  await expect(page.getByRole('status')).toContainText('AI analysis complete. Analyzed 1.');
+  expect(statusPolls).toEqual([]);
 });
 
 test('lightbox navigates across pages with 2000 mocked images', async ({ page }) => {
@@ -438,6 +462,52 @@ test('lightbox navigates across pages with 2000 mocked images', async ({ page })
   await expect(lightbox).toContainText('paged-img-10.png');
   await expect(page).toHaveURL(/page=2/);
   await expect(page).toHaveURL(/image=paged-img-10/);
+});
+
+test('gallery mutations invalidate prefetched lightbox pages', async ({ page }) => {
+  await loadApp(page, { galleryImages: manyGalleryImages(20) });
+
+  const pageTwoResponse = page.waitForResponse((response) => {
+    const body = gallerySearchBody(response.request());
+    return body?.page === 2 && body.direction === 'next';
+  });
+  await page.getByRole('button', { name: 'Next', exact: true }).click();
+  await pageTwoResponse;
+
+  const firstPageThreePrefetch = page.waitForResponse((response) => {
+    const body = gallerySearchBody(response.request());
+    return body?.page === 3 && body.direction === 'next';
+  });
+  await page.getByRole('img', { name: 'Paged gallery image 18', exact: true }).click();
+  await firstPageThreePrefetch;
+  await page.keyboard.press('Escape');
+
+  await page.getByRole('button', { name: 'Select', exact: true }).click();
+  await page.getByRole('img', { name: 'Paged gallery image 10', exact: true }).click();
+  const refreshedPageTwo = page.waitForResponse((response) => {
+    const body = gallerySearchBody(response.request());
+    return body?.page === 2 && body.cursor === null;
+  });
+  await page.getByRole('button', { name: 'Delete selected', exact: true }).click();
+  const confirmDialog = page.getByRole('dialog', { name: 'Delete 1 selected image?' });
+  await confirmDialog.getByRole('button', { name: 'Delete selected' }).click();
+  await refreshedPageTwo;
+  await page.getByRole('button', { name: 'Cancel selection', exact: true }).click();
+
+  await expect(page.getByRole('img', { name: 'Paged gallery image 10', exact: true })).toBeHidden();
+  await expect(page.getByRole('img', { name: 'Paged gallery image 19', exact: true })).toBeVisible();
+
+  const refreshedPageThree = page.waitForResponse((response) => {
+    const body = gallerySearchBody(response.request());
+    return body?.page === 3 && body.direction === 'next';
+  });
+  await page.getByRole('img', { name: 'Paged gallery image 19', exact: true }).click();
+  await refreshedPageThree;
+  await page.keyboard.press('ArrowRight');
+
+  const lightbox = page.getByRole('dialog', { name: 'Image Details' });
+  await expect(lightbox).toContainText('paged-img-20.png');
+  await expect(page).toHaveURL(/page=3/);
 });
 
 test('single image delete uses custom confirmation and can be undone before the server delete', async ({ page }) => {

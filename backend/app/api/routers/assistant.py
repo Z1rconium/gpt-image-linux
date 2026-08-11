@@ -32,6 +32,7 @@ router.add_api_route("/api/assistant/image/prompt/optimize", assistant_vision.op
 router.add_api_route("/api/assistant/gallery/{image_id}/metadata", assistant_vision.get_gallery_metadata, methods=["GET"], response_model=AssistantGalleryMetadataResponse)
 router.add_api_route("/api/assistant/gallery/batch/analyze", assistant_batch.batch_analyze_gallery, methods=["POST"], response_model=AssistantGalleryBatchJobStatus, status_code=202)
 router.add_api_route("/api/assistant/gallery/batch/analyze/{job_id}", assistant_batch.get_batch_analyze_job, methods=["GET"], response_model=AssistantGalleryBatchJobStatus)
+router.add_api_route("/api/assistant/gallery/batch/analyze/{job_id}/events", assistant_batch.stream_batch_analyze_job, methods=["GET"])
 router.add_api_route("/api/assistant/gallery/{image_id}/describe", assistant_vision.describe_gallery_image, methods=["POST"], response_model=AssistantGalleryImageResponse)
 router.add_api_route("/api/assistant/gallery/{image_id}/prompt", assistant_vision.prompt_gallery_image, methods=["POST"], response_model=AssistantGalleryImageResponse)
 router.add_api_route("/api/assistant/gallery/{image_id}/analyze", assistant_vision.analyze_gallery_image, methods=["POST"], response_model=AssistantGalleryImageResponse)

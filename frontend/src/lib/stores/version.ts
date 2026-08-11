@@ -40,12 +40,14 @@ function createVersionStore() {
     subscribe,
     async loadVersion() {
       try {
-        const data = await apiFetch<{ version: string; github_repo?: string; release_url: string | null }>(
-          '/api/version',
-          {},
-          'loading version'
-        );
-        const latest = await fetchLatestVersion();
+        const [data, latest] = await Promise.all([
+          apiFetch<{ version: string; github_repo?: string; release_url: string | null }>(
+            '/api/version',
+            {},
+            'loading version'
+          ),
+          fetchLatestVersion()
+        ]);
         set({
           version: data.version,
           releaseUrl: data.release_url,

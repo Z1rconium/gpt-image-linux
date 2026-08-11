@@ -96,8 +96,32 @@ def test_gallery_image_download_and_zip(client, monkeypatch):
         metadata = json.loads(zf.read("metadata.json"))
         assert metadata["images"]
         assert "thumbnail_filename" not in metadata["images"][0]
-        assert "thumbnail_url" not in metadata["images"][0]
-        assert metadata["images"][0]["sha256"]
+    assert "thumbnail_url" not in metadata["images"][0]
+    assert metadata["images"][0]["sha256"]
+
+
+def test_gallery_thumbnail_statuses_are_fetched_in_one_batch(client, monkeypatch):
+    monkeypatch.setattr(gallery_maintenance, "generate_thumbnail_for_image", lambda filename: None)
+    _fake_gallery_entry("batch-thumb-1", "one", "1024x1024", "batch-thumb-1.png")
+    _fake_gallery_entry("batch-thumb-2", "two", "1024x1024", "batch-thumb-2.png")
+
+    response = client.post(
+        "/api/gallery/thumbnails/status",
+        json={"ids": ["batch-thumb-2", "missing-thumb", "batch-thumb-1"]},
+    )
+
+    assert response.status_code == 200
+    assert [item["id"] for item in response.json()] == ["batch-thumb-2", "batch-thumb-1"]
+    assert all(
+        set(item) == {"id", "thumbnail_filename", "thumbnail_url", "thumbnail_status"}
+        for item in response.json()
+    )
+
+    duplicate = client.post(
+        "/api/gallery/thumbnails/status",
+        json={"ids": ["batch-thumb-1", "batch-thumb-1"]},
+    )
+    assert duplicate.status_code == 422
 
 
 def test_gzip_compresses_text_but_bypasses_large_image_responses(client):

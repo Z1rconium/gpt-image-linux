@@ -16,6 +16,19 @@ const initialPromptSnippetsState: PromptSnippetsState = {
   query: ''
 };
 
+function snippetMatchesQuery(snippet: PromptSnippet, query: string) {
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  if (!normalizedQuery) return true;
+  return snippet.title.toLocaleLowerCase().includes(normalizedQuery) || snippet.prompt.toLocaleLowerCase().includes(normalizedQuery);
+}
+
+function sortSnippets(snippets: PromptSnippet[]) {
+  return [...snippets].sort((left, right) => {
+    if (left.favorite !== right.favorite) return left.favorite ? -1 : 1;
+    return right.updated_at.localeCompare(left.updated_at);
+  });
+}
+
 function createPromptSnippetsStore() {
   const { subscribe, update } = writable<PromptSnippetsState>(initialPromptSnippetsState);
 
@@ -57,7 +70,9 @@ function createPromptSnippetsStore() {
       );
       update((state) => ({
         ...state,
-        snippets: [snippet, ...state.snippets.filter((item) => item.id !== snippet.id)],
+        snippets: snippetMatchesQuery(snippet, state.query)
+          ? sortSnippets([snippet, ...state.snippets.filter((item) => item.id !== snippet.id)])
+          : state.snippets,
         saving: false
       }));
       return snippet;
@@ -81,7 +96,9 @@ function createPromptSnippetsStore() {
       );
       update((state) => ({
         ...state,
-        snippets: state.snippets.map((item) => (item.id === snippet.id ? snippet : item)),
+        snippets: snippetMatchesQuery(snippet, state.query)
+          ? sortSnippets([snippet, ...state.snippets.filter((item) => item.id !== snippet.id)])
+          : state.snippets.filter((item) => item.id !== snippet.id),
         saving: false
       }));
       return snippet;

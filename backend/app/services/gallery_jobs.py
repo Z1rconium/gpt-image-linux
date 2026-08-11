@@ -470,7 +470,27 @@ def _gallery_job_event_name(kind: str) -> str:
         return "sync"
     if kind == "import":
         return "import"
+    if kind == "ai_analyze":
+        return "analysis"
     return "export"
+
+
+def _gallery_ai_analyze_payload(job: dict) -> dict:
+    return {
+        "job_id": job.get("job_id"),
+        "status": job.get("status"),
+        "stage": job.get("stage"),
+        "message": job.get("message"),
+        "progress": job.get("progress") or 0,
+        "requested_count": job.get("requested_count") or 0,
+        "processed_count": job.get("processed_count") or 0,
+        "analyzed_count": job.get("exported_count") or 0,
+        "missing_count": job.get("missing_count") or 0,
+        "failed_count": job.get("failed_count") or 0,
+        "created_at": job.get("created_at"),
+        "updated_at": job.get("updated_at"),
+        "error": job.get("error"),
+    }
 
 
 def _gallery_job_payload(kind: str, job: dict) -> dict:
@@ -478,6 +498,8 @@ def _gallery_job_payload(kind: str, job: dict) -> dict:
         return _gallery_sync_payload(job)
     if kind == "import":
         return _gallery_import_payload(job)
+    if kind == "ai_analyze":
+        return _gallery_ai_analyze_payload(job)
     return _gallery_export_payload(job)
 
 
@@ -576,6 +598,102 @@ async def _poll_gallery_job_sse(kind: str) -> None:
         tasks = _get_gallery_job_sse_poller_tasks()
         if tasks.get(kind) is asyncio.current_task():
             tasks.pop(kind, None)
+
+
+async def stream_gallery_job(
+    *,
+    kind: str,
+    job_id: str,
+    request: Request,
+    event_name: str,
+    terminal_statuses: set[str],
+    payload_builder,
+    not_found_detail: str,
+):
+    job = await asyncio.to_thread(get_gallery_job, kind, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=not_found_detail)
+
+    client_ip = auth.get_client_ip(request)
+    sse_lease = await sse_limiter.acquire(client_ip)
+    if not sse_lease:
+        raise HTTPException(status_code=429, detail="Too many SSE connections")
+
+    async def event_stream():
+        start = time.monotonic()
+        last_refresh_at = start
+        last_updated_at: str | None = None
+        last_sent = 0.0
+        queue: asyncio.Queue = asyncio.Queue(maxsize=GALLERY_JOB_SSE_QUEUE_MAXSIZE)
+        subscribers = _get_gallery_job_subscribers(kind).setdefault(job_id, set())
+        subscribers.add(queue)
+        _start_gallery_job_sse_poller(kind)
+        try:
+            current_job = await asyncio.to_thread(get_gallery_job, kind, job_id)
+            if not current_job:
+                return
+            payload = payload_builder(current_job)
+            last_updated_at = str(payload.get("updated_at") or "")
+            last_sent = time.monotonic()
+            yield serialize_sse_event(event_name, payload)
+            if payload.get("status") in terminal_statuses:
+                return
+
+            while True:
+                if await request.is_disconnected():
+                    break
+                now = time.monotonic()
+                refreshed_at = await sse_limiter.refresh_if_needed(
+                    sse_lease,
+                    last_refresh_at,
+                )
+                if refreshed_at is None:
+                    break
+                last_refresh_at = refreshed_at
+                if now - start > config.SSE_CONNECTION_TTL_SECONDS:
+                    break
+                if now - last_sent >= 15:
+                    last_sent = now
+                    yield ": keep-alive\n\n"
+                    continue
+                wait_seconds = min(
+                    GALLERY_JOB_SSE_IDLE_CHECK_SECONDS,
+                    max(0.1, 15 - (now - last_sent)),
+                    max(0.1, config.SSE_CONNECTION_TTL_SECONDS - (now - start)),
+                )
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=wait_seconds)
+                except asyncio.TimeoutError:
+                    continue
+                if event.get("event") == "_missing":
+                    break
+                if event.get("event") != event_name:
+                    continue
+                payload = event.get("data")
+                if not isinstance(payload, dict):
+                    break
+                updated_at = str(payload.get("updated_at") or "")
+                if updated_at == last_updated_at:
+                    continue
+                last_updated_at = updated_at
+                last_sent = time.monotonic()
+                yield serialize_sse_event(event_name, payload)
+                if payload.get("status") in terminal_statuses:
+                    break
+        finally:
+            subscribers.discard(queue)
+            if not subscribers:
+                _get_gallery_job_subscribers(kind).pop(job_id, None)
+            await sse_limiter.release(sse_lease)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": PRIVATE_GALLERY_CACHE_CONTROL,
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 def _gallery_job_lease_expires_at() -> str:

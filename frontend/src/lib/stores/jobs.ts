@@ -126,9 +126,11 @@ function createJobsStore() {
   let jobsSource: EventSource | null = null;
   let jobsPollingTimer: ReturnType<typeof setInterval> | null = null;
   let jobsFeedHealthy = false;
-  let activeJobSource: EventSource | null = null;
   let activeJobPollingTimer: ReturnType<typeof setTimeout> | null = null;
+  const activeJobPollsInFlight = new Set<string>();
   let trackedJobId: string | null = null;
+  let trackedJobUpdate: ((job: GenerateJobStatus) => Promise<void>) | null = null;
+  let trackedJobError: ((message: string) => void) | null = null;
   let historyRequestSeq = 0;
 
   subscribe((value) => {
@@ -136,6 +138,8 @@ function createJobsStore() {
   });
 
   function applyActiveJobs(jobs: GenerateJobStatus[]) {
+    const trackedJob = trackedJobId ? jobs.find((job) => job.job_id === trackedJobId) : null;
+    if (trackedJob) applyTrackedJob(trackedJob);
     const activeIds = new Set(jobs.map((job) => job.job_id));
     const selectedIds = new Set([...state.selectedIds].filter((id) => activeIds.has(id)));
     update((current) => {
@@ -278,22 +282,36 @@ function createJobsStore() {
 
   function startJobsEvents() {
     jobsSource?.close();
-    jobsSource = openJsonEventSource<GenerateJobStatus[]>('/api/generate/jobs/events', {
-      onEvent: ({ data }) => {
+    jobsFeedHealthy = false;
+    const source = openJsonEventSource<GenerateJobStatus[] | GenerateJobStatus>('/api/generate/jobs/events', {
+      onEvent: ({ event, data }) => {
         stopJobsPolling();
         jobsFeedHealthy = true;
-        if (Array.isArray(data)) applyActiveJobs(data);
+        clearActiveJobPollingTimer();
+        if (event === 'jobs' && Array.isArray(data)) {
+          applyActiveJobs(data);
+        } else if (event === 'job' && !Array.isArray(data)) {
+          applyTrackedJob(data);
+        }
       },
       onNetworkError: () => {
         jobsFeedHealthy = false;
         startJobsPolling();
+        startTrackedJobPolling();
       },
       onError: () => {
         jobsFeedHealthy = false;
         startJobsPolling();
+        startTrackedJobPolling();
       }
-    });
-    jobsFeedHealthy = true;
+    }, ['jobs', 'job']);
+    source.onopen = () => {
+      if (jobsSource !== source) return;
+      jobsFeedHealthy = true;
+      stopJobsPolling();
+      clearActiveJobPollingTimer();
+    };
+    jobsSource = source;
   }
 
   function toggleSelection(jobId: string) {
@@ -326,26 +344,29 @@ function createJobsStore() {
     setPreviewError: (message: string) => void
   ) {
     if (!jobId) return;
-    let terminal = false;
     closeActiveJobSource();
     trackedJobId = jobId;
-    activeJobSource = openJsonEventSource<GenerateJobStatus>(`/api/generate/${encodeURIComponent(jobId)}/events`, {
-      onEvent: ({ data }) => {
-        if (trackedJobId !== jobId) return;
-        void updatePreviewFromJob(data);
-        if (!isActiveJobStatus(data.status)) {
-          terminal = true;
-          closeActiveJobSource();
-        }
-      },
-      onNetworkError: () => {
-        if (!terminal && trackedJobId === jobId) void pollJob(jobId, updatePreviewFromJob, setPreviewError);
-      },
-      onError: () => {
-        closeActiveJobEventSource();
-        if (!terminal && trackedJobId === jobId) void pollJob(jobId, updatePreviewFromJob, setPreviewError);
-      }
-    });
+    trackedJobUpdate = updatePreviewFromJob;
+    trackedJobError = setPreviewError;
+    void pollJob(jobId, updatePreviewFromJob, setPreviewError);
+  }
+
+  function applyTrackedJob(job: GenerateJobStatus) {
+    if (trackedJobId !== job.job_id || !trackedJobUpdate) return;
+    const updatePreviewFromJob = trackedJobUpdate;
+    void updatePreviewFromJob(job);
+    if (!isActiveJobStatus(job.status)) closeActiveJobSource();
+  }
+
+  function startTrackedJobPolling() {
+    if (
+      !trackedJobId ||
+      !trackedJobUpdate ||
+      !trackedJobError ||
+      activeJobPollingTimer ||
+      activeJobPollsInFlight.has(trackedJobId)
+    ) return;
+    void pollJob(trackedJobId, trackedJobUpdate, trackedJobError);
   }
 
   async function pollJob(
@@ -353,18 +374,21 @@ function createJobsStore() {
     updatePreviewFromJob: (job: GenerateJobStatus) => Promise<void>,
     setPreviewError: (message: string) => void
   ) {
-    if (trackedJobId !== jobId) return;
+    if (trackedJobId !== jobId || activeJobPollsInFlight.has(jobId)) return;
     clearActiveJobPollingTimer();
+    activeJobPollsInFlight.add(jobId);
     try {
       const job = await apiFetch<GenerateJobStatus>(`/api/generate/${encodeURIComponent(jobId)}`, {}, 'loading job');
       if (trackedJobId !== jobId) return;
       await updatePreviewFromJob(job);
       if (trackedJobId !== jobId) return;
       if (isActiveJobStatus(job.status)) {
-        activeJobPollingTimer = setTimeout(() => {
-          activeJobPollingTimer = null;
-          if (trackedJobId === jobId) void pollJob(jobId, updatePreviewFromJob, setPreviewError);
-        }, 1200);
+        if (!jobsFeedHealthy) {
+          activeJobPollingTimer = setTimeout(() => {
+            activeJobPollingTimer = null;
+            if (trackedJobId === jobId) void pollJob(jobId, updatePreviewFromJob, setPreviewError);
+          }, 1200);
+        }
       } else {
         closeActiveJobSource();
       }
@@ -372,6 +396,8 @@ function createJobsStore() {
       if (trackedJobId !== jobId) return;
       setPreviewError(error instanceof Error ? error.message : get(t).messages.jobLoadFailed);
       closeActiveJobSource();
+    } finally {
+      activeJobPollsInFlight.delete(jobId);
     }
   }
 
@@ -406,20 +432,16 @@ function createJobsStore() {
     };
   }
 
-  function closeActiveJobEventSource() {
-    activeJobSource?.close();
-    activeJobSource = null;
-  }
-
   function clearActiveJobPollingTimer() {
     if (activeJobPollingTimer) clearTimeout(activeJobPollingTimer);
     activeJobPollingTimer = null;
   }
 
   function closeActiveJobSource() {
-    closeActiveJobEventSource();
     clearActiveJobPollingTimer();
     trackedJobId = null;
+    trackedJobUpdate = null;
+    trackedJobError = null;
   }
 
   function cleanup() {

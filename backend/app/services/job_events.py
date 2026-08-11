@@ -68,6 +68,9 @@ def publish_generate_job(
     event = {"event": "job", "data": public_generate_job(job)}
     for queue in list(get_job_subscribers().get(job["job_id"], set())):
         publish_queue(queue, event)
+    if job.get("status") not in ACTIVE_GENERATE_JOB_STATUSES:
+        for queue in list(get_jobs_subscribers()):
+            publish_queue(queue, event)
     publish_generate_jobs(debounce=list_debounce, reconcile=list_reconcile)
 
 
@@ -305,4 +308,3 @@ async def store_generate_job_async(
     if is_terminal:
         await dispatch_job_webhook_async(job)
     return job
-

@@ -22,14 +22,14 @@ test('persisted English loads only the English locale', async ({ page }) => {
   expect(requested.some((path) => path.endsWith('/zh-CN.ts'))).toBe(false);
 });
 
-test('persisted Chinese loads only the Chinese locale', async ({ page }) => {
+test('persisted Chinese keeps the selected locale lazy while English stays in the entry graph', async ({ page }) => {
   const requested = localeRequests(page);
 
   await loadApp(page, { language: 'zh-CN' });
 
   await expect(page.locator('html')).toHaveAttribute('lang', 'zh-CN');
   expect(requested.some((path) => path.endsWith('/zh-CN.ts'))).toBe(true);
-  expect(requested.some((path) => path.endsWith('/en.ts'))).toBe(false);
+  expect(requested.some((path) => path.endsWith('/en.ts'))).toBe(true);
 });
 
 test('browser Chinese is used when no language is persisted', async ({ page }) => {

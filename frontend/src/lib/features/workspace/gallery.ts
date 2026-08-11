@@ -1,16 +1,22 @@
+import { get } from 'svelte/store';
 import type { AssistantGalleryBatchJobStatus } from '$lib/api/types/assistant';
+import { t } from '$lib/i18n';
+import { waitForGalleryJob } from '$lib/stores/galleryDeferredActions';
 
 export async function waitForGalleryAnalysis(
   initialJob: AssistantGalleryBatchJobStatus,
-  loadJob: (jobId: string) => Promise<AssistantGalleryBatchJobStatus>,
-  onProgress: (job: AssistantGalleryBatchJobStatus) => void,
-  pollIntervalMs = 1200
+  onProgress: (job: AssistantGalleryBatchJobStatus) => void
 ) {
-  let currentJob = initialJob;
-  while (currentJob.status === 'queued' || currentJob.status === 'running') {
-    onProgress(currentJob);
-    await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
-    currentJob = await loadJob(initialJob.job_id);
+  onProgress(initialJob);
+  if (initialJob.status === 'success') return initialJob;
+  if (initialJob.status === 'error') {
+    throw new Error(initialJob.error || initialJob.message || get(t).messages.requestFailed);
   }
-  return currentJob;
+  return waitForGalleryJob<AssistantGalleryBatchJobStatus>(
+    {
+      eventsUrl: `/api/assistant/gallery/batch/analyze/${encodeURIComponent(initialJob.job_id)}/events`,
+      eventNames: ['analysis']
+    },
+    onProgress
+  );
 }

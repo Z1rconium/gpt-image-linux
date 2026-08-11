@@ -1,16 +1,18 @@
 import { browser } from '$app/environment';
 import { get, writable } from 'svelte/store';
+import en from './locales/en';
 import type { Language, Translation } from './types';
 
 export type { Language, Translation } from './types';
 
 const STORAGE_KEY = 'gpt-image-panel-language';
+const DEFAULT_LANGUAGE: Language = 'en';
 const emptyTranslation = {} as Translation;
-const translationCache = new Map<Language, Translation>();
+const translationCache = new Map<Language, Translation>([[DEFAULT_LANGUAGE, en]]);
 let latestLoad = 0;
 
 const loaders: Record<Language, () => Promise<{ default: Translation }>> = {
-  en: () => import('./locales/en'),
+  en: async () => ({ default: en }),
   'zh-CN': () => import('./locales/zh-CN')
 };
 
@@ -22,8 +24,8 @@ function normalizeLanguage(value: string | null | undefined): Language | null {
 }
 
 function getInitialLanguage(): Language {
-  if (!browser) return 'en';
-  return normalizeLanguage(localStorage.getItem(STORAGE_KEY)) || normalizeLanguage(navigator.language) || 'en';
+  if (!browser) return DEFAULT_LANGUAGE;
+  return normalizeLanguage(localStorage.getItem(STORAGE_KEY)) || normalizeLanguage(navigator.language) || DEFAULT_LANGUAGE;
 }
 
 async function loadTranslation(nextLanguage: Language): Promise<Translation> {
@@ -38,12 +40,19 @@ const initialLanguage = getInitialLanguage();
 let requestedLanguage = initialLanguage;
 
 export const language = writable<Language>(initialLanguage);
-export const t = writable<Translation>(emptyTranslation);
-export const i18nReady = writable(false);
+export const t = writable<Translation>(initialLanguage === DEFAULT_LANGUAGE ? en : emptyTranslation);
+export const i18nReady = writable(initialLanguage === DEFAULT_LANGUAGE);
 
 export async function setLanguage(nextLanguage: Language): Promise<void> {
   requestedLanguage = nextLanguage;
   const loadId = ++latestLoad;
+  const cached = translationCache.get(nextLanguage);
+  if (cached) {
+    language.set(nextLanguage);
+    t.set(cached);
+    i18nReady.set(true);
+    return;
+  }
   i18nReady.set(false);
   try {
     const translation = await loadTranslation(nextLanguage);
@@ -53,12 +62,12 @@ export async function setLanguage(nextLanguage: Language): Promise<void> {
     i18nReady.set(true);
   } catch (error) {
     if (loadId !== latestLoad) return;
-    if (nextLanguage !== 'en') {
+    if (nextLanguage !== DEFAULT_LANGUAGE) {
       try {
-        const fallback = await loadTranslation('en');
+        const fallback = await loadTranslation(DEFAULT_LANGUAGE);
         if (loadId !== latestLoad) return;
-        requestedLanguage = 'en';
-        language.set('en');
+        requestedLanguage = DEFAULT_LANGUAGE;
+        language.set(DEFAULT_LANGUAGE);
         t.set(fallback);
         i18nReady.set(true);
         return;

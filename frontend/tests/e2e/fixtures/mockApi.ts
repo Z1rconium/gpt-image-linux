@@ -11,6 +11,7 @@ type GalleryImageFixture = {
   size: string;
   filename: string;
   image_url?: string;
+  thumbnail_filename?: string | null;
   thumbnail_url: string;
   thumbnail_status?: 'ready' | 'queued' | 'missing';
   created_at: string;
@@ -689,6 +690,47 @@ async function mockApi(page: Page, options: MockOptions = {}) {
       );
       return;
     }
+    if (url.pathname === '/api/assistant/gallery/batch/analyze' && request.method() === 'POST') {
+      const body = request.postDataJSON() as { ids?: string[]; selection_token?: string };
+      const requestedCount = resolveBatchIds(body).length;
+      await route.fulfill(
+        json(
+          {
+            job_id: 'assistant-analysis-job',
+            status: 'queued',
+            stage: 'queued',
+            message: 'queued',
+            progress: 0,
+            requested_count: requestedCount,
+            processed_count: 0,
+            analyzed_count: 0,
+            missing_count: 0,
+            failed_count: 0
+          },
+          202
+        )
+      );
+      return;
+    }
+    if (url.pathname === '/api/assistant/gallery/batch/analyze/assistant-analysis-job/events') {
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/event-stream',
+        body: `event: analysis\ndata: ${JSON.stringify({
+          job_id: 'assistant-analysis-job',
+          status: 'success',
+          stage: 'completed',
+          message: 'done',
+          progress: 100,
+          requested_count: 1,
+          processed_count: 1,
+          analyzed_count: 1,
+          missing_count: 0,
+          failed_count: 0
+        })}\n\n`
+      });
+      return;
+    }
     if (url.pathname.match(/^\/api\/assistant\/gallery\/[^/]+\/metadata$/) && request.method() === 'GET') {
       const imageId = decodeURIComponent(url.pathname.split('/').at(-2) || '');
       await route.fulfill(
@@ -766,6 +808,23 @@ async function mockApi(page: Page, options: MockOptions = {}) {
             expires_at: '2026-05-18T13:00:00Z'
           },
           201
+        )
+      );
+      return;
+    }
+    if (url.pathname === '/api/gallery/thumbnails/status' && request.method() === 'POST') {
+      const body = request.postDataJSON() as { ids?: string[] };
+      const ids = new Set(body.ids || []);
+      await route.fulfill(
+        json(
+          galleryImages
+            .filter((image) => ids.has(image.id))
+            .map(({ id, thumbnail_filename, thumbnail_url, thumbnail_status }) => ({
+              id,
+              thumbnail_filename,
+              thumbnail_url,
+              thumbnail_status
+            }))
         )
       );
       return;
@@ -872,7 +931,8 @@ async function mockApi(page: Page, options: MockOptions = {}) {
     }
     if (url.pathname.startsWith('/api/generate/job-')) {
       const id = url.pathname.split('/').pop() || 'job-generated';
-      await route.fulfill(json(job(id, 'polled prompt')));
+      const generatedJob = id === 'job-generated' ? options.generatedJob : null;
+      await route.fulfill(json(generatedJob ?? job(id, 'polled prompt')));
       return;
     }
 
