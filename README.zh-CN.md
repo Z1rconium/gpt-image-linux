@@ -128,6 +128,54 @@ docker build \
   -t gpt-image-panel .
 ```
 
+### Caddy 反向代理
+
+Caddy 与应用运行在同一台主机时，使用占位域名，并继续将 `9090` 端口仅绑定到回环地址：
+
+```caddyfile
+panel.example.com {
+    reverse_proxy 127.0.0.1:9090
+}
+```
+
+通过 HTTPS 部署时，在 `.env` 中设置与域名匹配的应用来源和 Host 白名单：
+
+```dotenv
+PUBLIC_ORIGIN=https://panel.example.com
+ALLOWED_HOSTS=panel.example.com
+ACCESS_COOKIE_SECURE=true
+```
+
+只有一个上游时，推荐使用上面的基础反代配置。如果确实需要主动健康检查，请先确认 `/health` 在相同 `Host` 请求头下返回 `200`，然后使用复数形式的 `health_headers` 配置块：
+
+```bash
+curl -i -H 'Host: panel.example.com' http://127.0.0.1:9090/health
+```
+
+```caddyfile
+panel.example.com {
+    reverse_proxy 127.0.0.1:9090 {
+        health_uri /health
+        health_interval 15s
+        health_timeout 3s
+        health_status 200
+
+        health_headers {
+            Host panel.example.com
+        }
+    }
+}
+```
+
+健康检查响应状态码不在配置范围内时，Caddy 会将上游标记为不健康。只有一个上游时，这会导致请求失败，直到健康检查恢复。修改后验证并重载 Caddy：
+
+```bash
+sudo caddy validate --config /etc/caddy/Caddyfile
+sudo systemctl reload caddy
+```
+
+Caddy 自动 HTTPS 要求域名解析到服务器，并且入站 `80`、`443` 端口可访问。使用 Cloudflare 等 CDN 代理时，应确保边缘证书明确覆盖完整域名，特别是多级子域名；否则请求尚未到达 Caddy，浏览器就可能报告 `ERR_SSL_VERSION_OR_CIPHER_MISMATCH`。如果 Caddy 运行在容器内，`127.0.0.1` 指向 Caddy 容器自身，此时应改用应用服务名或其他可访问的容器网络地址。
+
 ### 本地开发
 
 先使用本机的 Python 3.11+ 创建项目专用虚拟环境。`.venv` 属于本地开发环境，仓库不提供该目录。

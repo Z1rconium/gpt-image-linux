@@ -143,6 +143,54 @@ docker build \
   -t gpt-image-panel .
 ```
 
+### Caddy Reverse Proxy
+
+When Caddy and the application run on the same host, use a placeholder hostname and keep port `9090` bound to loopback:
+
+```caddyfile
+panel.example.com {
+    reverse_proxy 127.0.0.1:9090
+}
+```
+
+For an HTTPS deployment, set the matching application origin and Host allowlist in `.env`:
+
+```dotenv
+PUBLIC_ORIGIN=https://panel.example.com
+ALLOWED_HOSTS=panel.example.com
+ACCESS_COOKIE_SECURE=true
+```
+
+The basic proxy is recommended when there is only one upstream. If active health checks are required, first confirm that `/health` returns `200` with the same `Host` header, then use the plural `health_headers` block:
+
+```bash
+curl -i -H 'Host: panel.example.com' http://127.0.0.1:9090/health
+```
+
+```caddyfile
+panel.example.com {
+    reverse_proxy 127.0.0.1:9090 {
+        health_uri /health
+        health_interval 15s
+        health_timeout 3s
+        health_status 200
+
+        health_headers {
+            Host panel.example.com
+        }
+    }
+}
+```
+
+A health-check response outside the configured status range marks the upstream unhealthy. With only one upstream, this can make requests fail until the check succeeds again. Validate and reload Caddy after changes:
+
+```bash
+sudo caddy validate --config /etc/caddy/Caddyfile
+sudo systemctl reload caddy
+```
+
+Caddy automatic HTTPS requires the hostname to resolve to the server and inbound ports `80` and `443` to be reachable. When using a CDN proxy such as Cloudflare, ensure its edge certificate explicitly covers the complete hostname, especially for multi-label subdomains; otherwise browsers may report `ERR_SSL_VERSION_OR_CIPHER_MISMATCH` before traffic reaches Caddy. If Caddy runs in a container, `127.0.0.1` refers to that container, so use the application service name or another reachable container-network address instead.
+
 ### Local Development
 
 Create a project-local Python 3.11+ virtual environment first. The `.venv` directory is local developer state and is not provided by the repository.

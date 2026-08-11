@@ -127,6 +127,54 @@ docker build \
   -t gpt-image-panel .
 ```
 
+### Caddy Reverse Proxy
+
+Caddy 與應用程式在同一台主機執行時，請使用佔位網域，並繼續將 `9090` 連接埠僅綁定至迴環位址：
+
+```caddyfile
+panel.example.com {
+    reverse_proxy 127.0.0.1:9090
+}
+```
+
+透過 HTTPS 部署時，請在 `.env` 設定與網域相符的應用程式來源與 Host Allowlist：
+
+```dotenv
+PUBLIC_ORIGIN=https://panel.example.com
+ALLOWED_HOSTS=panel.example.com
+ACCESS_COOKIE_SECURE=true
+```
+
+只有一個上游時，建議使用上面的基本反代設定。如果確實需要主動健康檢查，請先確認 `/health` 在相同 `Host` Request Header 下回傳 `200`，再使用複數形式的 `health_headers` 設定區塊：
+
+```bash
+curl -i -H 'Host: panel.example.com' http://127.0.0.1:9090/health
+```
+
+```caddyfile
+panel.example.com {
+    reverse_proxy 127.0.0.1:9090 {
+        health_uri /health
+        health_interval 15s
+        health_timeout 3s
+        health_status 200
+
+        health_headers {
+            Host panel.example.com
+        }
+    }
+}
+```
+
+健康檢查回應狀態碼不在設定範圍內時，Caddy 會將上游標記為不健康。只有一個上游時，這會導致要求失敗，直到健康檢查恢復。修改後請驗證並重新載入 Caddy：
+
+```bash
+sudo caddy validate --config /etc/caddy/Caddyfile
+sudo systemctl reload caddy
+```
+
+Caddy 自動 HTTPS 要求網域解析至伺服器，且入站 `80`、`443` 連接埠可存取。使用 Cloudflare 等 CDN Proxy 時，應確認 Edge Certificate 明確涵蓋完整網域，尤其是多層子網域；否則要求尚未到達 Caddy，瀏覽器就可能顯示 `ERR_SSL_VERSION_OR_CIPHER_MISMATCH`。如果 Caddy 在容器內執行，`127.0.0.1` 指向 Caddy 容器本身，此時應改用應用程式服務名稱或其他可存取的容器網路位址。
+
 ### 本機開發
 
 先使用本機 Python 3.11+ 建立專案專用虛擬環境。`.venv` 屬於本機開發狀態，專案儲存庫不提供此目錄。
