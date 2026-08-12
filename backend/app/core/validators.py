@@ -1,3 +1,4 @@
+import asyncio
 import ipaddress
 import os
 import re
@@ -136,6 +137,10 @@ def resolve_hostname(hostname: str) -> tuple[str, list[str]]:
     return hostname, list(dict.fromkeys(resolved_ips))
 
 
+async def resolve_hostname_async(hostname: str) -> tuple[str, list[str]]:
+    return await asyncio.to_thread(resolve_hostname, hostname)
+
+
 def response_peer_ip(response: object) -> str | None:
     connection = getattr(response, "connection", None)
     transport = getattr(connection, "transport", None)
@@ -270,7 +275,12 @@ def _is_default_r2_endpoint_hostname(hostname: str) -> bool:
     )
 
 
-def validate_r2_endpoint_url(url: str, allowlist: str | None = None) -> None:
+def validate_r2_endpoint_url(
+    url: str,
+    allowlist: str | None = None,
+    *,
+    resolve_dns: bool = True,
+) -> None:
     try:
         parsed = urlsplit(url)
         _ = parsed.port
@@ -304,13 +314,14 @@ def validate_r2_endpoint_url(url: str, allowlist: str | None = None) -> None:
             f"R2_ENDPOINT_HOST_ALLOWLIST. Allowed: {allowed_message}"
         )
 
-    _validate_public_dns_resolution(
-        hostname,
-        private_ip_error=(
-            "R2 endpoint hostname '{hostname}' resolves to private/internal "
-            "IP(s): {resolved_info}"
-        ),
-    )
+    if resolve_dns:
+        _validate_public_dns_resolution(
+            hostname,
+            private_ip_error=(
+                "R2 endpoint hostname '{hostname}' resolves to private/internal "
+                "IP(s): {resolved_info}"
+            ),
+        )
 
 
 def normalize_r2_endpoint_url(url: str | None) -> str:
@@ -339,7 +350,12 @@ def normalize_r2_endpoint_url(url: str | None) -> str:
         host = f"{host}:{port}"
     path = parsed.path.rstrip("/")
     normalized = urlunsplit(("https", host, path, "", ""))
-    validate_r2_endpoint_url(normalized, config.R2_ENDPOINT_HOST_ALLOWLIST)
+    # Pydantic validators and synchronous settings normalization must not do DNS.
+    validate_r2_endpoint_url(
+        normalized,
+        config.R2_ENDPOINT_HOST_ALLOWLIST,
+        resolve_dns=False,
+    )
     return normalized
 
 
@@ -389,6 +405,25 @@ def validate_webhook_url(url: str, allowlist: str = "") -> None:
         allowlist=allowlist,
         allowlist_error_prefix="Webhook hostname",
     )
+
+
+async def validate_upstream_url_async(url: str, allowlist: str) -> None:
+    await asyncio.to_thread(validate_upstream_url, url, allowlist)
+
+
+async def validate_r2_endpoint_url_async(
+    url: str,
+    allowlist: str | None = None,
+) -> None:
+    await asyncio.to_thread(validate_r2_endpoint_url, url, allowlist)
+
+
+async def validate_image_url_async(url: str) -> None:
+    await asyncio.to_thread(validate_image_url, url)
+
+
+async def validate_webhook_url_async(url: str, allowlist: str = "") -> None:
+    await asyncio.to_thread(validate_webhook_url, url, allowlist)
 
 
 def normalize_webhook_url(url: str | None) -> str:

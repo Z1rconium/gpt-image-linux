@@ -181,6 +181,17 @@ def test_allow_unauthenticated_startup_logs_warning(tmp_path, caplog):
     assert "without access-key authentication" in caplog.text
 
 
+def test_admin_key_fallback_to_access_key_logs_warning(tmp_path, caplog):
+    _configure_runtime(tmp_path, access_key="secret", allow_unauthenticated=False)
+
+    caplog.set_level(logging.WARNING, logger="backend.app.api.app_state")
+    with _test_client():
+        pass
+
+    assert "ADMIN_KEY is equal to ACCESS_KEY" in caplog.text
+    assert "not independent" in caplog.text
+
+
 def test_frontend_build_assets_are_available_before_access_unlock(tmp_path, monkeypatch):
     _configure_runtime(tmp_path, access_key="secret", allow_unauthenticated=False)
     build_dir = tmp_path / "frontend_build"
@@ -212,6 +223,23 @@ def test_access_lockout(tmp_path):
         assert "Too many failed attempts" in resp.json()["detail"]
 
 
+def test_access_lockout_persists_across_app_state_reset(tmp_path):
+    _configure_runtime(tmp_path, access_key="secret", allow_unauthenticated=False)
+    with _test_client(raise_server_exceptions=False) as client:
+        for _ in range(config.ACCESS_MAX_FAILURES):
+            resp = client.post("/api/access", json={"access_key": "wrong"})
+        assert resp.status_code == 401
+
+    backend_main.app.state._state.clear()
+    db_repo.close_database_connections()
+
+    with _test_client(raise_server_exceptions=False) as client:
+        resp = client.post("/api/access", json={"access_key": "wrong"})
+
+    assert resp.status_code == 429
+    assert "Too many failed attempts" in resp.json()["detail"]
+
+
 def test_access_failures_stays_bounded_under_unique_ips(tmp_path, monkeypatch):
     _configure_runtime(tmp_path, access_key="secret", allow_unauthenticated=False)
     monkeypatch.setattr(access_router, "_ACCESS_FAILURES_MAX_SIZE", 3)
@@ -228,8 +256,12 @@ def test_access_failures_stays_bounded_under_unique_ips(tmp_path, monkeypatch):
             resp = client.post("/api/access", json={"access_key": "wrong"})
             assert resp.status_code == 401
 
-        failures = backend_main.app.state.access_failures
-        assert list(failures.keys()) == ["10.0.0.2", "10.0.0.3", "10.0.0.4"]
+        failures = coordination_repo.list_access_failures()
+        assert [failure["client_ip"] for failure in failures] == [
+            "10.0.0.2",
+            "10.0.0.3",
+            "10.0.0.4",
+        ]
         assert len(failures) == 3
 
 
@@ -1190,6 +1222,7 @@ def test_r2_backup_settings_rejects_private_endpoint_before_probe(client, monkey
             "key_prefix": "gallery/",
             "access_key_id": "${TEST_R2_ACCESS_KEY_ID}",
             "secret_access_key": "${TEST_R2_SECRET_ACCESS_KEY}",
+            "use_credentials": True,
         },
     )
     assert health.status_code == 422
@@ -1229,6 +1262,7 @@ def test_r2_backup_settings_allows_custom_endpoint_only_with_admin_allowlist(
             "key_prefix": "gallery/",
             "access_key_id": "${TEST_R2_ACCESS_KEY_ID}",
             "secret_access_key": "${TEST_R2_SECRET_ACCESS_KEY}",
+            "use_credentials": True,
         },
     )
     assert blocked.status_code == 422
@@ -1260,6 +1294,7 @@ def test_r2_backup_settings_allows_custom_endpoint_only_with_admin_allowlist(
             "key_prefix": "gallery/",
             "access_key_id": "${TEST_R2_ACCESS_KEY_ID}",
             "secret_access_key": "${TEST_R2_SECRET_ACCESS_KEY}",
+            "use_credentials": True,
         },
     )
     assert allowed.status_code == 200

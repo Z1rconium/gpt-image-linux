@@ -311,6 +311,14 @@ async def update_settings(req: SettingsRequest):
         from ..presets import get_r2_backup_settings
         current_r2 = get_r2_backup_settings()
         updated_r2 = apply_r2_backup_settings(current_r2, req.r2_backup)
+        if updated_r2.get("endpoint_url"):
+            try:
+                await ssrf.validate_r2_endpoint_url_async(
+                    updated_r2["endpoint_url"],
+                    config.R2_ENDPOINT_HOST_ALLOWLIST,
+                )
+            except ValueError as e:
+                raise HTTPException(status_code=422, detail=str(e)) from e
         _validate_r2_secret_bindings(updated_r2)
         await asyncio.to_thread(save_r2_backup_settings, updated_r2)
     return await asyncio.to_thread(build_settings_response)
@@ -328,6 +336,14 @@ async def check_r2_settings_health(req: R2BackupSettingsRequest):
 
     current = await asyncio.to_thread(get_r2_backup_settings)
     draft = apply_r2_backup_settings(current, req)
+    if draft.get("endpoint_url"):
+        try:
+            await ssrf.validate_r2_endpoint_url_async(
+                draft["endpoint_url"],
+                config.R2_ENDPOINT_HOST_ALLOWLIST,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e)) from e
     _validate_r2_secret_bindings(draft)
     if not req.use_credentials:
         return R2HealthResponse(
@@ -456,7 +472,11 @@ def preset_health_status(checks: list[dict]) -> str:
     return health_status(blocking_checks)
 
 
-def validate_health_api_url(api_url: str, api_path: str, checks: list[dict]) -> bool:
+async def validate_health_api_url(
+    api_url: str,
+    api_path: str,
+    checks: list[dict],
+) -> bool:
     if not api_url:
         add_health_check(checks, "api_url", "error", "API URL is not configured")
         return False
@@ -468,7 +488,7 @@ def validate_health_api_url(api_url: str, api_path: str, checks: list[dict]) -> 
         return False
 
     try:
-        ssrf.validate_upstream_url(
+        await ssrf.validate_upstream_url_async(
             build_upstream_url(normalized_api_url, api_path),
             config.UPSTREAM_HOST_ALLOWLIST,
         )
@@ -529,7 +549,11 @@ async def check_settings_preset_health(
     api_path = str(preset.get("api_path") or "")
 
     api_path_ok = validate_health_api_path(api_path, checks)
-    url_ok = validate_health_api_url(api_url, api_path, checks) if api_path_ok else False
+    url_ok = (
+        await validate_health_api_url(api_url, api_path, checks)
+        if api_path_ok
+        else False
+    )
     validate_health_api_key(preset.get("api_key", ""), checks)
     effective_api_key = get_effective_preset_api_key(preset) if req and req.use_credentials else ""
 

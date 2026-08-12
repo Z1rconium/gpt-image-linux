@@ -64,6 +64,10 @@ def validate_assistant_endpoint(api_url: str, api_path: str) -> str:
     return build_upstream_url(normalized_api_url, normalize_assistant_api_path(api_path))
 
 
+async def validate_assistant_endpoint_async(api_url: str, api_path: str) -> str:
+    return await asyncio.to_thread(validate_assistant_endpoint, api_url, api_path)
+
+
 def _json_schema_instruction(schema: dict[str, Any]) -> str:
     return (
         "Return only valid JSON matching this shape. Do not wrap in markdown.\n"
@@ -250,7 +254,10 @@ async def request_assistant_json(
     prevalidated_endpoint: str | None = None,
 ) -> tuple[dict[str, Any], str, int]:
     normalized_api_path = normalize_assistant_api_path(api_path)
-    endpoint = prevalidated_endpoint or validate_assistant_endpoint(api_url, normalized_api_path)
+    endpoint = prevalidated_endpoint or await validate_assistant_endpoint_async(
+        api_url,
+        normalized_api_path,
+    )
     timeout_seconds = float(timeout_seconds or config.PROMPT_OPTIMIZER_TIMEOUT_SECONDS)
     model = str(model or config.PROMPT_OPTIMIZER_MODEL).strip() or config.PROMPT_OPTIMIZER_MODEL
     system = "\n\n".join([system_prompt.strip(), _json_schema_instruction(schema)])

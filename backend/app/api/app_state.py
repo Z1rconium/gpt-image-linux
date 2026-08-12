@@ -1,7 +1,7 @@
 import asyncio
+import hmac
 import logging
 import os
-from collections import OrderedDict
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -111,6 +111,16 @@ async def lifespan(app: FastAPI):
         config.ALLOW_UNAUTHENTICATED and not config.ACCESS_KEY
     ):
         raise RuntimeError("ADMIN_KEY is required for Settings management step-up")
+    if (
+        config.ACCESS_KEY
+        and admin_key
+        and hmac.compare_digest(admin_key, config.ACCESS_KEY)
+    ):
+        logger.warning(
+            "ADMIN_KEY is equal to ACCESS_KEY; Settings management step-up is "
+            "not independent. Set a distinct ADMIN_KEY to enforce separate "
+            "admin verification."
+        )
     if (config.PUBLIC_IMAGE_BASE_URL or config.PUBLIC_THUMBNAIL_BASE_URL) and len(
         config.CDN_SIGNING_SECRET.encode("utf-8")
     ) < 32:
@@ -257,7 +267,6 @@ async def lifespan(app: FastAPI):
     app.state.gallery_ai_analyze_dispatcher_task = asyncio.create_task(
         assistant_batch.run_ai_analyze_dispatcher(app.state.worker_id)
     )
-    app.state.access_failures: OrderedDict[str, tuple[int, float]] = OrderedDict()
     job_events.reconcile_active_generate_jobs_from_storage()
     from ..services import runtime_metrics
     app.state.runtime_metrics_refresher_task = asyncio.create_task(

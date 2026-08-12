@@ -261,7 +261,7 @@ def test_schema_migrations_are_recorded_and_idempotent(tmp_path):
         anchor_table = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE name = 'gallery_page_anchors'"
         ).fetchone()
-    assert [row["version"] for row in versions] == [1, 2, 3, 4, 5, 6]
+    assert [row["version"] for row in versions] == [1, 2, 3, 4, 5, 6, 7]
     assert gallery_version["value"] == 0
     assert anchor_table is not None
 

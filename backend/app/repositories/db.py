@@ -1305,6 +1305,16 @@ def _ensure_database():
                 CREATE INDEX IF NOT EXISTS idx_background_leases_expires
                     ON background_leases(lease_expires_at);
 
+                CREATE TABLE IF NOT EXISTS access_failures (
+                    client_ip TEXT PRIMARY KEY,
+                    failure_count INTEGER NOT NULL DEFAULT 0,
+                    first_failed_at REAL NOT NULL,
+                    last_failed_at REAL NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_access_failures_last_failed_at
+                    ON access_failures(last_failed_at);
+
                 CREATE TABLE IF NOT EXISTS worker_metric_snapshots (
                     worker_id TEXT PRIMARY KEY,
                     snapshot_json TEXT NOT NULL,
@@ -1488,6 +1498,25 @@ def _migration_gallery_page_anchors(conn: sqlite3.Connection):
         )
         """
     )
+
+
+def _migration_access_failures(conn: sqlite3.Connection):
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS access_failures (
+            client_ip TEXT PRIMARY KEY,
+            failure_count INTEGER NOT NULL DEFAULT 0,
+            first_failed_at REAL NOT NULL,
+            last_failed_at REAL NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_access_failures_last_failed_at
+            ON access_failures(last_failed_at)
+        """
+    )
     conn.execute(
         """
         INSERT OR IGNORE INTO gallery_meta (key, value)
@@ -1524,6 +1553,7 @@ SCHEMA_MIGRATIONS = (
     (4, "gallery_keyset_index", _migration_gallery_keyset_index),
     (5, "gallery_sort_filter_indexes", _migration_gallery_sort_filter_indexes),
     (6, "gallery_page_anchors", _migration_gallery_page_anchors),
+    (7, "access_failures", _migration_access_failures),
 )
 
 

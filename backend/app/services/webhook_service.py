@@ -78,7 +78,7 @@ def sign_webhook_body(body: bytes, timestamp: str) -> str:
 
 async def deliver_webhook(webhook_url: str, job: dict[str, Any]):
     try:
-        ssrf.validate_webhook_url(webhook_url, config.WEBHOOK_HOST_ALLOWLIST)
+        await ssrf.validate_webhook_url_async(webhook_url, config.WEBHOOK_HOST_ALLOWLIST)
     except ValueError as error:
         logger.warning(
             "Webhook URL rejected before delivery: job_id=%s error=%s",

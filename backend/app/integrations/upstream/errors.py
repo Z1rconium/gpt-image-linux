@@ -91,7 +91,7 @@ def validate_upstream_image_data(value: Any, requested_n: int) -> list[dict[str,
     return bounded
 
 
-def _warn_if_socks5_upstream_resolves_private(
+async def _warn_if_socks5_upstream_resolves_private(
     upstream_url: str,
     socks5_proxy: str | None,
 ) -> None:
@@ -103,7 +103,7 @@ def _warn_if_socks5_upstream_resolves_private(
     if not hostname:
         return
 
-    _resolved_host, resolved_ips = ssrf.resolve_hostname(hostname)
+    _resolved_host, resolved_ips = await ssrf.resolve_hostname_async(hostname)
     private_ips = [ip for ip in resolved_ips if ssrf.is_private_ip(ip)]
     if not private_ips:
         return
@@ -119,4 +119,3 @@ def _warn_if_socks5_upstream_resolves_private(
 
 
 __all__ = [name for name in globals() if not name.startswith("__")]
-

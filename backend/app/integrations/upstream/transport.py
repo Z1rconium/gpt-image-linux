@@ -204,7 +204,7 @@ async def download_image_url(
     max_bytes = config.MAX_FILE_SIZE_MB * 1024 * 1024
 
     for _ in range(max_redirects + 1):
-        ssrf.validate_image_url(current_url)
+        await ssrf.validate_image_url_async(current_url)
         async with session.get(
             current_url,
             headers={"User-Agent": "opencode"},
@@ -282,7 +282,7 @@ async def probe_upstream_endpoint(
     api_key: str = "",
 ) -> dict[str, Any]:
     upstream_url = build_upstream_url(api_url, api_path)
-    ssrf.validate_upstream_url(upstream_url, config.UPSTREAM_HOST_ALLOWLIST)
+    await ssrf.validate_upstream_url_async(upstream_url, config.UPSTREAM_HOST_ALLOWLIST)
 
     headers = {"User-Agent": "opencode"}
     if api_key:

@@ -67,6 +67,10 @@ def test_legacy_r2_secret_refs_fail_with_missing_env_hint(monkeypatch):
     secrets.configure_registry("{}")
     monkeypatch.delenv("R2_ACCESS_KEY_ID", raising=False)
     monkeypatch.delenv("R2_SECRET_ACCESS_KEY", raising=False)
+    monkeypatch.setattr(
+        "backend.app.core.validators.resolve_hostname",
+        lambda hostname: (hostname, ["104.18.0.1"]),
+    )
 
     try:
         r2_config.resolve_r2_backup_settings(

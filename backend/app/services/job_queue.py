@@ -363,7 +363,10 @@ async def queue_image_job(
     get_effective_preset_api_key(active_preset)
     get_upstream_socks5_proxy()
 
-    webhook_url = validate_job_webhook_url(req.webhook_url or get_webhook_url())
+    webhook_url = await asyncio.to_thread(
+        validate_job_webhook_url,
+        req.webhook_url or get_webhook_url(),
+    )
     image_units = request_image_units(req)
     job_id = str(uuid.uuid4())
     pending_job = build_pending_job(

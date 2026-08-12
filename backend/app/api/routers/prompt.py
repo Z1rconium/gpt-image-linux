@@ -96,7 +96,8 @@ async def update_prompt_optimizer_system_prompt(
 async def optimize_prompt_endpoint(req: PromptOptimizeRequest):
     settings = get_prompt_optimizer_settings()
     try:
-        api_url, model, timeout_seconds, api_key = _resolve_prompt_optimizer_runtime(
+        api_url, model, timeout_seconds, api_key = await asyncio.to_thread(
+            _resolve_prompt_optimizer_runtime,
             settings
         )
     except HTTPException as e:
@@ -140,7 +141,8 @@ async def prompt_optimizer_health(
     normalized = normalize_prompt_optimizer_settings(settings)
     model = str(normalized.get("model", "")).strip() or "gpt-4o-mini"
     try:
-        api_url, model, timeout_seconds, api_key = _resolve_prompt_optimizer_runtime(
+        api_url, model, timeout_seconds, api_key = await asyncio.to_thread(
+            _resolve_prompt_optimizer_runtime,
             settings,
             include_credentials=bool(req and req.use_credentials),
         )

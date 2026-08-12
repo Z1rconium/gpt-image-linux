@@ -13,6 +13,7 @@ from ...core.utils import utc_now
 from ...core.validators import (
     get_env_var_ref_name,
     normalize_r2_endpoint_url,
+    validate_r2_endpoint_url,
     resolve_env_var_ref,
 )
 from ...repositories.image_files import safe_image_path
@@ -186,6 +187,7 @@ def resolve_r2_backup_settings(
     endpoint_url = normalize_r2_endpoint_url(raw.get("endpoint_url"))
     if not endpoint_url:
         raise R2ConfigurationError("R2 endpoint URL is not configured.")
+    validate_r2_endpoint_url(endpoint_url, config.R2_ENDPOINT_HOST_ALLOWLIST)
 
     bucket_name = str(raw.get("bucket_name") or "").strip()
     if not bucket_name:

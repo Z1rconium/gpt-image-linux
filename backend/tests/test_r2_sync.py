@@ -3,7 +3,11 @@ from pathlib import Path
 import pytest
 
 from backend.app.core import settings as config
-from backend.app.core.validators import is_private_ip, normalize_r2_endpoint_url
+from backend.app.core.validators import (
+    is_private_ip,
+    normalize_r2_endpoint_url,
+    validate_r2_endpoint_url,
+)
 from backend.app.integrations.r2 import client as r2_client
 from backend.app.integrations.r2 import config as r2_config
 from backend.app.integrations.r2 import sync as r2_algorithm
@@ -255,10 +259,6 @@ def test_r2_endpoint_rejects_non_r2_hostname_without_allowlist(monkeypatch):
 
 def test_r2_endpoint_allows_cloudflare_r2_hostname(monkeypatch):
     monkeypatch.setattr(config, "R2_ENDPOINT_HOST_ALLOWLIST", "")
-    monkeypatch.setattr(
-        "backend.app.core.validators.resolve_hostname",
-        lambda hostname: (hostname, ["104.18.0.1"]),
-    )
 
     assert (
         normalize_r2_endpoint_url("https://ACCOUNT.r2.cloudflarestorage.com/")
@@ -280,8 +280,20 @@ def test_r2_endpoint_allowlist_still_blocks_private_dns(monkeypatch):
         lambda hostname: (hostname, ["10.0.0.5"]),
     )
 
+    normalized = normalize_r2_endpoint_url("https://storage.example.com")
     with pytest.raises(ValueError, match="private/internal IP"):
-        normalize_r2_endpoint_url("https://storage.example.com")
+        validate_r2_endpoint_url(normalized, config.R2_ENDPOINT_HOST_ALLOWLIST)
+
+
+def test_r2_endpoint_normalization_does_not_resolve_dns(monkeypatch):
+    monkeypatch.setattr(config, "R2_ENDPOINT_HOST_ALLOWLIST", "storage.example.com")
+
+    def fail_dns(hostname):
+        raise AssertionError("normalize_r2_endpoint_url must not resolve DNS")
+
+    monkeypatch.setattr("backend.app.core.validators.resolve_hostname", fail_dns)
+
+    assert normalize_r2_endpoint_url("https://storage.example.com/") == "https://storage.example.com"
 
 
 @pytest.mark.parametrize("ip", ["100.64.0.1", "198.18.0.1", "192.0.2.1", "2001:db8::1"])
@@ -291,10 +303,6 @@ def test_ssrf_guard_blocks_all_non_global_address_space(ip):
 
 def test_r2_endpoint_allowlist_allows_public_custom_hostname(monkeypatch):
     monkeypatch.setattr(config, "R2_ENDPOINT_HOST_ALLOWLIST", "storage.example.com")
-    monkeypatch.setattr(
-        "backend.app.core.validators.resolve_hostname",
-        lambda hostname: (hostname, ["93.184.216.34"]),
-    )
 
     assert normalize_r2_endpoint_url("https://storage.example.com") == "https://storage.example.com"
 

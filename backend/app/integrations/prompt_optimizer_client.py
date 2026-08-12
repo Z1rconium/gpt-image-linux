@@ -165,6 +165,10 @@ def validate_optimizer_endpoint(api_url: str) -> str:
     return normalized_api_url
 
 
+async def validate_optimizer_endpoint_async(api_url: str) -> str:
+    return await asyncio.to_thread(validate_optimizer_endpoint, api_url)
+
+
 def _build_prompt_optimizer_payload(
     model: str,
     prompt: str,
@@ -274,7 +278,7 @@ async def optimize_prompt(
     if max_output_chars is None:
         max_output_chars = config.PROMPT_OPTIMIZER_MAX_OUTPUT_CHARS
 
-    api_url = validate_optimizer_endpoint(api_url)
+    api_url = await validate_optimizer_endpoint_async(api_url)
 
     headers = {"Content-Type": "application/json"}
     if api_key:

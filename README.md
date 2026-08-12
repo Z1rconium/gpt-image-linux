@@ -225,6 +225,7 @@ Most runtime options live in `.env.example`. API presets, prompt optimizer, R2 b
 | Variable | Purpose |
 | --- | --- |
 | `ACCESS_KEY` | Access gate key. Required unless it is unset and `ALLOW_UNAUTHENTICATED=true`. |
+| `ADMIN_KEY` | Settings management step-up key. Set a distinct value; if omitted it falls back to `ACCESS_KEY` and startup logs a warning. |
 | `DEFAULT_API_URL` | Default upstream API base URL; may omit or include `/v1`. |
 | `DEFAULT_API_KEY` | Default upstream API key. Prefer env refs such as `${OPENAI_API_KEY}` in Web Settings. |
 | `DEFAULT_API_PATH` | `/v1/images/generations`, `/v1/responses`, or `/v1/chat/completions`. |

@@ -153,8 +153,8 @@ async def call_image_generation_api(
     api_path = normalize_api_path(api_path)
     upstream_url = build_upstream_url(api_url, api_path)
 
-    _warn_if_socks5_upstream_resolves_private(upstream_url, socks5_proxy)
-    ssrf.validate_upstream_url(upstream_url, config.UPSTREAM_HOST_ALLOWLIST)
+    await _warn_if_socks5_upstream_resolves_private(upstream_url, socks5_proxy)
+    await ssrf.validate_upstream_url_async(upstream_url, config.UPSTREAM_HOST_ALLOWLIST)
 
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -269,8 +269,8 @@ async def call_image_generation_preview_api(
     api_path = "/v1/images/generations"
     upstream_url = build_upstream_url(api_url, api_path)
 
-    _warn_if_socks5_upstream_resolves_private(upstream_url, socks5_proxy)
-    ssrf.validate_upstream_url(upstream_url, config.UPSTREAM_HOST_ALLOWLIST)
+    await _warn_if_socks5_upstream_resolves_private(upstream_url, socks5_proxy)
+    await ssrf.validate_upstream_url_async(upstream_url, config.UPSTREAM_HOST_ALLOWLIST)
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -340,8 +340,8 @@ async def call_image_edit_api(
     api_path = "/v1/images/edits"
     upstream_url = build_upstream_url(api_url, api_path)
 
-    _warn_if_socks5_upstream_resolves_private(upstream_url, socks5_proxy)
-    ssrf.validate_upstream_url(upstream_url, config.UPSTREAM_HOST_ALLOWLIST)
+    await _warn_if_socks5_upstream_resolves_private(upstream_url, socks5_proxy)
+    await ssrf.validate_upstream_url_async(upstream_url, config.UPSTREAM_HOST_ALLOWLIST)
 
     headers = {
         "Authorization": f"Bearer {api_key}",
