@@ -36,6 +36,7 @@ from ...core import security as auth
 from ...core import settings as config
 from ...core.observability import metrics
 from ...core.utils import utc_now
+from ...services.blocking import run_db_operation
 from ...repositories.coordination import (
     acquire_background_lease,
     claim_next_gallery_job,
@@ -144,7 +145,7 @@ async def _query_gallery(
     )
     started_at = time.perf_counter()
     try:
-        gallery_page = await asyncio.to_thread(
+        gallery_page = await run_db_operation(
             get_gallery_page,
             page=page,
             page_size=page_size,
@@ -154,6 +155,7 @@ async def _query_gallery(
             include_filter_options=include_filter_options,
             cursor=cursor,
             direction=direction,
+            metric_name="get_gallery_page",
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e

@@ -336,6 +336,40 @@ def test_r2_sync_uploads_only_missing_and_leaves_bucket_only_keys(image_dir):
     }
 
 
+def test_r2_sync_reuses_upload_executor_across_batches(image_dir, monkeypatch):
+    write_image(image_dir, "a.png")
+    write_image(image_dir, "b.png")
+    client = FakeS3Client()
+    original_executor = r2_algorithm.ThreadPoolExecutor
+    created = 0
+
+    def tracked_executor(*args, **kwargs):
+        nonlocal created
+        created += 1
+        return original_executor(*args, **kwargs)
+
+    monkeypatch.setattr(r2_algorithm, "ThreadPoolExecutor", tracked_executor)
+    monkeypatch.setattr(
+        r2_algorithm,
+        "_remote_key_lookup_for_batch",
+        lambda *args, **kwargs: r2_algorithm.RemoteKeyLookup(keys=set()),
+    )
+
+    result = r2_algorithm.sync_gallery_to_r2(
+        r2_settings(),
+        [
+            {"id": "a", "filename": "a.png", "bytes": len(PNG_BYTES)},
+            {"id": "b", "filename": "b.png", "bytes": len(PNG_BYTES)},
+        ],
+        total_count=2,
+        batch_size=1,
+        client_factory=lambda _effective: client,
+    )
+
+    assert result.uploaded_count == 2
+    assert created == 1
+
+
 def test_r2_sync_dry_run_counts_pending_without_uploading(image_dir):
     write_image(image_dir, "a.png")
     write_image(image_dir, "b.png", b"bbbb")

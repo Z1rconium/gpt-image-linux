@@ -872,7 +872,6 @@ def _get_thread_connection() -> sqlite3.Connection:
         conn is not None
         and conn_database_file == database_file
         and conn_busy_timeout_ms == busy_timeout_ms
-        and Path(database_file).exists()
     ):
         return conn
 
@@ -901,6 +900,22 @@ def _close_thread_connection():
         _thread_local.database_file = None
         _thread_local.connection_busy_timeout_ms = None
         _thread_local.connection_depth = 0
+
+
+@contextmanager
+def busy_timeout_scope(busy_timeout_ms: int) -> Iterator[None]:
+    previous_busy_timeout = getattr(_thread_local, "busy_timeout_ms", None)
+    _thread_local.busy_timeout_ms = max(1, int(busy_timeout_ms))
+    try:
+        yield
+    finally:
+        if previous_busy_timeout is None:
+            try:
+                delattr(_thread_local, "busy_timeout_ms")
+            except AttributeError:
+                pass
+        else:
+            _thread_local.busy_timeout_ms = previous_busy_timeout
 
 
 @contextmanager

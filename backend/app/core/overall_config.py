@@ -150,6 +150,15 @@ OVERALL_CONFIG_REGISTRY: tuple[OverallConfigSpec, ...] = (
 )
 
 OVERALL_CONFIG_BY_NAME = {spec.name: spec for spec in OVERALL_CONFIG_REGISTRY}
+STARTUP_RUNTIME_PATH_CONFIG_NAMES = frozenset(
+    {
+        "DATA_DIR",
+        "DATABASE_FILE",
+        "IMAGES_DIR",
+        "THUMBNAILS_DIR",
+        "THUMBNAIL_MAX_SIDE",
+    }
+)
 
 
 def current_env_snapshot() -> dict[str, tuple[str, bool]]:
@@ -284,10 +293,11 @@ def apply_rows_to_config(
     include_restart_required: bool = False,
     overrides_only: bool = False,
 ) -> None:
+    secret_cache_dirty = False
     for spec in OVERALL_CONFIG_REGISTRY:
         if spec.build_only:
             continue
-        if spec.group == "Runtime Paths":
+        if spec.name in STARTUP_RUNTIME_PATH_CONFIG_NAMES:
             continue
         if spec.exposed_in_settings:
             continue
@@ -298,6 +308,16 @@ def apply_rows_to_config(
             continue
         value, _source = effective_value(spec, row)
         setattr(config, spec.name, typed_value(spec, value))
+        if spec.secret or spec.name in {"ACCESS_KEY", "WEBHOOK_SIGNING_SECRET"}:
+            secret_cache_dirty = True
+
+    if secret_cache_dirty:
+        try:
+            from .secrets import invalidate_active_secret_values_cache
+
+            invalidate_active_secret_values_cache()
+        except Exception:
+            pass
 
     try:
         import backend.app.core.security as security

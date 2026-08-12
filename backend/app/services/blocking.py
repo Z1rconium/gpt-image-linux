@@ -151,6 +151,43 @@ async def run_db_operation(
     raise RuntimeError("unreachable")
 
 
+def run_db_operation_in_current_thread(
+    callback: Callable[..., T],
+    *args: Any,
+    metric_name: str | None = None,
+    retry_busy: bool = True,
+    **kwargs: Any,
+) -> T:
+    """Run one repository operation in the current worker thread.
+
+    This mirrors run_db_operation's short SQLite busy timeout and jittered retry
+    policy for callbacks that are already executing off the event loop.
+    """
+
+    from ..repositories import db as db_repo
+
+    label = metric_name or getattr(callback, "__name__", "operation")
+    attempts = config.SQLITE_BUSY_RETRY_ATTEMPTS if retry_busy else 0
+    for attempt in range(attempts + 1):
+        started_at = time.perf_counter()
+        try:
+            with db_repo.busy_timeout_scope(config.SQLITE_BUSY_TIMEOUT_MS):
+                return callback(*args, **kwargs)
+        except BaseException as error:
+            if not _is_sqlite_busy(error) or attempt >= attempts:
+                raise
+            metrics.increment("sqlite.busy_retries")
+            base = config.SQLITE_BUSY_RETRY_BASE_MS / 1000
+            time.sleep(base * (2**attempt) * random.uniform(0.75, 1.25))
+        finally:
+            metrics.observe_ms(
+                f"db.{label}",
+                (time.perf_counter() - started_at) * 1000,
+            )
+
+    raise RuntimeError("unreachable")
+
+
 async def run_image_operation(
     callback: Callable[..., T],
     *args: Any,
@@ -253,6 +290,7 @@ __all__ = [
     "close_blocking_executors",
     "executor_gauges",
     "run_db_operation",
+    "run_db_operation_in_current_thread",
     "run_file_operation",
     "run_image_operation",
     "upstream_memory_lease",

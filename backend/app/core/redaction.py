@@ -15,6 +15,25 @@ _CREDENTIAL_RE = re.compile(
     [^"',;\s}\]]+
     ''',
 )
+_REDACTION_HINTS = (
+    "://",
+    "authorization",
+    "bearer ",
+    "api_key",
+    "apikey",
+    "api-key",
+    "access_key",
+    "accesskey",
+    "access-key",
+    "secret",
+    "secretaccesskey",
+    "token",
+    "password",
+    "passwd",
+    "admin_key",
+    "adminkey",
+    "admin-key",
+)
 
 
 def _redact_url(match: re.Match[str]) -> str:
@@ -47,10 +66,15 @@ def redact_sensitive_text(value: Any) -> str:
         from .secrets import active_secret_values
 
         for secret in active_secret_values():
-            if secret:
+            if secret and secret in text:
                 text = text.replace(secret, "[REDACTED]")
     except Exception:
         pass
+
+    lowered = text.lower()
+    if not any(hint in lowered for hint in _REDACTION_HINTS):
+        return text
+
     text = _URL_RE.sub(_redact_url, text)
     text = _AUTH_RE.sub(r"\1[REDACTED]", text)
     text = _BEARER_RE.sub("Bearer [REDACTED]", text)

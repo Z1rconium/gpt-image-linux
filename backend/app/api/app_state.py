@@ -219,6 +219,7 @@ async def lifespan(app: FastAPI):
     app.state.generate_jobs_sse_poller_task = None
     app.state.generate_job_sse_poller_task = None
     app.state.generate_job_last_persist_at = {}
+    app.state.webhook_delivery_tasks = set()
     app.state.image_queue_runtime_metrics = {
         "running": 0,
         "queued": 0,
@@ -341,6 +342,12 @@ async def lifespan(app: FastAPI):
         for task in gallery_job_sse_poller_tasks:
             if task and not task.done():
                 task.cancel()
+        webhook_delivery_tasks = list(
+            getattr(app.state, "webhook_delivery_tasks", set())
+        )
+        for task in webhook_delivery_tasks:
+            if task and not task.done():
+                task.cancel()
         tasks = list(getattr(app.state, "generate_job_tasks", {}).values())
         for task in tasks:
             task.cancel()
@@ -363,6 +370,7 @@ async def lifespan(app: FastAPI):
                 runtime_metrics_refresher_task,
                 event_loop_lag_observer_task,
                 *gallery_job_sse_poller_tasks,
+                *webhook_delivery_tasks,
                 *tasks,
             )
             if task

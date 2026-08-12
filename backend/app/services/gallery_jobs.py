@@ -30,6 +30,7 @@ from .gallery_archive_shared import (
     GalleryZipFileResult,
     import_archive_max_bytes,
 )
+from .blocking import run_db_operation, run_db_operation_in_current_thread
 from .job_events import publish_queue, serialize_sse_event
 from .job_queue import kick_thumbnail_dispatcher
 from ..api.sse_limiter import sse_limiter
@@ -172,12 +173,17 @@ async def _gallery_zip_response(
             force=force,
         )
 
-    def mark_direct_job(updates: dict) -> None:
+    async def mark_direct_job(updates: dict) -> None:
         if direct_job_id:
-            update_gallery_job(direct_job_id, updates)
+            await run_db_operation(
+                update_gallery_job,
+                direct_job_id,
+                updates,
+                metric_name="update_gallery_job",
+            )
 
     throttler = GalleryProgressThrottler(
-        lambda updates: update_gallery_job_progress(direct_job_id, updates)
+        lambda updates: _publish_gallery_job_progress_from_worker(direct_job_id, updates)
     ) if direct_job_id else None
 
     prepared_chunks = None
@@ -185,7 +191,7 @@ async def _gallery_zip_response(
     if prepare_before_response:
         try:
             if direct_job_id:
-                mark_direct_job(
+                await mark_direct_job(
                     {
                         "status": "running",
                         "stage": "preparing",
@@ -199,7 +205,8 @@ async def _gallery_zip_response(
                         "error": None,
                     }
                 )
-            prepared_chunks, prepared_result = prepare_gallery_zip_chunks(
+            prepared_chunks, prepared_result = await asyncio.to_thread(
+                prepare_gallery_zip_chunks,
                 entries,
                 skipped=skipped,
                 requested_count=requested_count,
@@ -210,7 +217,7 @@ async def _gallery_zip_response(
             headers.setdefault("X-Gallery-Missing-Count", str(prepared_result.missing_count))
         except Exception as e:
             if direct_job_id and not cleanup_direct_job:
-                mark_direct_job(
+                await mark_direct_job(
                     {
                         "status": "error",
                         "stage": "error",
@@ -228,7 +235,8 @@ async def _gallery_zip_response(
     def zip_chunks():
         try:
             if direct_job_id and prepared_result is None:
-                mark_direct_job(
+                _publish_gallery_job_from_worker(
+                    direct_job_id,
                     {
                         "status": "running",
                         "stage": "preparing",
@@ -253,7 +261,8 @@ async def _gallery_zip_response(
                     progress=progress if direct_job_id else None,
                 )
             if direct_job_id:
-                mark_direct_job(
+                _publish_gallery_job_from_worker(
+                    direct_job_id,
                     {
                         "status": "success",
                         "stage": "ready",
@@ -273,7 +282,8 @@ async def _gallery_zip_response(
                 )
         except (GeneratorExit, asyncio.CancelledError):
             if direct_job_id and not cleanup_direct_job:
-                mark_direct_job(
+                _publish_gallery_job_from_worker(
+                    direct_job_id,
                     {
                         "status": "error",
                         "stage": "error",
@@ -287,7 +297,8 @@ async def _gallery_zip_response(
             raise
         except Exception as e:
             if direct_job_id and not cleanup_direct_job:
-                mark_direct_job(
+                _publish_gallery_job_from_worker(
+                    direct_job_id,
                     {
                         "status": "error",
                         "stage": "error",
@@ -753,15 +764,53 @@ def _progress_item_count(updates: dict) -> int:
     return 0
 
 
-def _publish_gallery_job(job_id: str, updates: dict) -> dict | None:
-    job = update_gallery_job(job_id, updates)
+async def _publish_gallery_job(job_id: str, updates: dict) -> dict | None:
+    job = await run_db_operation(
+        update_gallery_job,
+        job_id,
+        updates,
+        metric_name="update_gallery_job",
+    )
     if job:
         _publish_gallery_job_sse(job)
     return job
 
 
-def _publish_gallery_job_progress(job_id: str, updates: dict) -> bool:
-    return update_gallery_job_progress(job_id, updates)
+async def _publish_gallery_job_progress(job_id: str, updates: dict) -> bool:
+    return await run_db_operation(
+        update_gallery_job_progress,
+        job_id,
+        updates,
+        metric_name="update_gallery_job_progress",
+    )
+
+
+def _publish_gallery_job_progress_from_worker(job_id: str, updates: dict) -> bool:
+    try:
+        return run_db_operation_in_current_thread(
+            update_gallery_job_progress,
+            job_id,
+            updates,
+            metric_name="update_gallery_job_progress",
+        )
+    except Exception:
+        # Progress persistence is best effort; a transient DB failure must not
+        # abort the export, sync, import, or direct ZIP stream itself.
+        logger.warning(
+            "Failed to persist gallery job progress for %s",
+            job_id,
+            exc_info=True,
+        )
+        return False
+
+
+def _publish_gallery_job_from_worker(job_id: str, updates: dict) -> dict | None:
+    return run_db_operation_in_current_thread(
+        update_gallery_job,
+        job_id,
+        updates,
+        metric_name="update_gallery_job",
+    )
 
 
 def _call_gallery_r2_sync(
@@ -968,11 +1017,10 @@ async def _create_reserved_gallery_import_job(
 async def _run_gallery_export_job(job: dict) -> None:
     job_id = job["job_id"]
     export_path = _resolve_trusted_gallery_job_path(job.get("path"), kind="export")
-    loop = asyncio.get_running_loop()
 
     def publish_progress(updates: dict):
         updates = {**updates, "lease_expires_at": _gallery_job_lease_expires_at()}
-        loop.call_soon_threadsafe(_publish_gallery_job_progress, job_id, updates)
+        _publish_gallery_job_progress_from_worker(job_id, updates)
 
     throttler = GalleryProgressThrottler(publish_progress)
 
@@ -987,7 +1035,7 @@ async def _run_gallery_export_job(job: dict) -> None:
         if not export_path:
             raise ValueError("Export archive path is invalid")
         entries, requested_count, skipped = await asyncio.to_thread(_build_export_job_entries, job)
-        _publish_gallery_job(
+        await _publish_gallery_job(
             job_id,
             {
                 "status": "running",
@@ -1006,7 +1054,7 @@ async def _run_gallery_export_job(job: dict) -> None:
             skipped=skipped,
             progress=progress,
         )
-        _publish_gallery_job(
+        await _publish_gallery_job(
             job_id,
             {
                 "status": "success",
@@ -1031,7 +1079,7 @@ async def _run_gallery_export_job(job: dict) -> None:
     except Exception as e:
         logger.warning("Failed to build gallery export ZIP job %s", job_id, exc_info=True)
         _unlink_trusted_gallery_job_path(job.get("path"), kind="export", job_id=job_id)
-        _publish_gallery_job(
+        await _publish_gallery_job(
             job_id,
             {
                 "status": "error",
@@ -1051,11 +1099,10 @@ async def _run_gallery_sync_job(job: dict) -> None:
     full_reconcile = bool(payload.get("full_reconcile"))
     dry_run = bool(payload.get("dry_run"))
     start_after_filename = str(payload.get("start_after_filename") or "")
-    loop = asyncio.get_running_loop()
 
     def publish_progress(updates: dict):
         updates = {**updates, "lease_expires_at": _gallery_job_lease_expires_at()}
-        loop.call_soon_threadsafe(_publish_gallery_job_progress, job_id, updates)
+        _publish_gallery_job_progress_from_worker(job_id, updates)
 
     throttler = GalleryProgressThrottler(publish_progress)
 
@@ -1080,7 +1127,7 @@ async def _run_gallery_sync_job(job: dict) -> None:
             full_reconcile=full_reconcile,
             start_after_filename=start_after_filename,
         )
-        _publish_gallery_job(
+        await _publish_gallery_job(
             job_id,
             {
                 "status": "running",
@@ -1107,7 +1154,7 @@ async def _run_gallery_sync_job(job: dict) -> None:
             concurrency=config.R2_SYNC_CONCURRENCY,
         )
         payload.pop("start_after_filename", None)
-        _publish_gallery_job(
+        await _publish_gallery_job(
             job_id,
             {
                 "status": "success",
@@ -1126,7 +1173,7 @@ async def _run_gallery_sync_job(job: dict) -> None:
         raise
     except r2_config.R2SyncError as e:
         logger.warning("Gallery R2 sync job %s finished with upload errors", job_id)
-        _publish_gallery_job(
+        await _publish_gallery_job(
             job_id,
             {
                 "status": "error",
@@ -1142,7 +1189,7 @@ async def _run_gallery_sync_job(job: dict) -> None:
         )
     except Exception as e:
         logger.warning("Gallery R2 sync job %s failed", job_id, exc_info=True)
-        _publish_gallery_job(
+        await _publish_gallery_job(
             job_id,
             {
                 "status": "error",
@@ -1162,7 +1209,6 @@ async def _run_gallery_import_job(job: dict) -> None:
     payload = job.get("payload") or {}
     reservation_id = str(payload.get("reservation_id") or "")
     requested_count = int(job.get("requested_count") or 0)
-    loop = asyncio.get_running_loop()
     last_counts = {
         "processed_count": 0,
         "exported_count": 0,
@@ -1171,7 +1217,7 @@ async def _run_gallery_import_job(job: dict) -> None:
 
     def publish_progress(updates: dict):
         updates = {**updates, "lease_expires_at": _gallery_job_lease_expires_at()}
-        loop.call_soon_threadsafe(_publish_gallery_job_progress, job_id, updates)
+        _publish_gallery_job_progress_from_worker(job_id, updates)
 
     throttler = GalleryProgressThrottler(publish_progress)
 
@@ -1203,7 +1249,7 @@ async def _run_gallery_import_job(job: dict) -> None:
         if not zip_path.exists():
             raise FileNotFoundError("Import archive file is missing")
 
-        _publish_gallery_job(
+        await _publish_gallery_job(
             job_id,
             {
                 "status": "running",
@@ -1227,7 +1273,7 @@ async def _run_gallery_import_job(job: dict) -> None:
 
         processed_count = max(last_counts["processed_count"], requested_count)
         skipped_count = max(last_counts["missing_count"], processed_count - imported_count)
-        _publish_gallery_job(
+        await _publish_gallery_job(
             job_id,
             {
                 "status": "success",
@@ -1250,7 +1296,7 @@ async def _run_gallery_import_job(job: dict) -> None:
     except HTTPException as e:
         detail = str(e.detail)
         logger.warning("Gallery import job %s failed: %s", job_id, detail)
-        _publish_gallery_job(
+        await _publish_gallery_job(
             job_id,
             {
                 "status": "error",
@@ -1265,7 +1311,7 @@ async def _run_gallery_import_job(job: dict) -> None:
         )
     except Exception as e:
         logger.warning("Gallery import job %s failed", job_id, exc_info=True)
-        _publish_gallery_job(
+        await _publish_gallery_job(
             job_id,
             {
                 "status": "error",

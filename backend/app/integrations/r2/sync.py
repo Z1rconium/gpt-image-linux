@@ -1,6 +1,7 @@
 import logging
 import mimetypes
 import uuid
+from contextlib import nullcontext
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from itertools import islice
@@ -338,49 +339,55 @@ def sync_gallery_to_r2(
 
     publish("preparing", "Preparing local gallery candidates")
 
-    for entry_batch in _batched_entries(entries, batch_size):
-        candidates, batch_result, candidate_keys = _local_sync_candidates_for_batch(
-            effective,
-            entry_batch,
-        )
-        result.missing_local_count += batch_result.missing_local_count
-        result.compared_count += batch_result.compared_count
-        result.bytes_total += batch_result.bytes_total
-        if known_total_count <= 0:
-            result.total_count += len(candidates) + batch_result.missing_local_count
-
-        if not candidates:
-            publish("comparing", f"Compared {result.compared_count} gallery image(s)")
-            continue
-
-        publish("listing_remote", "Checking existing R2 objects")
-        remote_keys = _remote_key_lookup_for_batch(
-            client,
-            effective.bucket_name,
-            effective.key_prefix,
-            candidate_keys=candidate_keys,
-            concurrency=normalized_concurrency,
-            full_reconcile=full_reconcile,
-        )
-        publish("comparing", "Comparing local gallery with R2 objects")
-
-        if dry_run:
-            for candidate in candidates:
-                if candidate.key in remote_keys.keys:
-                    result.skipped_existing_count += 1
-                else:
-                    result.pending_upload_count += 1
-                result.compared_count += 1
-                publish("preflight", f"Compared {result.compared_count} gallery image(s)")
-            publish(
-                "checkpoint",
-                f"Checkpoint after {candidates[-1].filename}",
-                last_filename=candidates[-1].filename,
+    executor_context = (
+        nullcontext(None)
+        if dry_run
+        else ThreadPoolExecutor(max_workers=normalized_concurrency)
+    )
+    with executor_context as executor:
+        for entry_batch in _batched_entries(entries, batch_size):
+            candidates, batch_result, candidate_keys = _local_sync_candidates_for_batch(
+                effective,
+                entry_batch,
             )
-            continue
+            result.missing_local_count += batch_result.missing_local_count
+            result.compared_count += batch_result.compared_count
+            result.bytes_total += batch_result.bytes_total
+            if known_total_count <= 0:
+                result.total_count += len(candidates) + batch_result.missing_local_count
 
-        confirmed_rows: list[dict[str, Any]] = []
-        with ThreadPoolExecutor(max_workers=normalized_concurrency) as executor:
+            if not candidates:
+                publish("comparing", f"Compared {result.compared_count} gallery image(s)")
+                continue
+
+            publish("listing_remote", "Checking existing R2 objects")
+            remote_keys = _remote_key_lookup_for_batch(
+                client,
+                effective.bucket_name,
+                effective.key_prefix,
+                candidate_keys=candidate_keys,
+                concurrency=normalized_concurrency,
+                full_reconcile=full_reconcile,
+            )
+            publish("comparing", "Comparing local gallery with R2 objects")
+
+            if dry_run:
+                for candidate in candidates:
+                    if candidate.key in remote_keys.keys:
+                        result.skipped_existing_count += 1
+                    else:
+                        result.pending_upload_count += 1
+                    result.compared_count += 1
+                    publish("preflight", f"Compared {result.compared_count} gallery image(s)")
+                publish(
+                    "checkpoint",
+                    f"Checkpoint after {candidates[-1].filename}",
+                    last_filename=candidates[-1].filename,
+                )
+                continue
+
+            confirmed_rows: list[dict[str, Any]] = []
+            assert executor is not None
             futures = [
                 executor.submit(
                     _sync_candidate,
@@ -413,17 +420,17 @@ def sync_gallery_to_r2(
                 result.compared_count += 1
                 publish("uploading", f"Compared {result.compared_count} gallery image(s)")
 
-        publish(
-            "checkpoint",
-            f"Checkpoint after {candidates[-1].filename}",
-            last_filename=candidates[-1].filename,
-        )
+            publish(
+                "checkpoint",
+                f"Checkpoint after {candidates[-1].filename}",
+                last_filename=candidates[-1].filename,
+            )
 
-        if state_recorder and confirmed_rows:
-            try:
-                state_recorder(confirmed_rows)
-            except Exception:
-                logger.warning("Failed to record R2 sync state", exc_info=True)
+            if state_recorder and confirmed_rows:
+                try:
+                    state_recorder(confirmed_rows)
+                except Exception:
+                    logger.warning("Failed to record R2 sync state", exc_info=True)
 
     if result.failed_count:
         sample = "; ".join(errors[:3])
@@ -435,4 +442,3 @@ def sync_gallery_to_r2(
 
     publish("completed", "R2 sync completed")
     return result
-

@@ -53,6 +53,7 @@ def _promote_prepared_thumbnails(prepared_files: Sequence[_PreparedGalleryFile])
 def _thumbnail_cpu_slot() -> Iterator[None]:
     owner = f"thumbnail-{os.getpid()}-{threading.get_ident()}-{uuid.uuid4()}"
     slot_name: str | None = None
+    retry_delay_seconds = 0.05
     try:
         while slot_name is None:
             now_dt = datetime.now(timezone.utc)
@@ -66,7 +67,8 @@ def _thumbnail_cpu_slot() -> Iterator[None]:
                 now=now_dt.isoformat(),
             )
             if slot_name is None:
-                time.sleep(0.05)
+                time.sleep(retry_delay_seconds)
+                retry_delay_seconds = min(retry_delay_seconds * 2, 1.0)
         yield
     finally:
         if slot_name is not None:

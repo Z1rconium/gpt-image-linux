@@ -50,6 +50,29 @@ class SecretEntry:
 
 _registry: dict[str, SecretEntry] = {}
 _registry_lock = RLock()
+_registry_generation = 0
+_ACTIVE_SECRET_CONFIG_NAMES = (
+    "ACCESS_KEY",
+    "ADMIN_KEY",
+    "CDN_SIGNING_SECRET",
+    "WEBHOOK_SIGNING_SECRET",
+    "DEFAULT_API_KEY",
+    "PROMPT_OPTIMIZER_API_KEY",
+    "DEFAULT_UPSTREAM_SOCKS5_PROXY",
+    "R2_ACCESS_KEY_ID",
+    "R2_SECRET_ACCESS_KEY",
+)
+_active_secret_values_cache: tuple[
+    int,
+    tuple[str, ...],
+    tuple[str, ...],
+] | None = None
+
+
+def invalidate_active_secret_values_cache() -> None:
+    global _active_secret_values_cache
+    with _registry_lock:
+        _active_secret_values_cache = None
 
 
 def canonical_origin(url: str | None) -> str:
@@ -186,8 +209,10 @@ def configure_registry(raw_json: str | None = None) -> None:
         raise SecretRegistryError(f"Reserved secret_id cannot be overridden: {sorted(overlap)[0]}")
     entries.update(declared)
     with _registry_lock:
-        global _registry
+        global _registry, _registry_generation, _active_secret_values_cache
         _registry = entries
+        _registry_generation += 1
+        _active_secret_values_cache = None
 
 
 def configured_secret_ids() -> tuple[str, ...]:
@@ -263,17 +288,32 @@ def resolve_secret(
 
 
 def active_secret_values() -> tuple[str, ...]:
-    values: set[str] = set()
+    global _active_secret_values_cache
+
+    from . import settings as config
+
+    config_key = tuple(
+        str(getattr(config, name, "") or "").strip()
+        for name in _ACTIVE_SECRET_CONFIG_NAMES
+    )
     with _registry_lock:
+        cache = _active_secret_values_cache
+        if cache and cache[0] == _registry_generation and cache[1] == config_key:
+            return cache[2]
+        generation = _registry_generation
         entries = tuple(_registry.values())
+
+    values: set[str] = set()
     for entry in entries:
         value = entry.resolve()
         if value:
             values.add(value)
-    from . import settings as config
 
-    for value in (config.ACCESS_KEY, config.WEBHOOK_SIGNING_SECRET):
-        normalized = str(value or "").strip()
+    for normalized in config_key:
         if normalized:
             values.add(normalized)
-    return tuple(sorted(values, key=len, reverse=True))
+    result = tuple(sorted(values, key=len, reverse=True))
+    with _registry_lock:
+        if _registry_generation == generation:
+            _active_secret_values_cache = (generation, config_key, result)
+    return result
