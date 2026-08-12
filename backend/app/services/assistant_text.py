@@ -69,7 +69,17 @@ from ..schemas.assistant import (
 from ..schemas.settings import AIAssistantSettingsRequest
 
 logger = logging.getLogger(__name__)
-from .assistant_runtime import *
+from .assistant_runtime import (
+    BEARER_VALUE_RE,
+    SECRET_VALUE_RE,
+    SENSITIVE_FIELD_NAMES,
+    _assistant_json,
+    _assistant_settings,
+    _clamp_text,
+    _resolve_runtime_async,
+    _string_list,
+    _warnings,
+)
 
 async def assistant_health(req: AIAssistantSettingsRequest | None = Body(default=None)):
     settings = presets.effective_ai_assistant_settings(_assistant_settings(req))
@@ -87,9 +97,10 @@ async def assistant_health(req: AIAssistantSettingsRequest | None = Body(default
         )
 
     try:
+        use_credentials = True if req is None else bool(req.use_credentials)
         result = await assistant_client.probe_assistant_endpoint(
             api_url=runtime.api_url,
-            api_key=runtime.api_key if req and req.use_credentials else "",
+            api_key=runtime.api_key if use_credentials else "",
             api_path=runtime.api_path,
             model=model,
             timeout_seconds=runtime.timeout_seconds,
@@ -99,7 +110,7 @@ async def assistant_health(req: AIAssistantSettingsRequest | None = Body(default
             status="error",
             message=str(e),
             model=model,
-            duration_ms=timeout_seconds * 1000,
+            duration_ms=runtime.timeout_seconds * 1000,
             status_code=504,
         )
     except Exception:
@@ -420,5 +431,3 @@ async def plan_edit(req: AssistantEditPlanRequest):
         model=model,
         duration_ms=duration_ms,
     )
-
-

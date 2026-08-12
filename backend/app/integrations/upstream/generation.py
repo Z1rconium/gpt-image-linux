@@ -4,7 +4,9 @@ import base64
 import json
 import logging
 import re
+from contextlib import asynccontextmanager
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urljoin, urlsplit
@@ -44,6 +46,54 @@ def upstream_task_memory_weight(response_format: str | None) -> int:
 from .errors import *
 from .payloads import *
 from .transport import *
+
+
+@dataclass(frozen=True)
+class PreparedUpstreamRequest:
+    session: aiohttp.ClientSession
+    headers: dict[str, str]
+    upstream_url: str
+    socks5_proxy: str | None
+
+    @asynccontextmanager
+    async def post(self, **kwargs: Any):
+        async with self.session.post(
+            self.upstream_url,
+            headers=self.headers,
+            allow_redirects=False,
+            **kwargs,
+        ) as resp:
+            if not self.socks5_proxy:
+                ssrf.validate_response_peer_ip(resp, "Upstream API")
+            yield resp
+
+
+async def _prepare_upstream_request(
+    *,
+    api_url: str,
+    api_key: str,
+    api_path: str,
+    socks5_proxy: str | None,
+    json_content_type: bool = True,
+) -> PreparedUpstreamRequest:
+    upstream_url = build_upstream_url(api_url, api_path)
+    await _warn_if_socks5_upstream_resolves_private(upstream_url, socks5_proxy)
+    await ssrf.validate_upstream_url_async(upstream_url, config.UPSTREAM_HOST_ALLOWLIST)
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "User-Agent": "opencode",
+    }
+    if json_content_type:
+        headers["Content-Type"] = "application/json"
+
+    session = get_pool().get(timeout_kind=TIMEOUT_UPSTREAM, socks5_proxy=socks5_proxy)
+    return PreparedUpstreamRequest(
+        session=session,
+        headers=headers,
+        upstream_url=upstream_url,
+        socks5_proxy=socks5_proxy,
+    )
 
 async def save_gallery_entries_from_upstream_data(
     *,
@@ -151,16 +201,12 @@ async def call_image_generation_api(
     socks5_proxy: str | None = None,
 ) -> list[GalleryEntry]:
     api_path = normalize_api_path(api_path)
-    upstream_url = build_upstream_url(api_url, api_path)
-
-    await _warn_if_socks5_upstream_resolves_private(upstream_url, socks5_proxy)
-    await ssrf.validate_upstream_url_async(upstream_url, config.UPSTREAM_HOST_ALLOWLIST)
-
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-        "User-Agent": "opencode",
-    }
+    prepared_request = await _prepare_upstream_request(
+        api_url=api_url,
+        api_key=api_key,
+        api_path=api_path,
+        socks5_proxy=socks5_proxy,
+    )
 
     if api_path == RESPONSES_API_PATH:
         if progress:
@@ -182,7 +228,6 @@ async def call_image_generation_api(
     gallery_metadata = build_gallery_metadata(payload, api_path, api_preset_name)
 
     pool = get_pool()
-    upstream_session = pool.get(timeout_kind=TIMEOUT_UPSTREAM, socks5_proxy=socks5_proxy)
     download_session = pool.get(timeout_kind=TIMEOUT_UPSTREAM)
 
     if progress:
@@ -198,14 +243,9 @@ async def call_image_generation_api(
     await memory_lease.__aenter__()
     try:
         with observe_job_stage("upstream_wait"):
-            async with upstream_session.post(
-                upstream_url,
+            async with prepared_request.post(
                 json=request_data,
-                headers=headers,
-                allow_redirects=False,
             ) as resp:
-                if not socks5_proxy:
-                    ssrf.validate_response_peer_ip(resp, "Upstream API")
                 if api_path == CHAT_COMPLETIONS_API_PATH:
                     result, response_text = (
                         await parse_upstream_chat_completion_response(
@@ -267,31 +307,22 @@ async def call_image_generation_preview_api(
 ) -> bytes:
     """Generate and validate one image without creating gallery or job records."""
     api_path = "/v1/images/generations"
-    upstream_url = build_upstream_url(api_url, api_path)
-
-    await _warn_if_socks5_upstream_resolves_private(upstream_url, socks5_proxy)
-    await ssrf.validate_upstream_url_async(upstream_url, config.UPSTREAM_HOST_ALLOWLIST)
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-        "User-Agent": "opencode",
-    }
+    prepared_request = await _prepare_upstream_request(
+        api_url=api_url,
+        api_key=api_key,
+        api_path=api_path,
+        socks5_proxy=socks5_proxy,
+    )
 
     pool = get_pool()
-    upstream_session = pool.get(timeout_kind=TIMEOUT_UPSTREAM, socks5_proxy=socks5_proxy)
     memory_lease = upstream_memory_lease(
         upstream_task_memory_weight(payload.response_format)
     )
     await memory_lease.__aenter__()
     try:
-        async with upstream_session.post(
-            upstream_url,
+        async with prepared_request.post(
             json=_build_image_params(payload),
-            headers=headers,
-            allow_redirects=False,
         ) as resp:
-            if not socks5_proxy:
-                ssrf.validate_response_peer_ip(resp, "Upstream API")
             result, response_text = await parse_upstream_json_response(
                 resp, api_path, None
             )
@@ -338,15 +369,13 @@ async def call_image_edit_api(
         raise UpstreamApiError("At least one edit source image is required")
 
     api_path = "/v1/images/edits"
-    upstream_url = build_upstream_url(api_url, api_path)
-
-    await _warn_if_socks5_upstream_resolves_private(upstream_url, socks5_proxy)
-    await ssrf.validate_upstream_url_async(upstream_url, config.UPSTREAM_HOST_ALLOWLIST)
-
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "User-Agent": "opencode",
-    }
+    prepared_request = await _prepare_upstream_request(
+        api_url=api_url,
+        api_key=api_key,
+        api_path=api_path,
+        socks5_proxy=socks5_proxy,
+        json_content_type=False,
+    )
     format_info = get_output_format_info(payload.output_format)
     gallery_metadata = build_gallery_metadata(payload, api_path, api_preset_name)
 
@@ -370,7 +399,6 @@ async def call_image_edit_api(
             form.add_field(key, str(value))
 
         pool = get_pool()
-        upstream_session = pool.get(timeout_kind=TIMEOUT_UPSTREAM, socks5_proxy=socks5_proxy)
         memory_lease = upstream_memory_lease(
             upstream_task_memory_weight(payload.response_format)
         )
@@ -383,14 +411,9 @@ async def call_image_edit_api(
             )
             progress("uploading_edit_image", upload_message)
         with observe_job_stage("upstream_wait"):
-            async with upstream_session.post(
-                upstream_url,
+            async with prepared_request.post(
                 data=form,
-                headers=headers,
-                allow_redirects=False,
             ) as resp:
-                if not socks5_proxy:
-                    ssrf.validate_response_peer_ip(resp, "Upstream API")
                 result, response_text = await parse_upstream_json_response(
                     resp, api_path, progress
                 )

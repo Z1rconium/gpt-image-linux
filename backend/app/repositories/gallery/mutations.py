@@ -952,5 +952,6 @@ def delete_all_gallery_images() -> tuple[int, int]:
 
 def invalidate_thumbnail_cache(thumbnail_filename: str) -> None:
     """从内存缩略图验证缓存中移除指定文件名，供路由层在检测到磁盘文件丢失时调用。"""
+    _remove_verified_thumbnail(thumbnail_filename)
 
 __all__ = [name for name in globals() if not name.startswith("__")]

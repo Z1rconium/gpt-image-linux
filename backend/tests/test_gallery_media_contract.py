@@ -1394,6 +1394,33 @@ def test_thumbnail_endpoint_enqueues_missing_thumbnail_job(client, monkeypatch):
     assert resp.status_code == 200
 
 
+def test_thumbnail_cache_invalidation_self_heals_missing_verified_file(client):
+    _fake_gallery_entry("self-heal-thumb", "self heal", "1024x1024", "self-heal-thumb.png")
+    thumbnail_filename = thumbnail_jobs_repo.generate_thumbnail_for_image("self-heal-thumb.png")
+    assert thumbnail_filename
+    thumbnail_path = image_files.safe_thumbnail_path(thumbnail_filename)
+    assert thumbnail_path is not None
+    assert thumbnail_path.exists()
+
+    thumbnail_path.unlink()
+    assert thumbnail_jobs_repo.ensure_thumbnail_for_image("self-heal-thumb.png") == thumbnail_filename
+    assert not thumbnail_path.exists()
+
+    assert gallery_common._resolve_gallery_thumbnail_path("self-heal-thumb.png") is None
+    with db_repo._connect() as conn:
+        row = conn.execute(
+            "SELECT status FROM thumbnail_jobs WHERE filename = ?",
+            ("self-heal-thumb.png",),
+        ).fetchone()
+    assert row is not None
+    assert row["status"] == "queued"
+
+    assert thumbnail_jobs_repo.generate_thumbnail_for_image("self-heal-thumb.png") == thumbnail_filename
+    resolved_path = gallery_common._resolve_gallery_thumbnail_path("self-heal-thumb.png")
+    assert resolved_path == thumbnail_path
+    assert thumbnail_path.exists()
+
+
 def test_thumbnail_repository_requeues_running_job(tmp_path):
     _configure_runtime(tmp_path)
     _fake_gallery_entry(

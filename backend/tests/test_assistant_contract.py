@@ -103,6 +103,47 @@ def test_ai_assistant_health_reports_success_and_config_errors(client, monkeypat
     assert "not configured" in missing_url.json()["message"]
 
 
+def test_ai_assistant_health_timeout_returns_structured_504(client, monkeypatch):
+    settings = client.get("/api/settings").json()
+    configured = client.post(
+        "/api/settings",
+        json=_settings_payload(
+            settings,
+            prompt_optimizer={
+                "enabled": True,
+                "api_url": "https://example.com/v1/chat/completions",
+                "model": "shared-model",
+                "timeout_seconds": 7,
+                "api_key": "${TEST_PROMPT_OPTIMIZER_API_KEY}",
+            },
+        ),
+    )
+    assert configured.status_code == 200
+    enabled = client.post(
+        "/api/settings",
+        json=_assistant_payload(
+            configured.json(),
+            ai_assistant={"enabled": True},
+        ),
+    )
+    assert enabled.status_code == 200
+
+    async def timeout_probe(**kwargs):
+        raise assistant_router.assistant_client.AssistantTimeoutError("AI Assistant request timed out")
+
+    monkeypatch.setattr(assistant_router.assistant_client, "probe_assistant_endpoint", timeout_probe)
+
+    resp = client.post("/api/assistant/health")
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "status": "error",
+        "message": "AI Assistant request timed out",
+        "model": "shared-model",
+        "duration_ms": 7000,
+        "status_code": 504,
+    }
+
+
 def test_ai_assistant_prompt_tools_and_param_recommendations(client, monkeypatch):
     settings = client.get("/api/settings").json()
     configured = client.post(

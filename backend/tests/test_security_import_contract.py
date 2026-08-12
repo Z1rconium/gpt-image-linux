@@ -512,6 +512,71 @@ def test_socks5_upstream_private_dns_logs_trust_boundary_warning(tmp_path, monke
     assert "proxy is the trust boundary" in caplog.text
 
 
+def test_prepare_upstream_request_centralizes_security_headers_and_peer_check(tmp_path, monkeypatch):
+    _configure_runtime(tmp_path)
+    from backend.app.integrations.upstream import generation as upstream_client
+
+    calls: list[tuple] = []
+
+    async def fake_warn(upstream_url, socks5_proxy):
+        calls.append(("warn", upstream_url, socks5_proxy))
+
+    async def fake_validate(upstream_url, allowlist):
+        calls.append(("validate_url", upstream_url, allowlist))
+
+    def fake_peer(resp, label):
+        calls.append(("peer", label))
+
+    class FakeResponse:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeSession:
+        def post(self, url, **kwargs):
+            calls.append(("post", url, kwargs))
+            return FakeResponse()
+
+    class FakePool:
+        def get(self, timeout_kind="upstream", socks5_proxy=None):
+            calls.append(("pool", timeout_kind, socks5_proxy))
+            return FakeSession()
+
+    monkeypatch.setattr(upstream_client, "_warn_if_socks5_upstream_resolves_private", fake_warn)
+    monkeypatch.setattr(upstream_client.ssrf, "validate_upstream_url_async", fake_validate)
+    monkeypatch.setattr(upstream_client.ssrf, "validate_response_peer_ip", fake_peer)
+    monkeypatch.setattr(upstream_client, "get_pool", lambda: FakePool())
+
+    prepared = asyncio.run(
+        upstream_client._prepare_upstream_request(
+            api_url="https://api.example.com",
+            api_key="key",
+            api_path="/v1/images/generations",
+            socks5_proxy=None,
+        )
+    )
+    assert prepared.upstream_url == "https://api.example.com/v1/images/generations"
+    assert prepared.headers == {
+        "Authorization": "Bearer key",
+        "User-Agent": "opencode",
+        "Content-Type": "application/json",
+    }
+
+    async def post_once():
+        async with prepared.post(json={"prompt": "hi"}):
+            pass
+
+    asyncio.run(post_once())
+
+    assert ("warn", "https://api.example.com/v1/images/generations", None) in calls
+    assert any(call[0] == "validate_url" for call in calls)
+    assert ("pool", "upstream", None) in calls
+    assert any(call[0] == "post" and call[2]["allow_redirects"] is False for call in calls)
+    assert ("peer", "Upstream API") in calls
+
+
 def test_upstream_returned_image_url_download_stays_direct(tmp_path, monkeypatch):
     _configure_runtime(tmp_path)
     import importlib

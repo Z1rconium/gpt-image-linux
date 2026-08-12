@@ -1,116 +1,62 @@
 import asyncio
-import hashlib
-import inspect
 import logging
-import mimetypes
 import os
-import time
 import uuid
-from collections.abc import Iterable, Iterator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from urllib.parse import quote
-
-from fastapi import APIRouter, Body, File, HTTPException, Query, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
-from starlette.background import BackgroundTask
 
 from ..api.app_state import app
-from .gallery_archive_export import (
-    iter_gallery_zip_chunks,
-    prepare_gallery_zip_chunks,
-    write_gallery_zip_file,
-)
-from .gallery_archive_import import (
-    count_import_gallery_entries,
-    iter_import_gallery_entries,
-    stream_upload_to_tempfile,
-)
-from .gallery_archive_shared import (
-    GalleryZipFileResult,
-    import_archive_max_bytes,
-)
-from .job_events import publish_queue, serialize_sse_event
-from ..api.sse_limiter import sse_limiter
-from ..core import security as auth
 from ..core import settings as config
 from ..core.observability import metrics
 from ..core.utils import utc_now
 from ..integrations.r2 import config as r2_config
 from ..repositories.coordination import (
     acquire_background_lease,
-    claim_next_gallery_job,
     cleanup_expired_gallery_jobs,
     cleanup_stale_gallery_jobs,
     count_active_gallery_jobs,
-    create_gallery_job,
-    delete_gallery_job,
-    get_gallery_job,
-    get_gallery_jobs_updated_at_edges,
     list_gallery_job_ids_with_files,
     release_background_lease,
-    reserve_gallery_job_capacity,
-    update_gallery_job,
-    update_gallery_job_progress,
 )
-from ..repositories.gallery.mutations import (
-    cleanup_orphan_gallery_files,
-    delete_all_gallery_images,
-    delete_gallery_image,
-    delete_gallery_images,
-    delete_gallery_images_by_filters,
-    import_gallery_entries,
-    invalidate_thumbnail_cache,
-    is_gallery_filename_referenced,
-    update_gallery_entries_favorite,
-    update_gallery_entries_favorite_by_filters,
-    update_gallery_entry,
-)
-from ..repositories.gallery.queries import (
-    get_gallery_count,
-    get_gallery_entries_by_ids,
-    get_gallery_entry,
-    get_gallery_ids,
-    get_gallery_page,
-    iter_gallery_export_rows,
-)
+from ..repositories.gallery.mutations import cleanup_orphan_gallery_files
+from ..repositories.gallery.queries import get_gallery_count
 from ..repositories.gallery.sync_state import (
     count_gallery_r2_sync_rows,
-    iter_gallery_r2_sync_rows,
-    mark_gallery_r2_sync_state,
-)
-from ..repositories.image_files import (
-    THUMBNAIL_CONTENT_TYPE,
-    safe_image_path,
-    safe_thumbnail_path,
 )
 from ..repositories.settings import load_r2_backup_settings
 from ..repositories.thumbnail_jobs import (
     THUMBNAIL_JOB_LEASE_SECONDS,
     claim_next_thumbnail_job,
     complete_thumbnail_job,
-    ensure_thumbnail_for_image,
     fail_thumbnail_job,
     generate_thumbnail_for_image,
 )
-from ..schemas.common import MessageResponse
-from ..schemas.gallery import (
-    GalleryBatchFavoriteRequest,
-    GalleryBatchRequest,
-    GalleryBatchResponse,
-    GalleryEntry,
-    GalleryExportJobStatus,
-    GalleryExportRequest,
-    GalleryFavoriteRequest,
-    GalleryImportJobStatus,
-    GalleryResponse,
-    GallerySelectionTokenRequest,
-    GallerySelectionTokenResponse,
-    GallerySyncRequest,
-    GallerySyncJobStatus,
+from .claim_loop import run_claim_loop
+from .gallery_common import (
+    AI_ANALYZE_JOB_KIND,
+    AI_ANALYZE_JOB_TTL_SECONDS,
+    EXPORT_JOB_GC_INTERVAL_SECONDS,
+    EXPORT_JOB_TTL_SECONDS,
+    GALLERY_FILE_GC_INTERVAL_SECONDS,
+    IMPORT_JOB_TTL_SECONDS,
+    MAX_ACTIVE_SYNC_JOBS,
+    SCHEDULED_R2_SYNC_DISABLED_POLL_SECONDS,
+    SYNC_JOB_TTL_SECONDS,
+    THUMBNAIL_DISPATCH_INTERVAL_SECONDS,
+    THUMBNAIL_DISPATCH_MAX_IDLE_BACKOFF_SECONDS,
+    _unlink_trusted_gallery_job_path,
 )
-from .gallery_common import *
-from .gallery_jobs import *
+from .gallery_jobs import (
+    _background_task_lease_expires_at,
+    _create_gallery_sync_job,
+    _next_background_task_error_backoff,
+    _sleep_while_renewing_background_lease,
+    run_gallery_export_dispatcher,
+    run_gallery_import_dispatcher,
+    run_gallery_sync_dispatcher,
+)
+
+logger = logging.getLogger(__name__)
 
 def get_thumbnail_dispatcher_kick_event() -> asyncio.Event:
     event = getattr(app.state, "thumbnail_dispatcher_kick", None)
@@ -131,16 +77,6 @@ def kick_thumbnail_dispatcher() -> None:
     )
 
 
-async def _wait_for_thumbnail_dispatcher_wakeup(delay: float) -> None:
-    event = get_thumbnail_dispatcher_kick_event()
-    try:
-        await asyncio.wait_for(event.wait(), timeout=delay)
-    except asyncio.TimeoutError:
-        return
-    finally:
-        event.clear()
-
-
 def _thumbnail_job_lease_expires_at() -> str:
     return (
         datetime.now(timezone.utc)
@@ -150,48 +86,50 @@ def _thumbnail_job_lease_expires_at() -> str:
 
 async def run_thumbnail_dispatcher(worker_id: str) -> None:
     logger.info("Thumbnail dispatcher started: worker_id=%s", worker_id)
-    idle_delay = THUMBNAIL_DISPATCH_INTERVAL_SECONDS
-    while True:
-        try:
-            owner = f"thumbnail:{worker_id}:{uuid.uuid4()}"
-            job = await asyncio.to_thread(
-                claim_next_thumbnail_job,
-                owner=owner,
-                lease_expires_at=_thumbnail_job_lease_expires_at(),
-                now=utc_now(),
-            )
-            if not job:
-                idle_delay = min(
-                    THUMBNAIL_DISPATCH_MAX_IDLE_BACKOFF_SECONDS,
-                    max(THUMBNAIL_DISPATCH_INTERVAL_SECONDS, idle_delay * 2),
-                )
-                await _wait_for_thumbnail_dispatcher_wakeup(idle_delay)
-                continue
+    async def claim_thumbnail_job():
+        owner = f"thumbnail:{worker_id}:{uuid.uuid4()}"
+        job = await asyncio.to_thread(
+            claim_next_thumbnail_job,
+            owner=owner,
+            lease_expires_at=_thumbnail_job_lease_expires_at(),
+            now=utc_now(),
+        )
+        if job:
+            job["lease_owner"] = owner
+        return job
 
-            idle_delay = THUMBNAIL_DISPATCH_INTERVAL_SECONDS
-            filename = str(job.get("filename") or "")
-            thumbnail_filename = await asyncio.to_thread(
-                generate_thumbnail_for_image,
+    async def run_thumbnail_job(job: dict):
+        owner = str(job.get("lease_owner") or "")
+        filename = str(job.get("filename") or "")
+        thumbnail_filename = await asyncio.to_thread(
+            generate_thumbnail_for_image,
+            filename,
+        )
+        if thumbnail_filename:
+            await asyncio.to_thread(
+                complete_thumbnail_job,
                 filename,
+                owner=owner,
             )
-            if thumbnail_filename:
-                await asyncio.to_thread(
-                    complete_thumbnail_job,
-                    filename,
-                    owner=owner,
-                )
-            else:
-                await asyncio.to_thread(
-                    fail_thumbnail_job,
-                    filename,
-                    owner=owner,
-                    error="thumbnail generation returned no file",
-                )
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.warning("Thumbnail dispatcher error", exc_info=True)
-            await asyncio.sleep(THUMBNAIL_DISPATCH_INTERVAL_SECONDS)
+        else:
+            await asyncio.to_thread(
+                fail_thumbnail_job,
+                filename,
+                owner=owner,
+                error="thumbnail generation returned no file",
+            )
+
+    await run_claim_loop(
+        claim_fn=claim_thumbnail_job,
+        run_fn=run_thumbnail_job,
+        running_limit=1,
+        idle_interval=THUMBNAIL_DISPATCH_INTERVAL_SECONDS,
+        max_backoff=THUMBNAIL_DISPATCH_MAX_IDLE_BACKOFF_SECONDS,
+        kick_event=get_thumbnail_dispatcher_kick_event(),
+        logger=logger,
+        error_message="Thumbnail dispatcher error",
+        task_name="thumbnail job",
+    )
 
 
 def kick_gallery_file_gc() -> None:

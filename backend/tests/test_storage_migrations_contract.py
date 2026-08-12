@@ -261,7 +261,7 @@ def test_schema_migrations_are_recorded_and_idempotent(tmp_path):
         anchor_table = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE name = 'gallery_page_anchors'"
         ).fetchone()
-    assert [row["version"] for row in versions] == [1, 2, 3, 4, 5, 6, 7]
+    assert [row["version"] for row in versions] == list(range(1, 15))
     assert gallery_version["value"] == 0
     assert anchor_table is not None
 
@@ -274,3 +274,59 @@ def test_schema_migrations_are_recorded_and_idempotent(tmp_path):
     assert [(row["version"], row["name"]) for row in repeated_versions] == [
         (row["version"], row["name"]) for row in versions
     ]
+
+
+def test_schema_migrations_upgrade_legacy_gallery_schema(tmp_path):
+    _configure_runtime(tmp_path)
+    db_path = Path(config.DATABASE_FILE)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE gallery_entries (
+                id TEXT PRIMARY KEY,
+                prompt TEXT NOT NULL,
+                size TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO gallery_entries (id, prompt, size, filename, created_at)
+            VALUES ('legacy-1', 'legacy prompt', '1024x1024', 'legacy-1.png', '2026-01-01T00:00:00+00:00')
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE api_presets (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                api_url TEXT NOT NULL,
+                api_key TEXT NOT NULL,
+                api_path TEXT NOT NULL,
+                position INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+
+    db_repo.verify_storage_writable()
+    with db_repo._connect() as conn:
+        versions = [
+            row["version"]
+            for row in conn.execute("SELECT version FROM schema_migrations ORDER BY version")
+        ]
+        gallery_columns = db_repo._table_columns(conn, "gallery_entries")
+        preset_columns = db_repo._table_columns(conn, "api_presets")
+        row = conn.execute(
+            "SELECT favorite, sort_seq, bytes, thumbnail_filename, completed_at, sha256 FROM gallery_entries WHERE id = 'legacy-1'"
+        ).fetchone()
+
+    assert versions == list(range(1, 15))
+    assert {"favorite", "sort_seq", "bytes", "thumbnail_filename", "completed_at", "sha256"}.issubset(gallery_columns)
+    assert {"default_model", "default_response_format"}.issubset(preset_columns)
+    assert row["favorite"] == 0
+    assert row["sort_seq"] is not None

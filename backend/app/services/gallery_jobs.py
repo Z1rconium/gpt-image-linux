@@ -113,7 +113,30 @@ from ..schemas.gallery import (
     GallerySyncRequest,
     GallerySyncJobStatus,
 )
-from .gallery_common import *
+from .claim_loop import run_claim_loop
+from .gallery_common import (
+    BACKGROUND_TASK_ERROR_BACKOFF_INITIAL_SECONDS,
+    BACKGROUND_TASK_ERROR_BACKOFF_MAX_SECONDS,
+    BACKGROUND_TASK_LEASE_SECONDS,
+    DIRECT_EXPORT_SLOT_LEASE_SECONDS,
+    GALLERY_EXPORT_TERMINAL_STATUSES,
+    GALLERY_IMPORT_TERMINAL_STATUSES,
+    GALLERY_JOB_DISPATCH_INTERVAL_SECONDS,
+    GALLERY_JOB_DISPATCH_MAX_IDLE_BACKOFF_SECONDS,
+    GALLERY_JOB_LEASE_SECONDS,
+    GALLERY_JOB_SSE_IDLE_CHECK_SECONDS,
+    GALLERY_JOB_SSE_QUEUE_MAXSIZE,
+    MAX_ACTIVE_EXPORT_JOBS,
+    MAX_ACTIVE_IMPORT_JOBS,
+    MAX_ACTIVE_SYNC_JOBS,
+    PRIVATE_GALLERY_CACHE_CONTROL,
+    GalleryProgressThrottler,
+    _progress_item_count,
+    _resolve_trusted_gallery_job_path,
+    _unlink_trusted_gallery_job_path,
+)
+
+logger = logging.getLogger(__name__)
 
 async def _gallery_zip_response(
     entries,
@@ -753,17 +776,6 @@ def _claim_counted_gallery_kinds(kind: str) -> tuple[str, ...]:
     return (kind,)
 
 
-def _progress_item_count(updates: dict) -> int:
-    for key in ("processed_count", "compared_count", "exported_count", "uploaded_count"):
-        if key not in updates:
-            continue
-        try:
-            return int(updates.get(key) or 0)
-        except (TypeError, ValueError):
-            return 0
-    return 0
-
-
 async def _publish_gallery_job(job_id: str, updates: dict) -> dict | None:
     job = await run_db_operation(
         update_gallery_job,
@@ -1331,51 +1343,38 @@ async def _run_gallery_import_job(job: dict) -> None:
 
 
 async def _run_gallery_job_dispatcher(kind: str, worker_id: str, running_limit: int) -> None:
-    active_tasks: set[asyncio.Task] = set()
     runner_by_kind = {
         "export": _run_gallery_export_job,
         "sync": _run_gallery_sync_job,
         "import": _run_gallery_import_job,
     }
     runner = runner_by_kind[kind]
-    idle_delay = GALLERY_JOB_DISPATCH_INTERVAL_SECONDS
-    while True:
-        try:
-            active_tasks = {task for task in active_tasks if not task.done()}
-            claimed_count = 0
-            while len(active_tasks) < running_limit:
-                now = utc_now()
-                job = await asyncio.to_thread(
-                    claim_next_gallery_job,
-                    kind=kind,
-                    worker_id=worker_id,
-                    lease_expires_at=_gallery_job_lease_expires_at(),
-                    now=now,
-                    running_limit=running_limit,
-                    counted_kinds=_claim_counted_gallery_kinds(kind),
-                )
-                if not job:
-                    break
-                active_tasks.add(asyncio.create_task(runner(job)))
-                claimed_count += 1
-            if claimed_count:
-                idle_delay = GALLERY_JOB_DISPATCH_INTERVAL_SECONDS
-            elif len(active_tasks) < running_limit:
-                metrics.increment(f"gallery.{kind}.claim_miss")
-                idle_delay = min(
-                    GALLERY_JOB_DISPATCH_MAX_IDLE_BACKOFF_SECONDS,
-                    max(GALLERY_JOB_DISPATCH_INTERVAL_SECONDS, idle_delay * 2),
-                )
-            await asyncio.sleep(idle_delay)
-        except asyncio.CancelledError:
-            for task in active_tasks:
-                task.cancel()
-            if active_tasks:
-                await asyncio.gather(*active_tasks, return_exceptions=True)
-            raise
-        except Exception:
-            logger.warning("Gallery %s dispatcher error", kind, exc_info=True)
-            await asyncio.sleep(GALLERY_JOB_DISPATCH_INTERVAL_SECONDS)
+
+    async def claim_gallery_job():
+        return await asyncio.to_thread(
+            claim_next_gallery_job,
+            kind=kind,
+            worker_id=worker_id,
+            lease_expires_at=_gallery_job_lease_expires_at(),
+            now=utc_now(),
+            running_limit=running_limit,
+            counted_kinds=_claim_counted_gallery_kinds(kind),
+        )
+
+    async def run_gallery_job(job: dict):
+        await runner(job)
+
+    await run_claim_loop(
+        claim_fn=claim_gallery_job,
+        run_fn=run_gallery_job,
+        running_limit=running_limit,
+        idle_interval=GALLERY_JOB_DISPATCH_INTERVAL_SECONDS,
+        max_backoff=GALLERY_JOB_DISPATCH_MAX_IDLE_BACKOFF_SECONDS,
+        claim_miss_fn=lambda: metrics.increment(f"gallery.{kind}.claim_miss"),
+        logger=logger,
+        error_message=f"Gallery {kind} dispatcher error",
+        task_name=f"gallery {kind} job",
+    )
 
 
 async def run_gallery_export_dispatcher(worker_id: str) -> None:

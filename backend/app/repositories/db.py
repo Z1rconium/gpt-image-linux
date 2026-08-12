@@ -256,6 +256,9 @@ WORKER_METRIC_SNAPSHOT_TTL_SECONDS = 300
 
 _initialized_database_file: Path | None = None
 _db_init_lock = threading.RLock()
+# These locks only serialize file operations inside one Python process. Cross-process
+# gallery writes/deletes are deliberately coordinated by SQLite row leases plus
+# UUID-derived filenames, atomic Path.replace(), and orphan-file GC TTL cleanup.
 _storage_lock = threading.RLock()
 _gallery_file_write_lock = threading.RLock()
 _thread_local = threading.local()
@@ -1391,13 +1394,6 @@ def _ensure_database():
 
                 """
             )
-            _migrate_api_presets_schema(conn)
-            _migrate_gallery_schema(conn)
-            _migrate_generate_jobs_schema(conn)
-            _migrate_gallery_jobs_schema(conn)
-            _migrate_r2_sync_state_schema(conn)
-            _migrate_prompt_snippets_schema(conn)
-            _migrate_gallery_ai_metadata_schema(conn)
             _run_schema_migrations(conn)
             _ensure_gallery_fts(conn)
             conn.commit()
@@ -1410,6 +1406,39 @@ def _ensure_database():
 def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
     return {row["name"] for row in rows}
+
+
+def _ensure_gallery_sort_seq_column(conn: sqlite3.Connection):
+    columns = _table_columns(conn, "gallery_entries")
+    if "sort_seq" not in columns:
+        conn.execute("ALTER TABLE gallery_entries ADD COLUMN sort_seq INTEGER")
+        conn.execute("DROP INDEX IF EXISTS idx_gallery_entries_created_at")
+        conn.execute("DROP INDEX IF EXISTS idx_gallery_entries_model_created_at")
+        conn.execute("DROP INDEX IF EXISTS idx_gallery_entries_preset_created_at")
+        conn.execute("DROP INDEX IF EXISTS idx_gallery_entries_size_created_at")
+        conn.execute("DROP INDEX IF EXISTS idx_gallery_entries_favorite_created_at")
+    conn.execute(
+        """
+        UPDATE gallery_entries
+        SET sort_seq = rowid
+        WHERE sort_seq IS NULL
+        """
+    )
+
+
+def _ensure_gallery_keyset_indexes(conn: sqlite3.Connection):
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_gallery_entries_sort_seq
+            ON gallery_entries(sort_seq DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_gallery_entries_sort_seq_id
+            ON gallery_entries(sort_seq DESC, id DESC)
+        """
+    )
 
 
 def _migration_baseline_legacy_schema(conn: sqlite3.Connection):
@@ -1456,52 +1485,48 @@ def _migration_thumbnail_jobs(conn: sqlite3.Connection):
 
 
 def _migration_gallery_keyset_index(conn: sqlite3.Connection):
-    conn.execute(
-        """
-        UPDATE gallery_entries
-        SET sort_seq = rowid
-        WHERE sort_seq IS NULL
-        """
-    )
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_gallery_entries_sort_seq_id
-            ON gallery_entries(sort_seq DESC, id DESC)
-        """
-    )
+    _ensure_gallery_sort_seq_column(conn)
+    _ensure_gallery_keyset_indexes(conn)
 
 
 def _migration_gallery_sort_filter_indexes(conn: sqlite3.Connection):
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_gallery_entries_favorite_sort_seq_id
-            ON gallery_entries(favorite, sort_seq DESC, id DESC)
-        """
-    )
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_gallery_entries_model_sort_seq_id
-            ON gallery_entries(model, sort_seq DESC, id DESC)
-        """
-    )
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_gallery_entries_preset_sort_seq_id
-            ON gallery_entries(api_preset_name, sort_seq DESC, id DESC)
-        """
-    )
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_gallery_entries_size_sort_seq_id
-            ON gallery_entries(size, sort_seq DESC, id DESC)
-        """
-    )
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_gallery_entries_created_at_sort_seq_id
-            ON gallery_entries(created_at DESC, sort_seq DESC, id DESC)
-        """
-    )
+    _ensure_gallery_sort_seq_column(conn)
+    columns = _table_columns(conn, "gallery_entries")
+    if "favorite" in columns:
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_gallery_entries_favorite_sort_seq_id
+                ON gallery_entries(favorite, sort_seq DESC, id DESC)
+            """
+        )
+    if "model" in columns:
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_gallery_entries_model_sort_seq_id
+                ON gallery_entries(model, sort_seq DESC, id DESC)
+            """
+        )
+    if "api_preset_name" in columns:
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_gallery_entries_preset_sort_seq_id
+                ON gallery_entries(api_preset_name, sort_seq DESC, id DESC)
+            """
+        )
+    if "size" in columns:
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_gallery_entries_size_sort_seq_id
+                ON gallery_entries(size, sort_seq DESC, id DESC)
+            """
+        )
+    if "created_at" in columns:
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_gallery_entries_created_at_sort_seq_id
+                ON gallery_entries(created_at DESC, sort_seq DESC, id DESC)
+            """
+        )
 
 
 def _migration_gallery_page_anchors(conn: sqlite3.Connection):
@@ -1561,17 +1586,6 @@ def _migration_access_failures(conn: sqlite3.Connection):
     )
 
 
-SCHEMA_MIGRATIONS = (
-    (1, "baseline_legacy_schema", _migration_baseline_legacy_schema),
-    (2, "gallery_filter_options", _migration_gallery_filter_options),
-    (3, "thumbnail_jobs", _migration_thumbnail_jobs),
-    (4, "gallery_keyset_index", _migration_gallery_keyset_index),
-    (5, "gallery_sort_filter_indexes", _migration_gallery_sort_filter_indexes),
-    (6, "gallery_page_anchors", _migration_gallery_page_anchors),
-    (7, "access_failures", _migration_access_failures),
-)
-
-
 def _run_schema_migrations(conn: sqlite3.Connection):
     conn.execute(
         """
@@ -1609,7 +1623,7 @@ def _run_schema_migrations(conn: sqlite3.Connection):
         )
 
 
-def _migrate_gallery_schema(conn: sqlite3.Connection):
+def _migration_gallery_entry_schema(conn: sqlite3.Connection):
     columns = _table_columns(conn, "gallery_entries")
     if "favorite" not in columns:
         conn.execute(
@@ -1623,33 +1637,10 @@ def _migrate_gallery_schema(conn: sqlite3.Connection):
         conn.execute("ALTER TABLE gallery_entries ADD COLUMN completed_at TEXT")
     if "sha256" not in columns:
         conn.execute("ALTER TABLE gallery_entries ADD COLUMN sha256 TEXT")
-    if "sort_seq" not in columns:
-        conn.execute("ALTER TABLE gallery_entries ADD COLUMN sort_seq INTEGER")
-        conn.execute(
-            """
-            UPDATE gallery_entries
-            SET sort_seq = rowid
-            WHERE sort_seq IS NULL
-            """
-        )
-        conn.execute("DROP INDEX IF EXISTS idx_gallery_entries_created_at")
-        conn.execute("DROP INDEX IF EXISTS idx_gallery_entries_model_created_at")
-        conn.execute("DROP INDEX IF EXISTS idx_gallery_entries_preset_created_at")
-        conn.execute("DROP INDEX IF EXISTS idx_gallery_entries_size_created_at")
-        conn.execute("DROP INDEX IF EXISTS idx_gallery_entries_favorite_created_at")
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_gallery_entries_sort_seq
-            ON gallery_entries(sort_seq DESC)
-        """
-    )
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_gallery_entries_sort_seq_id
-            ON gallery_entries(sort_seq DESC, id DESC)
-        """
-    )
-    if "favorite" in _table_columns(conn, "gallery_entries"):
+    _ensure_gallery_sort_seq_column(conn)
+    _ensure_gallery_keyset_indexes(conn)
+    columns = _table_columns(conn, "gallery_entries")
+    if "favorite" in columns:
         conn.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_gallery_entries_favorite_created_at
@@ -1662,70 +1653,75 @@ def _migrate_gallery_schema(conn: sqlite3.Connection):
                 ON gallery_entries(favorite, sort_seq DESC, id DESC)
             """
         )
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_gallery_entries_model_created_at
-            ON gallery_entries(model, created_at DESC, sort_seq DESC)
-        """
-    )
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_gallery_entries_model_sort_seq_id
-            ON gallery_entries(model, sort_seq DESC, id DESC)
-        """
-    )
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_gallery_entries_preset_created_at
-            ON gallery_entries(api_preset_name, created_at DESC, sort_seq DESC)
-        """
-    )
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_gallery_entries_preset_sort_seq_id
-            ON gallery_entries(api_preset_name, sort_seq DESC, id DESC)
-        """
-    )
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_gallery_entries_size_created_at
-            ON gallery_entries(size, created_at DESC, sort_seq DESC)
-        """
-    )
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_gallery_entries_size_sort_seq_id
-            ON gallery_entries(size, sort_seq DESC, id DESC)
-        """
-    )
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_gallery_entries_created_at
-            ON gallery_entries(created_at DESC, sort_seq DESC)
-        """
-    )
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_gallery_entries_created_at_sort_seq_id
-            ON gallery_entries(created_at DESC, sort_seq DESC, id DESC)
-        """
-    )
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_gallery_entries_missing_bytes_filename
-            ON gallery_entries(filename) WHERE bytes IS NULL
-        """
-    )
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_gallery_entries_filename_bytes
-            ON gallery_entries(filename, bytes) WHERE bytes IS NOT NULL
-        """
-    )
+    if "model" in columns:
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_gallery_entries_model_created_at
+                ON gallery_entries(model, created_at DESC, sort_seq DESC)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_gallery_entries_model_sort_seq_id
+                ON gallery_entries(model, sort_seq DESC, id DESC)
+            """
+        )
+    if "api_preset_name" in columns:
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_gallery_entries_preset_created_at
+                ON gallery_entries(api_preset_name, created_at DESC, sort_seq DESC)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_gallery_entries_preset_sort_seq_id
+                ON gallery_entries(api_preset_name, sort_seq DESC, id DESC)
+            """
+        )
+    if "size" in columns:
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_gallery_entries_size_created_at
+                ON gallery_entries(size, created_at DESC, sort_seq DESC)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_gallery_entries_size_sort_seq_id
+                ON gallery_entries(size, sort_seq DESC, id DESC)
+            """
+        )
+    if "created_at" in columns:
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_gallery_entries_created_at
+                ON gallery_entries(created_at DESC, sort_seq DESC)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_gallery_entries_created_at_sort_seq_id
+                ON gallery_entries(created_at DESC, sort_seq DESC, id DESC)
+            """
+        )
+    if {"filename", "bytes"}.issubset(columns):
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_gallery_entries_missing_bytes_filename
+                ON gallery_entries(filename) WHERE bytes IS NULL
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_gallery_entries_filename_bytes
+                ON gallery_entries(filename, bytes) WHERE bytes IS NOT NULL
+            """
+        )
 
 
 
-def _migrate_api_presets_schema(conn: sqlite3.Connection):
+def _migration_api_presets_schema(conn: sqlite3.Connection):
     columns = _table_columns(conn, "api_presets")
     if "default_model" not in columns:
         conn.execute("ALTER TABLE api_presets ADD COLUMN default_model TEXT")
@@ -1760,7 +1756,7 @@ def _migrate_api_presets_schema(conn: sqlite3.Connection):
     )
 
 
-def _migrate_generate_jobs_schema(conn: sqlite3.Connection):
+def _migration_generate_jobs_schema(conn: sqlite3.Connection):
     columns = _table_columns(conn, "generate_jobs")
     if "stage_timings_json" not in columns:
         conn.execute("ALTER TABLE generate_jobs ADD COLUMN stage_timings_json TEXT")
@@ -1770,7 +1766,7 @@ def _migrate_generate_jobs_schema(conn: sqlite3.Connection):
         conn.execute("ALTER TABLE generate_jobs ADD COLUMN webhook_url TEXT")
 
 
-def _migrate_gallery_jobs_schema(conn: sqlite3.Connection):
+def _migration_gallery_jobs_schema(conn: sqlite3.Connection):
     columns = _table_columns(conn, "gallery_jobs")
     if "pending_upload_count" not in columns:
         conn.execute(
@@ -1778,7 +1774,7 @@ def _migrate_gallery_jobs_schema(conn: sqlite3.Connection):
         )
 
 
-def _migrate_r2_sync_state_schema(conn: sqlite3.Connection):
+def _migration_r2_sync_state_schema(conn: sqlite3.Connection):
     columns = _table_columns(conn, "r2_sync_state")
     if "etag" not in columns:
         conn.execute("ALTER TABLE r2_sync_state ADD COLUMN etag TEXT")
@@ -1786,7 +1782,7 @@ def _migrate_r2_sync_state_schema(conn: sqlite3.Connection):
         conn.execute("ALTER TABLE r2_sync_state ADD COLUMN last_remote_seen_at TEXT")
 
 
-def _migrate_prompt_snippets_schema(conn: sqlite3.Connection):
+def _migration_prompt_snippets_schema(conn: sqlite3.Connection):
     columns = _table_columns(conn, "prompt_snippets")
     if "favorite" not in columns:
         conn.execute(
@@ -1800,7 +1796,7 @@ def _migrate_prompt_snippets_schema(conn: sqlite3.Connection):
     )
 
 
-def _migrate_gallery_ai_metadata_schema(conn: sqlite3.Connection):
+def _migration_gallery_ai_metadata_schema(conn: sqlite3.Connection):
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS gallery_ai_metadata (
@@ -1815,6 +1811,24 @@ def _migrate_gallery_ai_metadata_schema(conn: sqlite3.Connection):
         )
         """
     )
+
+
+SCHEMA_MIGRATIONS = (
+    (1, "baseline_legacy_schema", _migration_baseline_legacy_schema),
+    (2, "gallery_filter_options", _migration_gallery_filter_options),
+    (3, "thumbnail_jobs", _migration_thumbnail_jobs),
+    (4, "gallery_keyset_index", _migration_gallery_keyset_index),
+    (5, "gallery_sort_filter_indexes", _migration_gallery_sort_filter_indexes),
+    (6, "gallery_page_anchors", _migration_gallery_page_anchors),
+    (7, "access_failures", _migration_access_failures),
+    (8, "api_presets_schema", _migration_api_presets_schema),
+    (9, "gallery_entry_schema", _migration_gallery_entry_schema),
+    (10, "generate_jobs_schema", _migration_generate_jobs_schema),
+    (11, "gallery_jobs_schema", _migration_gallery_jobs_schema),
+    (12, "r2_sync_state_schema", _migration_r2_sync_state_schema),
+    (13, "prompt_snippets_schema", _migration_prompt_snippets_schema),
+    (14, "gallery_ai_metadata_schema", _migration_gallery_ai_metadata_schema),
+)
 
 
 def _get_setting_value(conn: sqlite3.Connection, key: str) -> str | None:
@@ -2780,7 +2794,10 @@ def _increment_gallery_filter_options_on_conn(
 def _rebuild_gallery_filter_options_on_conn(conn: sqlite3.Connection):
     conn.execute("DELETE FROM gallery_filter_options")
     now = utc_now()
+    columns = _table_columns(conn, "gallery_entries")
     for kind, column in GALLERY_FILTER_OPTION_FIELDS:
+        if column not in columns:
+            continue
         conn.execute(
             f"""
             INSERT INTO gallery_filter_options (kind, value, ref_count, updated_at)

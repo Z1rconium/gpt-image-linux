@@ -193,6 +193,51 @@ def get_gallery_jobs_updated_at_edges(kind: str, job_ids: set[str]) -> dict[str,
     return rows_by_job_id
 
 
+_GALLERY_JOB_UPDATE_COLUMNS = set(GALLERY_JOB_COLUMNS) - {"job_id", "kind", "created_at"}
+_GALLERY_JOB_INTEGER_UPDATE_COLUMNS = {
+    "progress",
+    "requested_count",
+    "processed_count",
+    "exported_count",
+    "missing_count",
+    "total_count",
+    "compared_count",
+    "uploaded_count",
+    "pending_upload_count",
+    "skipped_existing_count",
+    "missing_local_count",
+    "failed_count",
+    "bytes_total",
+    "bytes_written",
+    "bytes_uploaded",
+}
+
+
+def _normalize_gallery_job_updates(updates: dict[str, Any]) -> dict[str, Any]:
+    normalized: dict[str, Any] = {}
+    for key, value in updates.items():
+        if key == "payload":
+            key = "payload_json"
+        if key not in _GALLERY_JOB_UPDATE_COLUMNS:
+            continue
+        if key == "payload_json":
+            try:
+                normalized[key] = (
+                    value
+                    if isinstance(value, str)
+                    else json.dumps(value or {}, ensure_ascii=False, sort_keys=True)
+                )
+            except TypeError:
+                continue
+            continue
+        if key in _GALLERY_JOB_INTEGER_UPDATE_COLUMNS:
+            normalized[key] = _coerce_nonnegative_int(value, 0)
+        else:
+            normalized[key] = None if value is None else str(value)
+    normalized["updated_at"] = str(updates.get("updated_at") or utc_now())
+    return normalized
+
+
 def update_gallery_job(
     job_id: str,
     updates: dict[str, Any],
@@ -214,45 +259,7 @@ def update_gallery_job(
                 ).fetchone()
         return _gallery_job_from_row(row) if row else None
 
-    allowed = set(GALLERY_JOB_COLUMNS) - {"job_id", "kind", "created_at", "payload_json"}
-    normalized: dict[str, Any] = {}
-    integer_columns = {
-        "progress",
-        "requested_count",
-        "processed_count",
-        "exported_count",
-        "missing_count",
-        "total_count",
-        "compared_count",
-        "uploaded_count",
-        "pending_upload_count",
-        "skipped_existing_count",
-        "missing_local_count",
-        "failed_count",
-        "bytes_total",
-        "bytes_written",
-        "bytes_uploaded",
-    }
-    for key, value in updates.items():
-        if key == "payload":
-            key = "payload_json"
-        if key not in allowed and key != "payload_json":
-            continue
-        if key == "payload_json":
-            try:
-                normalized[key] = (
-                    value
-                    if isinstance(value, str)
-                    else json.dumps(value or {}, ensure_ascii=False, sort_keys=True)
-                )
-            except TypeError:
-                continue
-            continue
-        if key in integer_columns:
-            normalized[key] = _coerce_nonnegative_int(value, 0)
-        else:
-            normalized[key] = None if value is None else str(value)
-    normalized["updated_at"] = str(updates.get("updated_at") or utc_now())
+    normalized = _normalize_gallery_job_updates(updates)
 
     assignments = ", ".join(f"{key} = ?" for key in normalized)
     with _connect() as conn:
@@ -284,49 +291,6 @@ def update_gallery_job(
                 (job_id,),
             ).fetchone()
     return _gallery_job_from_row(row) if row else None
-
-
-def _normalize_gallery_job_updates(updates: dict[str, Any]) -> dict[str, Any]:
-    allowed = set(GALLERY_JOB_COLUMNS) - {"job_id", "kind", "created_at", "payload_json"}
-    normalized: dict[str, Any] = {}
-    integer_columns = {
-        "progress",
-        "requested_count",
-        "processed_count",
-        "exported_count",
-        "missing_count",
-        "total_count",
-        "compared_count",
-        "uploaded_count",
-        "pending_upload_count",
-        "skipped_existing_count",
-        "missing_local_count",
-        "failed_count",
-        "bytes_total",
-        "bytes_written",
-        "bytes_uploaded",
-    }
-    for key, value in updates.items():
-        if key == "payload":
-            key = "payload_json"
-        if key not in allowed and key != "payload_json":
-            continue
-        if key == "payload_json":
-            try:
-                normalized[key] = (
-                    value
-                    if isinstance(value, str)
-                    else json.dumps(value or {}, ensure_ascii=False, sort_keys=True)
-                )
-            except TypeError:
-                continue
-            continue
-        if key in integer_columns:
-            normalized[key] = _coerce_nonnegative_int(value, 0)
-        else:
-            normalized[key] = None if value is None else str(value)
-    normalized["updated_at"] = str(updates.get("updated_at") or utc_now())
-    return normalized
 
 
 def update_gallery_job_progress(

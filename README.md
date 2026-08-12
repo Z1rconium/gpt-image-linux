@@ -53,6 +53,7 @@ This project is only a self-hosted control panel. It does not provide, proxy, re
 - Backend: FastAPI under `backend/app/`; ASGI entrypoint is `backend.app.main:app`.
 - Frontend: SvelteKit static app under `frontend/`; production backend serves `frontend/build/`.
 - Runtime storage: generated images under `images/`, thumbnails under `images/thumbs/`, SQLite data under `data/app.sqlite3`, and logs under `data/logs/` by default.
+- Multi-worker coordination: queued jobs, background leases, SSE slots, and scheduler ownership use SQLite leases. Image and thumbnail file writes/deletes use process-local locks only, and tolerate cross-process races through UUID filenames, atomic `Path.replace()`, and orphan-file GC TTL cleanup.
 - Public API routing: `backend/app/api/contract_app.py`.
 - DTOs: `backend/app/schemas/`.
 - Persistence: `backend/app/repositories/`.
@@ -353,6 +354,7 @@ The public API surface is contract-tested; keep paths, methods, status codes, SS
 - Keep public contracts stable unless a breaking change is intentional:
   - API paths, methods, status codes, cookies, SSE event names, and response shapes
   - generation/edit queue lifecycle, cancellation semantics, and multi-worker SQLite coordination
+  - file-system races are tolerated by UUID filenames, atomic replacement, and orphan GC; do not rely on process-local locks for cross-worker exclusion
 - Keep validation and safety centralized:
   - image byte validation, safe paths, thumbnail/archive helpers
   - SSRF-sensitive URL handling in validators, safe connector, and integration clients

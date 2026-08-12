@@ -22,7 +22,6 @@ from ..integrations import assistant_client
 from ..repositories.coordination import (
     acquire_background_slot,
     claim_next_gallery_job,
-    delete_gallery_job,
     get_gallery_job,
     release_background_slot,
     renew_gallery_job_lease,
@@ -69,9 +68,27 @@ from ..schemas.assistant import (
 from ..schemas.settings import AIAssistantSettingsRequest
 
 logger = logging.getLogger(__name__)
-from .assistant_runtime import *
-from .assistant_vision import *
+from .claim_loop import run_claim_loop
+from .assistant_runtime import (
+    AIAnalyzeJobLeaseLost,
+    AI_ANALYZE_JOB_BATCH_SIZE,
+    AI_ANALYZE_JOB_KIND,
+    AI_ANALYZE_JOB_LEASE_RENEW_SECONDS,
+    AI_ANALYZE_JOB_LEASE_SECONDS,
+    AI_ASSISTANT_SLOT_RETRY_SECONDS,
+    MAX_ACTIVE_AI_ANALYZE_JOBS,
+    AssistantRuntime,
+    AssistantRuntimeHolder,
+    _batch_assistant_runtime,
+    _batch_target_language,
+    _resolve_runtime_async,
+)
+from .assistant_vision import _analyze_gallery_image
+from .gallery_common import _gallery_filters_from_selection_token
 from .gallery_jobs import stream_gallery_job
+
+AI_ANALYZE_DISPATCH_INTERVAL_SECONDS = 1.0
+AI_ANALYZE_DISPATCH_MAX_IDLE_BACKOFF_SECONDS = 5.0
 
 async def _analyze_gallery_image_with_lease_renewal(
     image_id: str,
@@ -223,38 +240,6 @@ def _build_ai_analyze_job(
         "failed_count": 0,
         "payload": payload,
     }
-
-
-def _parse_gallery_token_timestamp(value: Any) -> datetime | None:
-    raw_value = str(value or "").strip()
-    if not raw_value:
-        return None
-    try:
-        parsed = datetime.fromisoformat(raw_value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed
-
-
-async def _gallery_filters_from_selection_token(selection_token: str | None) -> dict[str, Any]:
-    token = str(selection_token or "").strip()
-    if not token:
-        raise HTTPException(status_code=422, detail="selection_token is required")
-    job = await asyncio.to_thread(get_gallery_job, GALLERY_SELECTION_TOKEN_KIND, token)
-    if not job:
-        raise HTTPException(status_code=404, detail="Gallery selection token not found")
-    payload = job.get("payload") or {}
-    expires_at = _parse_gallery_token_timestamp(payload.get("expires_at"))
-    if not expires_at or expires_at <= datetime.now(timezone.utc):
-        await asyncio.to_thread(delete_gallery_job, GALLERY_SELECTION_TOKEN_KIND, token)
-        raise HTTPException(status_code=404, detail="Gallery selection token expired")
-    filters = payload.get("filters")
-    if not isinstance(filters, dict):
-        await asyncio.to_thread(delete_gallery_job, GALLERY_SELECTION_TOKEN_KIND, token)
-        raise HTTPException(status_code=404, detail="Gallery selection token not found")
-    return filters
 
 
 def _gallery_job_lease_expires_at() -> str:
@@ -517,33 +502,45 @@ async def _run_ai_analyze_job(job: dict[str, Any]) -> None:
 
 
 async def run_ai_analyze_dispatcher(worker_id: str) -> None:
-    while True:
-        try:
-            job = await asyncio.to_thread(
-                claim_next_gallery_job,
-                kind=AI_ANALYZE_JOB_KIND,
-                worker_id=worker_id,
-                lease_expires_at=_gallery_job_lease_expires_at(),
-                now=utc_now(),
-                running_limit=MAX_ACTIVE_AI_ANALYZE_JOBS,
-                counted_kinds=(AI_ANALYZE_JOB_KIND,),
-            )
-            if not job:
-                await asyncio.sleep(1.0)
-                continue
-            await _run_ai_analyze_job(job)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.warning("Gallery AI analysis dispatcher error", exc_info=True)
-            await asyncio.sleep(1.0)
+    async def claim_ai_analyze_job():
+        return await asyncio.to_thread(
+            claim_next_gallery_job,
+            kind=AI_ANALYZE_JOB_KIND,
+            worker_id=worker_id,
+            lease_expires_at=_gallery_job_lease_expires_at(),
+            now=utc_now(),
+            running_limit=MAX_ACTIVE_AI_ANALYZE_JOBS,
+            counted_kinds=(AI_ANALYZE_JOB_KIND,),
+        )
+
+    async def run_ai_analyze_job(job: dict[str, Any]):
+        await _run_ai_analyze_job(job)
+
+    await run_claim_loop(
+        claim_fn=claim_ai_analyze_job,
+        run_fn=run_ai_analyze_job,
+        running_limit=MAX_ACTIVE_AI_ANALYZE_JOBS,
+        idle_interval=AI_ANALYZE_DISPATCH_INTERVAL_SECONDS,
+        max_backoff=AI_ANALYZE_DISPATCH_MAX_IDLE_BACKOFF_SECONDS,
+        kick_event=get_ai_analyze_dispatcher_kick_event(),
+        logger=logger,
+        error_message="Gallery AI analysis dispatcher error",
+        task_name="gallery AI analysis job",
+    )
+
+
+def get_ai_analyze_dispatcher_kick_event() -> asyncio.Event:
+    event = getattr(app.state, "gallery_ai_analyze_dispatcher_kick", None)
+    if event is None:
+        event = asyncio.Event()
+        app.state.gallery_ai_analyze_dispatcher_kick = event
+    return event
 
 
 def _kick_ai_analyze_dispatcher() -> None:
-    from ..api.app_state import app
-
     task = getattr(app.state, "gallery_ai_analyze_dispatcher_task", None)
     if task and not task.done():
+        get_ai_analyze_dispatcher_kick_event().set()
         return
     worker_id = getattr(app.state, "worker_id", f"{os.getpid()}-{id(app)}")
     app.state.gallery_ai_analyze_dispatcher_task = asyncio.create_task(

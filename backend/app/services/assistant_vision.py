@@ -77,7 +77,20 @@ from ..schemas.generation import GenerateRequest
 from ..schemas.settings import AIAssistantSettingsRequest
 
 logger = logging.getLogger(__name__)
-from .assistant_runtime import *
+from .assistant_runtime import (
+    ASSISTANT_IMAGE_UPLOAD_CHUNK_BYTES,
+    AssistantRuntime,
+    _assistant_json,
+    _assistant_request_limit,
+    _batch_assistant_runtime,
+    _batch_target_language,
+    _clamp_text,
+    _image_prompt_system_prompt,
+    _resolve_runtime_async,
+    _string_list,
+    _truncate_assistant_data,
+    _warnings,
+)
 
 async def _read_image_prompt_upload(image: UploadFile) -> bytes:
     if not is_image_upload(image):
