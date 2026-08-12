@@ -249,6 +249,7 @@ Most runtime options live in `.env.example`. API presets, prompt optimizer, R2 b
 | `PROMPT_OPTIMIZER_*` | Optional server-side prompt optimizer settings. |
 | `AI_ASSISTANT_*` | AI Assistant is enabled by default; set `AI_ASSISTANT_ENABLED=false` to disable it. API URL, key, text model, timeout, route, and host allowlist reuse `PROMPT_OPTIMIZER_*`. `AI_ASSISTANT_MAX_CONCURRENCY` caps concurrent upstream assistant calls and `AI_ASSISTANT_BATCH_MAX_IMAGES` caps one gallery AI batch. |
 | `R2_*` | Optional Cloudflare R2 gallery backup sync settings; custom endpoint hosts require `R2_ENDPOINT_HOST_ALLOWLIST`. |
+| `NODEIMAGE_API_KEY` | Optional NodeImage API key for server-side Gallery uploads. |
 | `PUBLIC_ORIGIN` / `ALLOWED_HOSTS` | Reverse-proxy Host/CSRF hardening. |
 | `ENABLE_NGINX_ACCEL_REDIRECT` / `PUBLIC_IMAGE_BASE_URL` / `PUBLIC_THUMBNAIL_BASE_URL` | Optional nginx/CDN image byte serving behavior. |
 | `GRANIAN_*` | Production runtime process/thread/static-asset tuning. |
@@ -266,7 +267,7 @@ Overall Config persists overrides in SQLite. Some settings are hot-reloaded; res
 3. Open Settings.
 4. Create or select an API preset.
 5. Set API base URL, API path, model, response format, and API key/env ref.
-6. Optionally configure SOCKS5 proxy, webhook, prompt optimizer, AI Assistant, R2 backup, or Overall Config overrides.
+6. Optionally configure SOCKS5 proxy, webhook, prompt optimizer, AI Assistant, R2 backup, NodeImage upload, or Overall Config overrides.
 7. Save the preset and run its health check if needed.
 8. Generate images from a prompt, or upload/select source images and run edits.
 9. Use Gallery for reuse, filtering, favorites, batch actions, import/export, and R2 sync.

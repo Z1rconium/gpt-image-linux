@@ -109,6 +109,7 @@ class SettingsRequest(StrictRequestModel):
     prompt_optimizer: Optional["PromptOptimizerSettingsRequest"] = None
     ai_assistant: Optional["AIAssistantSettingsRequest"] = None
     r2_backup: Optional["R2BackupSettingsRequest"] = None
+    nodeimage: Optional["NodeImageSettingsRequest"] = None
 
     @field_validator("api_url")
     @classmethod
@@ -172,6 +173,7 @@ class SettingsResponse(BaseModel):
     prompt_optimizer: "PromptOptimizerSettingsResponse" = Field(default_factory=lambda: PromptOptimizerSettingsResponse())
     ai_assistant: "AIAssistantSettingsResponse" = Field(default_factory=lambda: AIAssistantSettingsResponse())
     r2_backup: "R2BackupSettingsResponse" = Field(default_factory=lambda: R2BackupSettingsResponse())
+    nodeimage: "NodeImageSettingsResponse" = Field(default_factory=lambda: NodeImageSettingsResponse())
     image_upload_limits: ImageUploadLimitsResponse
 
 
@@ -407,4 +409,30 @@ class R2BackupSettingsRequest(StrictRequestModel):
         return normalize_secret_env_ref_or_plaintext(
             value,
             field_name="R2 secret access key",
+        )
+
+
+class NodeImageSettingsResponse(BaseModel):
+    enabled: bool = False
+    api_key_masked: str = "***"
+    has_api_key: bool = False
+    api_key_source: ApiKeySource = "empty"
+    api_key_env_var: Optional[str] = None
+    api_key_secret_id: Optional[str] = None
+
+
+class NodeImageSettingsRequest(StrictRequestModel):
+    enabled: Optional[bool] = None
+    api_key: Optional[str] = Field(default=None, max_length=8192)
+
+    @field_validator("api_key")
+    @classmethod
+    def validate_api_key(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        if value.strip() == MASKED_SECRET_VALUE:
+            return MASKED_SECRET_VALUE
+        return normalize_secret_env_ref_or_plaintext(
+            value,
+            field_name="NodeImage API key",
         )

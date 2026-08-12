@@ -5,8 +5,18 @@ import { t } from '$lib/i18n';
 import { confirmStore } from '$lib/stores/confirm';
 import type { ToastOptions, ToastVariant } from '$lib/stores/ui';
 import { formatBytes } from '$lib/utils/format';
-import type { GalleryBatchResponse, GalleryEntry, GalleryExportJobStatus, GalleryImportJobStatus, GalleryResponse, GallerySyncJobStatus } from '$lib/api/types/gallery';
+import type {
+  GalleryBatchResponse,
+  GalleryEntry,
+  GalleryExportJobStatus,
+  GalleryImportJobStatus,
+  GalleryResponse,
+  GallerySyncJobStatus,
+  NodeImageBatchUploadResponse,
+  NodeImageUploadResponse
+} from '$lib/api/types/gallery';
 import type { GalleryLoadOptions, GalleryNavigation, GalleryOperationStatus, GalleryState } from '$lib/stores/gallery';
+import { nodeImageResult, type NodeImageResultItem } from '$lib/stores/nodeImage';
 
 const STREAMING_ZIP_DOWNLOAD_BYTES_THRESHOLD = 64 * 1024 * 1024;
 const GALLERY_JOB_EVENT_NETWORK_TIMEOUT_MS = 30_000;
@@ -303,6 +313,8 @@ function waitForGalleryImportJob(
 }
 
 export function createDeferredGalleryActions(deps: GalleryActionDeps) {
+  let nodeImageUploadInProgress = false;
+
   async function waitWithAbort<T>(wait: (signal: AbortSignal) => Promise<T>): Promise<T> {
     const controller = new AbortController();
     const unregister = deps.registerAbortController(controller);
@@ -420,6 +432,110 @@ export function createDeferredGalleryActions(deps: GalleryActionDeps) {
     showToast(batchToastMessage('favorite', result));
     if (refreshRequired) {
       await refreshGalleryPageBestEffort(deps, state.page);
+    }
+  }
+
+  async function uploadToNodeImage(
+    image: GalleryEntry,
+    showToast: (message: string, variant?: ToastVariant) => void
+  ) {
+    if (nodeImageUploadInProgress) return;
+    nodeImageUploadInProgress = true;
+    const controller = new AbortController();
+    const unregister = deps.registerAbortController(controller);
+    deps.setOperationStatus({
+      kind: 'nodeimage_upload',
+      label: get(t).gallery.uploadingToNodeImage,
+      detail: get(t).gallery.nodeImageUploadPreparing(1),
+      progress: null
+    });
+    try {
+      const result = await apiFetch<NodeImageUploadResponse>(
+        `/api/gallery/${encodeURIComponent(image.id)}/nodeimage-upload`,
+        { method: 'POST', signal: controller.signal },
+        'uploading to NodeImage'
+      );
+      nodeImageResult.show({
+        items: [
+          {
+            imageId: image.id,
+            label: image.filename,
+            status: 'ok',
+            url: result.url,
+            markdown: result.markdown,
+            error: ''
+          }
+        ],
+        uploadedCount: 1,
+        failedCount: 0
+      });
+      showToast(get(t).messages.nodeImageUploadComplete);
+    } catch (error) {
+      if (isAbortError(error)) return;
+      const reason = error instanceof Error ? error.message : get(t).messages.requestFailed;
+      showToast(get(t).messages.nodeImageUploadFailed(reason), 'error');
+    } finally {
+      unregister();
+      deps.setOperationStatus(null);
+      nodeImageUploadInProgress = false;
+    }
+  }
+
+  async function batchUploadToNodeImage(
+    showToast: (message: string, variant?: ToastVariant) => void
+  ) {
+    const state = deps.getState();
+    const count = selectedCount(state);
+    if (!count || nodeImageUploadInProgress) return;
+    nodeImageUploadInProgress = true;
+    const controller = new AbortController();
+    const unregister = deps.registerAbortController(controller);
+    const entryLabels = new Map(
+      (state.gallery?.images || []).map((image) => [image.id, image.filename])
+    );
+    deps.setOperationStatus({
+      kind: 'nodeimage_upload',
+      label: get(t).gallery.uploadingToNodeImage,
+      detail: get(t).gallery.nodeImageUploadPreparing(count),
+      progress: null
+    });
+    try {
+      const result = await apiFetch<NodeImageBatchUploadResponse>(
+        '/api/gallery/batch/nodeimage-upload',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(batchRequestBody(state)),
+          signal: controller.signal
+        },
+        'uploading selected images to NodeImage'
+      );
+      const items: NodeImageResultItem[] = result.results.map((item) => ({
+        imageId: item.image_id,
+        label: entryLabels.get(item.image_id) || item.image_id,
+        status: item.status,
+        url: item.url || '',
+        markdown: item.markdown || '',
+        error: item.error || ''
+      }));
+      nodeImageResult.show({
+        items,
+        uploadedCount: result.uploaded_count,
+        failedCount: result.failed_count
+      });
+      deps.clearSelection();
+      showToast(
+        get(t).messages.nodeImageBatchComplete(result.uploaded_count, result.failed_count),
+        result.failed_count ? 'error' : 'status'
+      );
+    } catch (error) {
+      if (isAbortError(error)) return;
+      const reason = error instanceof Error ? error.message : get(t).messages.requestFailed;
+      showToast(get(t).messages.nodeImageUploadFailed(reason), 'error');
+    } finally {
+      unregister();
+      deps.setOperationStatus(null);
+      nodeImageUploadInProgress = false;
     }
   }
 
@@ -754,6 +870,8 @@ export function createDeferredGalleryActions(deps: GalleryActionDeps) {
   }
 
   return {
+    uploadToNodeImage,
+    batchUploadToNodeImage,
     batchFavorite,
     batchDelete,
     batchDownload,

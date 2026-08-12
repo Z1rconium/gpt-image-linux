@@ -252,6 +252,30 @@ test('settings drawer saves R2 sync interval hours', async ({ page }) => {
   });
 });
 
+test('settings drawer saves the NodeImage API key reference', async ({ page }) => {
+  await loadApp(page);
+
+  await page.getByRole('button', { name: 'Settings' }).click();
+  const drawer = page.getByRole('dialog', { name: 'Settings' });
+  const section = drawer.locator('section').filter({ hasText: 'NodeImage Upload' });
+  const apiKey = section.getByLabel('API key');
+
+  await expect(apiKey).toHaveAttribute('type', 'password');
+  await expect(section.getByRole('link', { name: 'Get API key from NodeImage' })).toHaveAttribute('href', 'https://nodeimage.com');
+  await apiKey.fill('${CUSTOM_NODEIMAGE_API_KEY}');
+
+  const saveRequest = page.waitForRequest(
+    (request) => new URL(request.url()).pathname === '/api/settings' && request.method() === 'POST'
+  );
+  await drawer.getByRole('button', { name: 'Save Preset' }).click();
+  const request = await saveRequest;
+
+  expect(request.postDataJSON().nodeimage).toEqual({
+    enabled: true,
+    api_key: '${CUSTOM_NODEIMAGE_API_KEY}'
+  });
+});
+
 test('settings drawer edits the prompt optimizer system prompt', async ({ page }) => {
   await loadApp(page);
 

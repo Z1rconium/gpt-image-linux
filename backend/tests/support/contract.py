@@ -131,6 +131,7 @@ def _configure_runtime(tmp_path: Path, *, access_key: str = "", allow_unauthenti
     os.environ["TEST_WEBHOOK_URL"] = "https://hooks.example.com/services/top-secret?token=hidden"
     os.environ["TEST_R2_ACCESS_KEY_ID"] = "r2-access-key"
     os.environ["TEST_R2_SECRET_ACCESS_KEY"] = "r2-secret-key"
+    os.environ["TEST_NODEIMAGE_API_KEY"] = "nodeimage-api-key"
     os.environ["ALLOW_UNAUTHENTICATED"] = "true" if allow_unauthenticated else "false"
     os.environ["ACCESS_KEY"] = access_key
     os.environ["ADMIN_KEY"] = ""
@@ -212,6 +213,7 @@ def _configure_runtime(tmp_path: Path, *, access_key: str = "", allow_unauthenti
     config.R2_ACCESS_KEY_ID = ""
     config.R2_SECRET_ACCESS_KEY = ""
     config.R2_SYNC_INTERVAL_HOURS = 0
+    config.NODEIMAGE_API_KEY = ""
     config.MAX_SSE_SUBSCRIBERS_GLOBAL = 200
     config.MAX_SSE_SUBSCRIBERS_PER_IP = 10
     config.SSE_CONNECTION_TTL_SECONDS = 3600

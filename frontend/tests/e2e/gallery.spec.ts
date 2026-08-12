@@ -65,6 +65,60 @@ test('generation, gallery edit source, batch favorite, and lightbox flows work w
   await expect(lightbox).toBeHidden();
 });
 
+test('gallery uploads single and selected images to NodeImage and copies result links', async ({ page, context }) => {
+  await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+  await loadApp(page);
+
+  const firstCard = page.locator('.gallery-card').filter({ hasText: 'First gallery image' });
+  const singleRequest = page.waitForRequest((request) => {
+    const url = new URL(request.url());
+    return request.method() === 'POST' && url.pathname === '/api/gallery/img-1/nodeimage-upload';
+  });
+  await firstCard.getByRole('button', { name: 'Upload to NodeImage' }).click();
+  await singleRequest;
+
+  let resultDialog = page.getByRole('dialog', { name: 'NodeImage upload results' });
+  await expect(resultDialog).toBeVisible();
+  await expect(resultDialog).toContainText('https://cdn.nodeimage.com/img-1.png');
+  await resultDialog.getByRole('button', { name: 'Copy direct link' }).click();
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('https://cdn.nodeimage.com/img-1.png');
+  await resultDialog.getByRole('button', { name: 'Close NodeImage results' }).click();
+
+  await page.getByRole('button', { name: 'Select' }).click();
+  await page.getByRole('button', { name: 'Select page' }).click();
+  const batchRequest = page.waitForRequest((request) => {
+    const url = new URL(request.url());
+    if (request.method() !== 'POST' || url.pathname !== '/api/gallery/batch/nodeimage-upload') return false;
+    return (request.postDataJSON() as { ids?: string[] }).ids?.length === 2;
+  });
+  await page.getByRole('button', { name: 'Upload selected to NodeImage', exact: true }).click();
+  await batchRequest;
+
+  resultDialog = page.getByRole('dialog', { name: 'NodeImage upload results' });
+  await expect(resultDialog).toBeVisible();
+  await expect(resultDialog).toContainText('2 uploaded');
+  await expect(resultDialog.getByText('Direct link')).toHaveCount(2);
+});
+
+test('gallery hides NodeImage upload actions when the integration is unavailable', async ({ page }) => {
+  await loadApp(page, {
+    settings: {
+      ...settingsResponse,
+      nodeimage: {
+        ...settingsResponse.nodeimage,
+        enabled: false,
+        has_api_key: false,
+        api_key_source: 'empty'
+      }
+    }
+  });
+
+  await expect(page.locator('.gallery-card').first().getByRole('button', { name: 'Upload to NodeImage' })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Select' }).click();
+  await page.getByRole('button', { name: 'Select page' }).click();
+  await expect(page.getByRole('button', { name: 'Upload selected to NodeImage', exact: true })).toHaveCount(0);
+});
+
 test('lightbox shows a ready thumbnail until the original image loads', async ({ page }) => {
   await loadApp(page, {
     galleryImages: [

@@ -4,6 +4,7 @@
   import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
   import EditSourcePicker from '$lib/components/EditSourcePicker.svelte';
   import GalleryGrid from '$lib/components/GalleryGrid.svelte';
+  import NodeImageResultDialog from '$lib/components/NodeImageResultDialog.svelte';
   import Header from '$lib/components/Header.svelte';
   import PreviewPanel from '$lib/components/PreviewPanel.svelte';
   import AiAssistantPanel from '$lib/components/AiAssistantPanel.svelte';
@@ -24,6 +25,7 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
   import { galleryActivityStore, galleryStore } from '$lib/stores/gallery';
   import { jobsStore } from '$lib/stores/jobs';
   import { lightboxStore } from '$lib/stores/lightbox';
+  import { nodeImageResult } from '$lib/stores/nodeImage';
   import { DEFAULT_PROMPT_MODEL, initialPromptFormState, previewStore, type PromptFormState } from '$lib/stores/preview';
   import { promptSnippetsStore } from '$lib/stores/promptSnippets';
   import { settingsActivityStore, settingsStore } from '$lib/stores/settings';
@@ -147,6 +149,8 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
       r2BackupSettings.has_access_key_id &&
       r2BackupSettings.has_secret_access_key
   );
+  $: nodeImageSettings = $settingsStore.settings?.nodeimage || null;
+  $: nodeImageAvailable = Boolean(nodeImageSettings?.enabled && nodeImageSettings.has_api_key);
   $: syncFormDefaultsToActivePreset($settingsStore.settings);
   $: if (optimizerAssistantEnabled) void ensurePanel('optimizer', false);
 
@@ -860,6 +864,14 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
     }
   }
 
+  function uploadGalleryImageToNodeImage(image: GalleryEntry) {
+    void galleryStore.uploadToNodeImage(image, showToast);
+  }
+
+  function batchUploadGalleryToNodeImage() {
+    void galleryStore.batchUploadToNodeImage(showToast);
+  }
+
   async function toggleFavorite(image: GalleryEntry) {
     await galleryStore.toggleFavorite(image, (next) => {
       if ($lightboxStore.image?.id === image.id) lightboxStore.open(next);
@@ -1034,6 +1046,7 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
         urlSync.destroy();
         jobsStore.cleanup();
         galleryStore.cleanup();
+        nodeImageResult.clear();
         previewStore.cleanup();
         uiStore.cleanup();
         lightboxController.destroy();
@@ -1072,6 +1085,7 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
 />
 
 <ConfirmDialog request={$confirmStore.request} />
+<NodeImageResultDialog />
 
 {#if $imagePromptPanel.component}
   <svelte:component
@@ -1243,6 +1257,7 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
     loading={$galleryStore.loading}
     operationStatus={$galleryActivityStore.operationStatus}
     canSyncR2={r2BackupAvailable}
+    canNodeImageUpload={nodeImageAvailable}
     onFilter={setGalleryFilter}
     onResetFilters={resetGalleryFilters}
     onPage={loadGalleryPage}
@@ -1257,6 +1272,7 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
     onEdit={prepareGalleryImageForEdit}
     onUsePrompt={useGalleryPrompt}
     onUseAll={useGalleryParams}
+    onNodeImageUpload={uploadGalleryImageToNodeImage}
     selectionMode={$galleryStore.selectionMode}
     selectedIds={$galleryStore.selectedIds}
     selectionTokenCount={$galleryStore.selectionToken?.count || 0}
@@ -1268,6 +1284,7 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
     onBatchDelete={batchDeleteGallery}
     onBatchFavorite={batchFavoriteGallery}
     onBatchDownload={() => galleryStore.batchDownload(showToast)}
+    onBatchNodeImageUpload={batchUploadGalleryToNodeImage}
     canAiAnalyze={aiAssistantAvailable}
     onBatchAiAnalyze={batchAnalyzeGallery}
   />

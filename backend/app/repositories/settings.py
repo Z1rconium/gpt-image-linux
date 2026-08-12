@@ -171,6 +171,25 @@ def save_r2_backup_settings(settings: dict):
     _secure_data_storage_permissions()
 
 
+def load_nodeimage_settings() -> dict:
+    _ensure_database()
+    with _connect() as conn:
+        return _load_nodeimage_settings_from_conn(conn)
+
+
+def get_nodeimage_settings() -> dict:
+    return load_nodeimage_settings()
+
+
+def save_nodeimage_settings(settings: dict):
+    _ensure_database()
+    normalized = _normalize_nodeimage_settings(settings)
+    with _connect() as conn:
+        _set_setting_value(conn, NODEIMAGE_SETTINGS_KEY, json.dumps(normalized))
+        conn.commit()
+    _secure_data_storage_permissions()
+
+
 def list_prompt_snippets(query: str = "") -> list[PromptSnippet]:
     _ensure_database()
     normalized_query = str(query or "").strip()
@@ -307,4 +326,3 @@ def delete_prompt_snippet(snippet_id: str) -> bool:
 
 
 __all__ = [name for name in globals() if not name.startswith("_")]
-

@@ -9,6 +9,7 @@
   } from '$lib/api/types/settings';
   import { RESPONSE_FORMAT_OPTIONS } from '$lib/utils/promptForm';
   import AiAssistantSettingsSection from './AiAssistantSettingsSection.svelte';
+  import NodeImageSettingsSection from './NodeImageSettingsSection.svelte';
   import PromptOptimizerSettingsSection from './PromptOptimizerSettingsSection.svelte';
   import R2SettingsSection from './R2SettingsSection.svelte';
 
@@ -36,6 +37,8 @@
   export let r2SecretAccessKeyInputType = 'password';
   export let r2Health: R2HealthResponse | null = null;
   export let r2HealthChecking = false;
+  export let nodeImageEnabled = false;
+  export let nodeImageApiKey = '';
   export let promptOptimizerEnabled = false;
   export let promptOptimizerApiUrl = '';
   export let promptOptimizerModel = '';
@@ -173,6 +176,11 @@
             healthChecking={r2HealthChecking}
             onNormalizeInterval={normalizeR2SyncIntervalHours}
             onCheck={checkR2Health}
+          />
+
+          <NodeImageSettingsSection
+            bind:enabled={nodeImageEnabled}
+            bind:apiKey={nodeImageApiKey}
           />
 
           <PromptOptimizerSettingsSection

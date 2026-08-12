@@ -220,3 +220,6 @@ R2_ACCESS_KEY_ID = os.getenv("R2_ACCESS_KEY_ID", "").strip()
 R2_SECRET_ACCESS_KEY = os.getenv("R2_SECRET_ACCESS_KEY", "").strip()
 R2_SYNC_INTERVAL_HOURS = env_non_negative_int("R2_SYNC_INTERVAL_HOURS", 0)
 R2_SYNC_CONCURRENCY = max(1, int(os.getenv("R2_SYNC_CONCURRENCY", "4")))
+
+# ── NodeImage gallery upload ────────────────────────────────────
+NODEIMAGE_API_KEY = os.getenv("NODEIMAGE_API_KEY", "").strip()

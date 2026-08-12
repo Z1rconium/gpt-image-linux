@@ -31,7 +31,7 @@ export type GalleryActivityState = {
 };
 
 export type GalleryOperationStatus = {
-  kind: 'import' | 'export' | 'download' | 'sync' | 'ai_analyze';
+  kind: 'import' | 'export' | 'download' | 'sync' | 'ai_analyze' | 'nodeimage_upload';
   label: string;
   detail: string;
   progress: number | null;

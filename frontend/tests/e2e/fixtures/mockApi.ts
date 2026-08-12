@@ -154,6 +154,14 @@ const settingsResponse = {
     secret_access_key_source: 'empty',
     secret_access_key_env_var: null
   },
+  nodeimage: {
+    enabled: true,
+    api_key_masked: '${TEST_NODEIMAGE_API_KEY}',
+    has_api_key: true,
+    api_key_source: 'env',
+    api_key_env_var: 'TEST_NODEIMAGE_API_KEY',
+    api_key_secret_id: null
+  },
   presets: [
     {
       id: 'default',
@@ -835,6 +843,17 @@ async function mockApi(page: Page, options: MockOptions = {}) {
       await route.fulfill(image ? json(image) : json({ detail: 'Gallery entry not found' }, 404));
       return;
     }
+    if (url.pathname.match(/^\/api\/gallery\/(?!batch\/)[^/]+\/nodeimage-upload$/) && request.method() === 'POST') {
+      const id = decodeURIComponent(url.pathname.split('/').at(-2) || '');
+      const image = galleryImages.find((entry) => entry.id === id);
+      if (!image) {
+        await route.fulfill(json({ detail: 'Gallery entry not found' }, 404));
+        return;
+      }
+      const direct = `https://cdn.nodeimage.com/${encodeURIComponent(image.filename)}`;
+      await route.fulfill(json({ url: direct, markdown: `![${image.prompt}](${direct})` }));
+      return;
+    }
     if (url.pathname.match(/^\/api\/gallery\/[^/]+$/) && request.method() === 'DELETE') {
       const id = decodeURIComponent(url.pathname.split('/').pop() || '');
       galleryImages = galleryImages.filter((entry) => entry.id !== id);
@@ -858,6 +877,24 @@ async function mockApi(page: Page, options: MockOptions = {}) {
       const ids = new Set<string>(resolveBatchIds(body));
       galleryImages = galleryImages.map((entry) => (ids.has(entry.id) ? { ...entry, favorite: Boolean(body.favorite) } : entry));
       await route.fulfill(json({ status: 'ok', count: ids.size, file_count: 0, requested_count: ids.size, updated_count: ids.size }));
+      return;
+    }
+    if (url.pathname === '/api/gallery/batch/nodeimage-upload' && request.method() === 'POST') {
+      const body = JSON.parse(request.postData() || '{}');
+      const ids = resolveBatchIds(body);
+      const results = ids.map((id) => {
+        const image = galleryImages.find((entry) => entry.id === id);
+        if (!image) return { image_id: id, status: 'error', url: null, markdown: null, error: 'Gallery entry not found' };
+        const direct = `https://cdn.nodeimage.com/${encodeURIComponent(image.filename)}`;
+        return { image_id: id, status: 'ok', url: direct, markdown: `![${image.prompt}](${direct})`, error: null };
+      });
+      const uploadedCount = results.filter((item) => item.status === 'ok').length;
+      await route.fulfill(json({
+        requested_count: ids.length,
+        uploaded_count: uploadedCount,
+        failed_count: ids.length - uploadedCount,
+        results
+      }));
       return;
     }
     if (url.pathname.match(/^\/api\/gallery\/[^/]+\/favorite$/)) {

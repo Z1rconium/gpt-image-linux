@@ -85,6 +85,7 @@ from ...repositories.image_files import (
     safe_thumbnail_path,
 )
 from ...repositories.settings import load_r2_backup_settings
+from ...repositories.settings import load_nodeimage_settings
 from ...repositories.thumbnail_jobs import (
     THUMBNAIL_JOB_LEASE_SECONDS,
     claim_next_thumbnail_job,
@@ -111,6 +112,14 @@ from ...schemas.gallery import (
     GallerySyncJobStatus,
     GalleryThumbnailState,
     GalleryThumbnailStatusRequest,
+)
+from ...schemas.nodeimage import NodeImageUploadResponse
+from ...integrations.nodeimage.client import (
+    NodeImageAuthError,
+    NodeImageConfigurationError,
+    NodeImageUploadError,
+    resolve_nodeimage_settings,
+    upload_image_bytes,
 )
 from ...services.gallery_common import *
 from ...services.gallery_maintenance import kick_thumbnail_dispatcher
@@ -283,6 +292,37 @@ async def update_gallery_favorite(
     if not entry:
         raise HTTPException(status_code=404, detail="Gallery entry not found")
     return entry
+
+
+@router.post(
+    "/api/gallery/{image_id}/nodeimage-upload",
+    response_model=NodeImageUploadResponse,
+)
+async def upload_gallery_item_to_nodeimage(image_id: str):
+    entry = await asyncio.to_thread(get_gallery_entry, image_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Gallery entry not found")
+
+    path = await asyncio.to_thread(_resolve_gallery_image_path, entry.filename)
+    if not path:
+        raise HTTPException(status_code=404, detail="Image file not found")
+
+    try:
+        effective = resolve_nodeimage_settings(
+            await asyncio.to_thread(load_nodeimage_settings)
+        )
+        image_bytes = await asyncio.to_thread(path.read_bytes)
+        result = await upload_image_bytes(image_bytes, path.name, effective)
+    except NodeImageConfigurationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except NodeImageAuthError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except NodeImageUploadError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=404, detail="Image file could not be read") from exc
+
+    return NodeImageUploadResponse(url=result.url, markdown=result.markdown)
 
 
 @router.get("/api/gallery/{image_id}", response_model=GalleryEntry)

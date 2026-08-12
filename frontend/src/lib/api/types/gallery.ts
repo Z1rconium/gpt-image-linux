@@ -64,6 +64,26 @@ export type GalleryBatchResponse = {
   missing_ids?: string[];
 };
 
+export type NodeImageUploadResponse = {
+  url: string;
+  markdown: string;
+};
+
+export type NodeImageBatchUploadItem = {
+  image_id: string;
+  status: 'ok' | 'error';
+  url?: string | null;
+  markdown?: string | null;
+  error?: string | null;
+};
+
+export type NodeImageBatchUploadResponse = {
+  requested_count: number;
+  uploaded_count: number;
+  failed_count: number;
+  results: NodeImageBatchUploadItem[];
+};
+
 export type GallerySelectionTokenResponse = {
   selection_token: string;
   count: number;

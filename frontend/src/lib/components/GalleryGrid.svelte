@@ -11,6 +11,7 @@
   export let loading = false;
   export let operationStatus: GalleryOperationStatus | null = null;
   export let canSyncR2 = false;
+  export let canNodeImageUpload = false;
   export let onFilter: (key: keyof GalleryFilters, value: string | boolean) => void = () => {};
   export let onResetFilters: () => void = () => {};
   export let onPage: (page: number, direction?: 'next' | 'prev' | 'jump') => void = () => {};
@@ -25,6 +26,7 @@
   export let onEdit: (image: GalleryEntry) => void = () => {};
   export let onUsePrompt: (image: GalleryEntry) => void = () => {};
   export let onUseAll: (image: GalleryEntry) => void = () => {};
+  export let onNodeImageUpload: (image: GalleryEntry) => void = () => {};
   export let selectionMode = false;
   export let selectedIds: Set<string> = new Set();
   export let selectionTokenCount = 0;
@@ -36,6 +38,7 @@
   export let onBatchDelete: () => void = () => {};
   export let onBatchFavorite: (favorite: boolean) => void = () => {};
   export let onBatchDownload: () => void = () => {};
+  export let onBatchNodeImageUpload: () => void = () => {};
   export let canAiAnalyze = false;
   export let onBatchAiAnalyze: () => void = () => {};
 
@@ -177,6 +180,11 @@
         <button type="button" class="control-focus rounded-lg border border-stone-300 px-2.5 py-2 text-xs text-stone-700 hover:bg-stone-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" disabled={!gallery?.total || busy} on:click={onSelectFiltered}>{$t.gallery.selectFiltered}</button>
         <button type="button" class="control-focus rounded-lg border border-stone-300 px-2.5 py-2 text-xs text-stone-700 hover:bg-stone-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" disabled={!hasSelection} on:click={onClearSelection}>{$t.gallery.clearSelection}</button>
         <button type="button" class="control-focus rounded-lg border border-stone-300 px-2.5 py-2 text-xs text-stone-700 hover:bg-stone-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" disabled={!hasSelection || busy} on:click={onBatchDownload}>{operationStatus?.kind === 'download' ? $t.gallery.downloading : $t.gallery.downloadSelected}</button>
+        {#if canNodeImageUpload}
+          <button type="button" class="control-focus rounded-lg border border-stone-300 px-2.5 py-2 text-xs text-stone-700 hover:bg-stone-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" disabled={!hasSelection || busy} on:click={onBatchNodeImageUpload}>
+            {operationStatus?.kind === 'nodeimage_upload' ? $t.gallery.uploadingToNodeImage : $t.gallery.uploadSelectedToNodeImage}
+          </button>
+        {/if}
         {#if canAiAnalyze}
           <button type="button" class="control-focus rounded-lg border border-stone-300 px-2.5 py-2 text-xs text-stone-700 hover:bg-stone-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" disabled={!hasSelection || busy} on:click={onBatchAiAnalyze}>{operationStatus?.kind === 'ai_analyze' ? $t.gallery.aiAnalyzing : $t.gallery.aiAnalyzeSelected}</button>
         {/if}
@@ -273,7 +281,7 @@
                 <p class="line-clamp-2 text-xs leading-5 text-stone-800 dark:text-zinc-200">{image.prompt}</p>
                 <p class="mt-1 truncate text-[11px] leading-4 text-stone-500 dark:text-zinc-500">{displayImageSize(image)} / {image.model || '-'}</p>
               </div>
-              <div class="grid grid-cols-6 gap-1">
+              <div class={`grid gap-1 ${canNodeImageUpload ? 'grid-cols-4' : 'grid-cols-6'}`}>
                 <button
                   type="button"
                   class="gallery-icon-action control-focus border-emerald-500/40 text-emerald-700 hover:bg-emerald-500/10 dark:text-emerald-200"
@@ -320,6 +328,18 @@
                 >
                   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v10"/><path d="m8 10 4 4 4-4"/><path d="M5 20h14"/></svg>
                 </a>
+                {#if canNodeImageUpload}
+                  <button
+                    type="button"
+                    class="gallery-icon-action control-focus border-stone-300 text-stone-700 hover:bg-stone-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                    disabled={busy}
+                    aria-label={$t.gallery.uploadToNodeImage}
+                    title={$t.gallery.uploadToNodeImage}
+                    on:click={(event) => handleGalleryAction(event, () => onNodeImageUpload(image))}
+                  >
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 16l-4-4-4 4"/><path d="M12 12v9"/><path d="M20.4 17.5a5 5 0 0 0-2.6-9.4A7 7 0 0 0 4.3 10.3 4 4 0 0 0 5 18h2"/></svg>
+                  </button>
+                {/if}
                 <button
                   type="button"
                   class="gallery-icon-action control-focus border-red-500/40 text-red-700 hover:bg-red-500/10 dark:text-red-300"

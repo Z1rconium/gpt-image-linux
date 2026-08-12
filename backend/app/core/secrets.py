@@ -14,6 +14,7 @@ SecretPurpose = Literal[
     "webhook_url",
     "r2_access_key_id",
     "r2_secret_access_key",
+    "nodeimage_api_key",
 ]
 
 ALLOWED_SECRET_PURPOSES: frozenset[str] = frozenset(
@@ -24,6 +25,7 @@ ALLOWED_SECRET_PURPOSES: frozenset[str] = frozenset(
         "webhook_url",
         "r2_access_key_id",
         "r2_secret_access_key",
+        "nodeimage_api_key",
     }
 )
 SECRET_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{2,127}$")
@@ -61,6 +63,7 @@ _ACTIVE_SECRET_CONFIG_NAMES = (
     "DEFAULT_UPSTREAM_SOCKS5_PROXY",
     "R2_ACCESS_KEY_ID",
     "R2_SECRET_ACCESS_KEY",
+    "NODEIMAGE_API_KEY",
 )
 _active_secret_values_cache: tuple[
     int,
@@ -165,6 +168,12 @@ def _builtin_entries() -> dict[str, SecretEntry]:
             "r2_secret_access_key",
             config.R2_ENDPOINT_URL,
             config.R2_SECRET_ACCESS_KEY,
+        ),
+        (
+            "builtin-nodeimage-api-key",
+            "nodeimage_api_key",
+            "https://api.nodeimage.com",
+            config.NODEIMAGE_API_KEY,
         ),
     )
     entries: dict[str, SecretEntry] = {}

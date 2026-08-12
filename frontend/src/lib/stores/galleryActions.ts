@@ -14,6 +14,12 @@ export function createGalleryActions(deps: GalleryActionDeps) {
   }
 
   return {
+    async uploadToNodeImage(...args: Parameters<DeferredGalleryActions['uploadToNodeImage']>) {
+      return (await loadDeferredActions()).uploadToNodeImage(...args);
+    },
+    async batchUploadToNodeImage(...args: Parameters<DeferredGalleryActions['batchUploadToNodeImage']>) {
+      return (await loadDeferredActions()).batchUploadToNodeImage(...args);
+    },
     async batchFavorite(...args: Parameters<DeferredGalleryActions['batchFavorite']>) {
       return (await loadDeferredActions()).batchFavorite(...args);
     },
@@ -37,4 +43,3 @@ export function createGalleryActions(deps: GalleryActionDeps) {
     }
   };
 }
-

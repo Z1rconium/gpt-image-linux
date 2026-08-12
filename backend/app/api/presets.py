@@ -22,6 +22,7 @@ from ..repositories.settings import (
     load_ai_assistant_settings,
     load_prompt_optimizer_settings,
     load_r2_backup_settings,
+    load_nodeimage_settings,
     load_settings,
     save_settings,
 )
@@ -30,6 +31,7 @@ from ..schemas.settings import (
     ApiPresetResponse,
     PromptOptimizerSettingsResponse,
     R2BackupSettingsResponse,
+    NodeImageSettingsResponse,
     SettingsResponse,
 )
 
@@ -96,6 +98,19 @@ def api_key_response_fields(api_key: str) -> dict:
         "api_key_env_var": None,
         "api_key_secret_id": None,
     }
+
+
+def nodeimage_api_key_response_fields(api_key: str) -> dict:
+    value = str(api_key or "").strip()
+    if value and not get_api_key_env_var(value) and value not in secrets.configured_secret_ids():
+        return {
+            "api_key_masked": mask_key(value),
+            "has_api_key": True,
+            "api_key_source": "stored",
+            "api_key_env_var": None,
+            "api_key_secret_id": None,
+        }
+    return api_key_response_fields(value)
 
 
 def secret_response_fields(value: str, prefix: str) -> dict:
@@ -230,6 +245,7 @@ def persist_api_settings():
             "prompt_optimizer": get_prompt_optimizer_settings(),
             "ai_assistant": get_ai_assistant_settings(),
             "r2_backup": get_r2_backup_settings(),
+            "nodeimage": get_nodeimage_settings(),
         }
     )
 
@@ -433,6 +449,7 @@ def build_settings_response() -> SettingsResponse:
         prompt_optimizer=build_prompt_optimizer_settings_response(optimizer_raw),
         ai_assistant=build_ai_assistant_settings_response(assistant_raw),
         r2_backup=build_r2_backup_settings_response(get_r2_backup_settings()),
+        nodeimage=build_nodeimage_settings_response(get_nodeimage_settings()),
         image_upload_limits={
             "max_file_size_bytes": config.MAX_FILE_SIZE_MB * 1024 * 1024,
             "max_image_pixels": config.MAX_IMAGE_PIXELS,
@@ -497,6 +514,14 @@ def build_r2_backup_settings_response(raw: dict | None) -> R2BackupSettingsRespo
         ),
         **access_key_fields,
         **secret_key_fields,
+    )
+
+
+def build_nodeimage_settings_response(raw: dict | None) -> NodeImageSettingsResponse:
+    settings = load_nodeimage_settings() if raw is None else raw
+    return NodeImageSettingsResponse(
+        enabled=bool(settings.get("enabled", False)),
+        **nodeimage_api_key_response_fields(str(settings.get("api_key") or "")),
     )
 
 
@@ -590,6 +615,10 @@ def get_r2_backup_settings() -> dict:
     return load_r2_backup_settings()
 
 
+def get_nodeimage_settings() -> dict:
+    return load_nodeimage_settings()
+
+
 def validate_configured_secret_bindings() -> None:
     for preset in get_api_presets():
         secret_id = str(preset.get("api_key") or "").strip()
@@ -631,6 +660,16 @@ def validate_configured_secret_bindings() -> None:
                 target_url=endpoint_url,
                 host_allowlist=config.R2_ENDPOINT_HOST_ALLOWLIST,
             )
+
+    nodeimage = get_nodeimage_settings()
+    nodeimage_secret_id = str(nodeimage.get("api_key") or "").strip()
+    if nodeimage_secret_id in secrets.configured_secret_ids():
+        secrets.validate_secret_binding(
+            nodeimage_secret_id,
+            purpose="nodeimage_api_key",
+            target_url="https://api.nodeimage.com",
+            host_allowlist="api.nodeimage.com",
+        )
 
     upstream_proxy = get_upstream_socks5_proxy(raw=True)
     if upstream_proxy:
@@ -717,4 +756,19 @@ def apply_r2_backup_settings(current: dict | None, req_r2: object) -> dict:
             current[field] = key
         elif key == "":
             current[field] = ""
+    return current
+
+
+def apply_nodeimage_settings(current: dict | None, req_nodeimage: object) -> dict:
+    current = load_nodeimage_settings() if current is None else dict(current)
+    if req_nodeimage is None:
+        return current
+    if hasattr(req_nodeimage, "enabled") and req_nodeimage.enabled is not None:
+        current["enabled"] = bool(req_nodeimage.enabled)
+    if hasattr(req_nodeimage, "api_key") and req_nodeimage.api_key is not None:
+        key = req_nodeimage.api_key.strip()
+        if key and key != MASKED_API_KEY_VALUE:
+            current["api_key"] = key
+        elif key == "":
+            current["api_key"] = ""
     return current

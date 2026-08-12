@@ -9,6 +9,7 @@ from ..presets import (
     apply_api_preset,
     apply_ai_assistant_settings,
     apply_r2_backup_settings,
+    apply_nodeimage_settings,
     apply_upstream_socks5_proxy,
     apply_webhook_url,
     build_settings_response,
@@ -44,6 +45,7 @@ from ...repositories.settings import (
     save_overall_config_overrides,
     save_prompt_optimizer_settings,
     save_r2_backup_settings,
+    save_nodeimage_settings,
 )
 from ...schemas.settings import (
     OverallConfigItem,
@@ -110,6 +112,21 @@ def _validate_r2_secret_bindings(settings: dict) -> None:
             )
         except secrets.SecretRegistryError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+def _validate_nodeimage_secret_binding(settings: dict) -> None:
+    secret_id = str(settings.get("api_key") or "").strip()
+    if not secret_id or secret_id not in secrets.configured_secret_ids():
+        return
+    try:
+        secrets.validate_secret_binding(
+            secret_id,
+            purpose="nodeimage_api_key",
+            target_url="https://api.nodeimage.com",
+            host_allowlist="api.nodeimage.com",
+        )
+    except secrets.SecretRegistryError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 def _validate_webhook_security() -> None:
@@ -321,6 +338,16 @@ async def update_settings(req: SettingsRequest):
                 raise HTTPException(status_code=422, detail=str(e)) from e
         _validate_r2_secret_bindings(updated_r2)
         await asyncio.to_thread(save_r2_backup_settings, updated_r2)
+    if req.nodeimage is not None:
+        from ..presets import get_nodeimage_settings
+
+        current_nodeimage = get_nodeimage_settings()
+        updated_nodeimage = apply_nodeimage_settings(
+            current_nodeimage,
+            req.nodeimage,
+        )
+        _validate_nodeimage_secret_binding(updated_nodeimage)
+        await asyncio.to_thread(save_nodeimage_settings, updated_nodeimage)
     return await asyncio.to_thread(build_settings_response)
 
 

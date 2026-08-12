@@ -20,15 +20,23 @@ _PROBE_TIMEOUT = aiohttp.ClientTimeout(
     sock_connect=5,
     sock_read=10,
 )
+_NODEIMAGE_TIMEOUT = aiohttp.ClientTimeout(
+    total=120,
+    connect=10,
+    sock_connect=10,
+    sock_read=120,
+)
 
 TIMEOUT_UPSTREAM = "upstream"
 TIMEOUT_PROBE = "probe"
 TIMEOUT_PROMPT_OPTIMIZER = "prompt_optimizer"
 TIMEOUT_VERSION_CHECK = "version_check"
+TIMEOUT_NODEIMAGE = "nodeimage"
 
 _TIMEOUTS = {
     TIMEOUT_UPSTREAM: _UPSTREAM_TIMEOUT,
     TIMEOUT_PROBE: _PROBE_TIMEOUT,
+    TIMEOUT_NODEIMAGE: _NODEIMAGE_TIMEOUT,
 }
 
 

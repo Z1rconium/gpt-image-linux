@@ -220,6 +220,7 @@ WEBHOOK_URL_KEY = "webhook_url"
 PROMPT_OPTIMIZER_SETTINGS_KEY = "prompt_optimizer_settings"
 AI_ASSISTANT_SETTINGS_KEY = "ai_assistant_settings"
 R2_BACKUP_SETTINGS_KEY = "r2_backup_settings"
+NODEIMAGE_SETTINGS_KEY = "nodeimage_settings"
 SQLITE_TIMEOUT_SECONDS = 30.0
 DATA_DIR_MODE = 0o700
 DATA_FILE_MODE = 0o600
@@ -369,6 +370,19 @@ def _normalize_stored_r2_secret_access_key(value: str | None) -> str:
         return normalized
     try:
         return normalize_secret_env_ref_or_plaintext(normalized, field_name="R2 secret access key")
+    except ValueError:
+        return normalized
+
+
+def _normalize_stored_nodeimage_api_key(value: str | None) -> str:
+    normalized = str(value or "").strip()
+    if get_env_var_ref_name(normalized):
+        return normalized
+    try:
+        return normalize_secret_env_ref_or_plaintext(
+            normalized,
+            field_name="NodeImage API key",
+        )
     except ValueError:
         return normalized
 
@@ -589,6 +603,7 @@ def _default_settings() -> dict:
         "prompt_optimizer": _default_prompt_optimizer_settings(),
         "ai_assistant": _default_ai_assistant_settings(),
         "r2_backup": _default_r2_backup_settings(),
+        "nodeimage": _default_nodeimage_settings(),
     }
 
 
@@ -646,6 +661,17 @@ def _default_r2_backup_settings() -> dict:
             config.R2_SECRET_ACCESS_KEY,
         ),
         "sync_interval_hours": config.R2_SYNC_INTERVAL_HOURS,
+    }
+
+
+def _default_nodeimage_settings() -> dict:
+    return {
+        "enabled": False,
+        "api_key": _default_r2_secret_reference(
+            "builtin-nodeimage-api-key",
+            "NODEIMAGE_API_KEY",
+            config.NODEIMAGE_API_KEY,
+        ),
     }
 
 
@@ -789,6 +815,52 @@ def _load_r2_backup_settings_from_conn(conn: sqlite3.Connection) -> dict:
     settings = _default_r2_backup_settings()
     if _has_r2_backup_storage_values(settings):
         _store_r2_backup_settings_on_conn(conn, settings)
+    return settings
+
+
+def _normalize_nodeimage_settings(settings: dict | None) -> dict:
+    default = _default_nodeimage_settings()
+    if not isinstance(settings, dict):
+        return default
+    api_key = _normalize_stored_nodeimage_api_key(settings.get("api_key"))
+    return {
+        "enabled": _coerce_bool(settings.get("enabled"), default["enabled"]),
+        "api_key": api_key or default["api_key"],
+    }
+
+
+def _has_nodeimage_storage_values(settings: dict | None) -> bool:
+    if not isinstance(settings, dict):
+        return False
+    return _coerce_bool(settings.get("enabled"), False) or bool(
+        str(settings.get("api_key") or "").strip()
+    )
+
+
+def _store_nodeimage_settings_on_conn(conn: sqlite3.Connection, settings: dict) -> None:
+    _set_setting_value(conn, NODEIMAGE_SETTINGS_KEY, json.dumps(settings))
+    conn.commit()
+    _secure_data_storage_permissions()
+
+
+def _load_nodeimage_settings_from_conn(conn: sqlite3.Connection) -> dict:
+    raw = _get_setting_value(conn, NODEIMAGE_SETTINGS_KEY)
+    if raw:
+        try:
+            parsed = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return _default_nodeimage_settings()
+        settings = _normalize_nodeimage_settings(parsed)
+        if (
+            not _has_nodeimage_storage_values(parsed)
+            and _has_nodeimage_storage_values(settings)
+        ):
+            _store_nodeimage_settings_on_conn(conn, settings)
+        return settings
+
+    settings = _default_nodeimage_settings()
+    if _has_nodeimage_storage_values(settings):
+        _store_nodeimage_settings_on_conn(conn, settings)
     return settings
 
 
@@ -2013,6 +2085,11 @@ def _normalize_settings(settings: dict | None) -> dict:
         if "r2_backup" in settings
         else _default_r2_backup_settings()
     )
+    nodeimage = (
+        _normalize_nodeimage_settings(settings.get("nodeimage"))
+        if "nodeimage" in settings
+        else _default_nodeimage_settings()
+    )
     ai_assistant = (
         _normalize_ai_assistant_settings(settings.get("ai_assistant"))
         if "ai_assistant" in settings
@@ -2026,6 +2103,7 @@ def _normalize_settings(settings: dict | None) -> dict:
         default_settings["webhook_url"] = webhook_url
         default_settings["ai_assistant"] = ai_assistant
         default_settings["r2_backup"] = r2_backup
+        default_settings["nodeimage"] = nodeimage
         return default_settings
 
     presets: list[dict] = []
@@ -2050,6 +2128,7 @@ def _normalize_settings(settings: dict | None) -> dict:
         default_settings["webhook_url"] = webhook_url
         default_settings["ai_assistant"] = ai_assistant
         default_settings["r2_backup"] = r2_backup
+        default_settings["nodeimage"] = nodeimage
         return default_settings
 
     active_preset_id = str(settings.get("active_preset_id") or presets[0]["id"])
@@ -2068,6 +2147,7 @@ def _normalize_settings(settings: dict | None) -> dict:
         ),
         "ai_assistant": ai_assistant,
         "r2_backup": r2_backup,
+        "nodeimage": nodeimage,
     }
 
 
@@ -2131,6 +2211,9 @@ def _replace_settings_on_conn(conn: sqlite3.Connection, settings: dict):
     r2_backup = normalized.get("r2_backup")
     if r2_backup is not None:
         _set_setting_value(conn, R2_BACKUP_SETTINGS_KEY, json.dumps(r2_backup))
+    nodeimage = normalized.get("nodeimage")
+    if nodeimage is not None:
+        _set_setting_value(conn, NODEIMAGE_SETTINGS_KEY, json.dumps(nodeimage))
 
 
 def _load_settings_from_conn(conn: sqlite3.Connection) -> dict | None:
@@ -2185,6 +2268,7 @@ def _load_settings_from_conn(conn: sqlite3.Connection) -> dict | None:
         ai_assistant = _default_ai_assistant_settings()
 
     r2_backup = _load_r2_backup_settings_from_conn(conn)
+    nodeimage = _load_nodeimage_settings_from_conn(conn)
 
     return _normalize_settings(
         {
@@ -2195,6 +2279,7 @@ def _load_settings_from_conn(conn: sqlite3.Connection) -> dict | None:
             "prompt_optimizer": optimizer,
             "ai_assistant": ai_assistant,
             "r2_backup": r2_backup,
+            "nodeimage": nodeimage,
         }
     )
 

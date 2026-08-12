@@ -33,6 +33,7 @@ export type SettingsResponse = {
   prompt_optimizer: PromptOptimizerSettings;
   ai_assistant: AIAssistantSettings;
   r2_backup: R2BackupSettings;
+  nodeimage: NodeImageSettings;
   image_upload_limits: ImageUploadLimits;
 };
 
@@ -126,6 +127,20 @@ export type R2BackupSettingsInput = {
   secret_access_key?: string | null;
 };
 
+export type NodeImageSettings = {
+  enabled: boolean;
+  api_key_masked: string;
+  has_api_key: boolean;
+  api_key_source: ApiKeySource;
+  api_key_env_var?: string | null;
+  api_key_secret_id?: string | null;
+};
+
+export type NodeImageSettingsInput = {
+  enabled?: boolean | null;
+  api_key?: string | null;
+};
+
 export type PromptOptimizerSystemPromptResponse = {
   system_prompt: string;
   default_system_prompt: string;
@@ -145,6 +160,7 @@ export type SettingsInput = {
   prompt_optimizer?: PromptOptimizerSettingsInput | null;
   ai_assistant?: AIAssistantSettingsInput | null;
   r2_backup?: R2BackupSettingsInput | null;
+  nodeimage?: NodeImageSettingsInput | null;
 };
 
 export type PresetHealthCheck = {

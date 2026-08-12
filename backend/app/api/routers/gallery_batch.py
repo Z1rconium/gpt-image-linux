@@ -84,6 +84,7 @@ from ...repositories.image_files import (
     safe_thumbnail_path,
 )
 from ...repositories.settings import load_r2_backup_settings
+from ...repositories.settings import load_nodeimage_settings
 from ...repositories.thumbnail_jobs import (
     THUMBNAIL_JOB_LEASE_SECONDS,
     claim_next_thumbnail_job,
@@ -108,11 +109,23 @@ from ...schemas.gallery import (
     GallerySyncRequest,
     GallerySyncJobStatus,
 )
+from ...schemas.nodeimage import (
+    NodeImageBatchUploadItem,
+    NodeImageBatchUploadResponse,
+)
+from ...integrations.nodeimage.client import (
+    NodeImageAuthError,
+    NodeImageConfigurationError,
+    NodeImageUploadError,
+    resolve_nodeimage_settings,
+    upload_image_bytes,
+)
 from ...services.gallery_common import *
 from ...services.gallery_jobs import *
 from ...services.gallery_maintenance import kick_gallery_file_gc
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 @router.post("/api/gallery/batch/selection-tokens", response_model=GallerySelectionTokenResponse, status_code=201)
 async def create_gallery_batch_selection_token(req: GallerySelectionTokenRequest):
@@ -240,6 +253,87 @@ async def download_gallery_batch(req: GalleryBatchRequest):
         },
         reserve_export_slot=True,
         requested_count=requested_count,
+    )
+
+
+@router.post(
+    "/api/gallery/batch/nodeimage-upload",
+    response_model=NodeImageBatchUploadResponse,
+)
+async def upload_gallery_batch_to_nodeimage(req: GalleryBatchRequest):
+    ids, entries, requested_count, missing_ids = await _resolve_gallery_batch_ids(req)
+    if not entries:
+        raise HTTPException(status_code=404, detail="Gallery entries not found")
+
+    try:
+        effective = resolve_nodeimage_settings(
+            await asyncio.to_thread(load_nodeimage_settings)
+        )
+    except NodeImageConfigurationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    semaphore = asyncio.Semaphore(4)
+
+    async def upload_entry(entry: GalleryEntry) -> NodeImageBatchUploadItem:
+        async with semaphore:
+            try:
+                path = await asyncio.to_thread(
+                    _resolve_gallery_image_path,
+                    entry.filename,
+                )
+                if not path:
+                    return NodeImageBatchUploadItem(
+                        image_id=entry.id,
+                        status="error",
+                        error="Image file not found",
+                    )
+                image_bytes = await asyncio.to_thread(path.read_bytes)
+                result = await upload_image_bytes(image_bytes, path.name, effective)
+                return NodeImageBatchUploadItem(
+                    image_id=entry.id,
+                    status="ok",
+                    url=result.url,
+                    markdown=result.markdown,
+                )
+            except (NodeImageAuthError, NodeImageUploadError) as exc:
+                return NodeImageBatchUploadItem(
+                    image_id=entry.id,
+                    status="error",
+                    error=str(exc),
+                )
+            except OSError:
+                return NodeImageBatchUploadItem(
+                    image_id=entry.id,
+                    status="error",
+                    error="Image file could not be read",
+                )
+            except Exception as exc:
+                logger.error(
+                    "Unexpected NodeImage batch upload failure for gallery entry %s (%s)",
+                    entry.id,
+                    type(exc).__name__,
+                )
+                return NodeImageBatchUploadItem(
+                    image_id=entry.id,
+                    status="error",
+                    error="Unexpected upload failure",
+                )
+
+    uploaded_items = await asyncio.gather(*(upload_entry(entry) for entry in entries))
+    result_by_id = {item.image_id: item for item in uploaded_items}
+    for missing_id in missing_ids:
+        result_by_id[missing_id] = NodeImageBatchUploadItem(
+            image_id=missing_id,
+            status="error",
+            error="Gallery entry not found",
+        )
+    results = [result_by_id[image_id] for image_id in ids if image_id in result_by_id]
+    uploaded_count = sum(item.status == "ok" for item in results)
+    return NodeImageBatchUploadResponse(
+        requested_count=requested_count,
+        uploaded_count=uploaded_count,
+        failed_count=len(results) - uploaded_count,
+        results=results,
     )
 
 

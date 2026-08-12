@@ -38,6 +38,8 @@ import type { AIAssistantSettingsInput, ApiPreset, AssistantHealthResponse, Over
     r2SyncIntervalHours: number;
     r2AccessKeyId: string;
     r2SecretAccessKey: string;
+    nodeImageEnabled: boolean;
+    nodeImageApiKey: string;
   };
 
   export let open = false;
@@ -113,6 +115,8 @@ import type { AIAssistantSettingsInput, ApiPreset, AssistantHealthResponse, Over
   let r2SecretAccessKey = '';
   let r2AccessKeyIdInputType = 'password';
   let r2SecretAccessKeyInputType = 'password';
+  let nodeImageEnabled = false;
+  let nodeImageApiKey = '';
   let systemPromptOpen = false;
   let systemPromptLoading = false;
   let systemPromptSaving = false;
@@ -173,6 +177,13 @@ import type { AIAssistantSettingsInput, ApiPreset, AssistantHealthResponse, Over
         : settings.r2_backup?.has_secret_access_key
           ? MASKED_API_KEY_VALUE
           : '';
+    nodeImageEnabled = Boolean(settings.nodeimage?.enabled);
+    nodeImageApiKey = secretDraftValue(
+      settings.nodeimage?.api_key_source,
+      settings.nodeimage?.has_api_key,
+      settings.nodeimage?.api_key_env_var,
+      settings.nodeimage?.api_key_secret_id
+    );
   }
   $: apiKeyInputType = 'text';
   $: promptOptimizerApiKeyInputType = 'text';
@@ -221,7 +232,9 @@ import type { AIAssistantSettingsInput, ApiPreset, AssistantHealthResponse, Over
       r2KeyPrefix,
       r2SyncIntervalHours: r2SyncIntervalHoursValue(r2SyncIntervalHours),
       r2AccessKeyId,
-      r2SecretAccessKey
+      r2SecretAccessKey,
+      nodeImageEnabled,
+      nodeImageApiKey
     });
   $: systemPromptDirty = systemPromptOpen && !systemPromptLoading && systemPromptText !== systemPromptInitialText;
   $: overallConfigDirty = overallConfigItems.some((item) => {
@@ -265,6 +278,24 @@ import type { AIAssistantSettingsInput, ApiPreset, AssistantHealthResponse, Over
       sync_interval_hours: r2SyncIntervalHoursValue(),
       access_key_id: r2AccessKeyId.trim() === MASKED_API_KEY_VALUE ? null : r2AccessKeyId.trim(),
       secret_access_key: r2SecretAccessKey.trim() === MASKED_API_KEY_VALUE ? null : r2SecretAccessKey.trim()
+    };
+  }
+
+  function secretDraftValue(
+    source: 'empty' | 'stored' | 'env' | 'registry' | undefined,
+    hasSecret: boolean | undefined,
+    envVar: string | null | undefined,
+    secretId: string | null | undefined
+  ) {
+    if (source === 'env' && envVar) return `\${${envVar}}`;
+    if (source === 'registry' && secretId) return secretId;
+    return hasSecret ? MASKED_API_KEY_VALUE : '';
+  }
+
+  function nodeImagePayload() {
+    return {
+      enabled: nodeImageEnabled,
+      api_key: nodeImageApiKey.trim() === MASKED_API_KEY_VALUE ? null : nodeImageApiKey.trim()
     };
   }
 
@@ -331,7 +362,15 @@ import type { AIAssistantSettingsInput, ApiPreset, AssistantHealthResponse, Over
           ? `\${${settings.r2_backup.secret_access_key_env_var}}`
           : settings?.r2_backup?.has_secret_access_key
             ? MASKED_API_KEY_VALUE
-            : '')
+            : '') ||
+      draft.nodeImageEnabled !== Boolean(settings?.nodeimage?.enabled) ||
+      draft.nodeImageApiKey !==
+        secretDraftValue(
+          settings?.nodeimage?.api_key_source,
+          settings?.nodeimage?.has_api_key,
+          settings?.nodeimage?.api_key_env_var,
+          settings?.nodeimage?.api_key_secret_id
+        )
     );
   }
 
@@ -369,7 +408,8 @@ import type { AIAssistantSettingsInput, ApiPreset, AssistantHealthResponse, Over
         api_key: promptOptimizerApiKey.trim() === MASKED_API_KEY_VALUE ? null : promptOptimizerApiKey.trim()
       },
       ai_assistant: aiAssistantPayload(),
-      r2_backup: r2BackupPayload()
+      r2_backup: r2BackupPayload(),
+      nodeimage: nodeImagePayload()
     });
   }
 
@@ -590,6 +630,8 @@ import type { AIAssistantSettingsInput, ApiPreset, AssistantHealthResponse, Over
         {r2SecretAccessKeyInputType}
         {r2Health}
         {r2HealthChecking}
+        bind:nodeImageEnabled
+        bind:nodeImageApiKey
         bind:promptOptimizerEnabled
         bind:promptOptimizerApiUrl
         bind:promptOptimizerModel
