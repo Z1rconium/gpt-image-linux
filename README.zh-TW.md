@@ -13,6 +13,17 @@
     <a href="./README.zh-CN.md">簡體中文</a> ·
     繁體中文
   </p>
+
+  <p>
+    <img alt="CI 通過" src="https://img.shields.io/badge/CI-passing-2cc653?logo=github&logoColor=white" />
+    <img alt="版本 v1.3.3" src="https://img.shields.io/badge/release-v1.3.3-0e8dcc" />
+    <img alt="Python 3.11+" src="https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white" />
+    <img alt="Node.js 24" src="https://img.shields.io/badge/Node.js-24-339933?logo=node.js&logoColor=white" />
+    <img alt="FastAPI 0.115+" src="https://img.shields.io/badge/FastAPI-0.115+-009688?logo=fastapi&logoColor=white" />
+    <img alt="SvelteKit 2" src="https://img.shields.io/badge/SvelteKit-2-FF3E00?logo=svelte&logoColor=white" />
+    <img alt="授權 CC BY-NC 4.0" src="https://img.shields.io/badge/License-CC_BY--NC_4.0-6f42c1" />
+    <img alt="GHCR 映像" src="https://img.shields.io/badge/GHCR-gpt--image--linux-1f6f8b?logo=github&logoColor=white" />
+  </p>
 </div>
 
 ## 概述
@@ -38,6 +49,7 @@ GPT Image Panel 是一套輕量 Web UI，可用於圖片生成、圖片編輯、
 - 後端：`backend/app/` 下的 FastAPI；ASGI 進入點為 `backend.app.main:app`。
 - 前端：`frontend/` 下的 SvelteKit 靜態應用程式；正式環境由後端提供 `frontend/build/`。
 - 執行期儲存：圖片預設位於 `images/`、縮圖位於 `images/thumbs/`、SQLite 資料位於 `data/app.sqlite3`、日誌位於 `data/logs/`。
+- 多 Worker 協調：排隊工作、背景 Lease、SSE Slot 與排程器所有權使用 SQLite Lease。圖片與縮圖檔案的寫入/刪除僅使用程序內鎖，並透過 UUID 檔名、原子 `Path.replace()` 與孤兒檔案 GC TTL 清理容忍跨程序競爭。
 - 公開 API 路由：`backend/app/api/contract_app.py`。
 - DTO：`backend/app/schemas/`。
 - 持久化：`backend/app/repositories/`。
@@ -49,7 +61,8 @@ GPT Image Panel 是一套輕量 Web UI，可用於圖片生成、圖片編輯、
 - Python 3.11+
 - FastAPI
 - Granian
-- aiohttp / aiohttp-socks
+- aiohttp
+- aiohttp-socks
 - boto3
 - SQLite
 - Pydantic v2
@@ -209,12 +222,19 @@ ALLOW_UNAUTHENTICATED=true .venv/bin/granian --interface asgi backend.app.main:a
 | 變數 | 用途 |
 | --- | --- |
 | `ACCESS_KEY` | 存取密鑰。除非清空該變數並設定 `ALLOW_UNAUTHENTICATED=true`，否則必填。 |
+| `ADMIN_KEY` | 設定管理的二次驗證密鑰。應設定不同的值；省略時會退回 `ACCESS_KEY`，並在啟動日誌中發出警告。 |
 | `DEFAULT_API_URL` | 預設上游 API base URL，可包含或省略 `/v1`。 |
 | `DEFAULT_API_KEY` | 預設上游 API key。Web Settings 建議使用 `${OPENAI_API_KEY}` 之類的 env ref。 |
 | `DEFAULT_API_PATH` | `/v1/images/generations`、`/v1/responses` 或 `/v1/chat/completions`。 |
 | `DEFAULT_RESPONSES_MODEL` | `/v1/responses` 在要求/預設未提供模型時使用的備援模型。 |
 | `AIOHTTP_CONNECTION_LIMIT` / `AIOHTTP_CONNECTION_LIMIT_PER_HOST` | 上游要求、探測與下載共用的 aiohttp connector 限制。 |
 | `APP_VERSION` / `GITHUB_REPO` / `ENABLE_VERSION_CHECK` | UI/API 版本顯示與最新 Release 檢查。 |
+| `VERSION_CHECK_CACHE_SECONDS` | 每個程序成功檢查最新版本的快取有效期。 |
+| `MAX_UPSTREAM_IMAGE_BYTES_PER_TASK_MB` / `UPSTREAM_MEMORY_BUDGET_MB` | 單一工作的解碼圖片上限，以及程序內上游記憶體加權准入預算。 |
+| `DB_EXECUTOR_WORKERS` / `SQLITE_BUSY_*` | SQLite 專用執行器大小，以及短逾時與抖動重試控制。 |
+| `IMAGE_CPU_CONCURRENCY` / `FILE_IO_CONCURRENCY` | 每個程序完整圖片解碼與阻塞式檔案 I/O 的有界並行數。 |
+| `IMAGE_JOB_PROGRESS_PERSIST_INTERVAL_SECONDS` | 合併寫入圖片單元進度的最短間隔。 |
+| `RUNTIME_METRICS_REFRESH_SECONDS` / `EVENT_LOOP_LAG_SAMPLE_SECONDS` | 背景協調快照與事件迴圈延遲取樣間隔。 |
 | `MAX_ACTIVE_GENERATE_JOBS` | 全域執行中的生成/編輯 image unit 上限。 |
 | `MAX_QUEUED_GENERATE_JOBS` | 佇列容量；超過後的新工作會回傳 `429`。 |
 | `MAX_PENDING_EDIT_SOURCE_MB` | 全域待處理編輯來源圖片的位元組保留上限。 |
@@ -223,7 +243,7 @@ ALLOW_UNAUTHENTICATED=true .venv/bin/granian --interface asgi backend.app.main:a
 | `THUMBNAILS_DIR` / `THUMBNAIL_*` | Gallery 縮圖儲存與產生控制。 |
 | `DATA_DIR` / `DATABASE_FILE` | SQLite 執行期資料。 |
 | `PROMPT_OPTIMIZER_*` | 選用的伺服器端提示詞最佳化器設定。 |
-| `AI_ASSISTANT_*` | AI Assistant 預設啟用；可設 `AI_ASSISTANT_ENABLED=false` 關閉。API URL、密鑰、文字模型、逾時、路徑與 Host 允許清單沿用 `PROMPT_OPTIMIZER_*`。 |
+| `AI_ASSISTANT_*` | AI Assistant 預設啟用；可設 `AI_ASSISTANT_ENABLED=false` 關閉。API URL、密鑰、文字模型、逾時、路徑與 Host 允許清單沿用 `PROMPT_OPTIMIZER_*`。`AI_ASSISTANT_MAX_CONCURRENCY` 限制同時進行的上游 Assistant 呼叫，`AI_ASSISTANT_BATCH_MAX_IMAGES` 限制單次 Gallery AI 批次處理的圖片數。 |
 | `R2_*` | 選用的 Cloudflare R2 Gallery 備份設定；自訂 Endpoint Host 須設定 `R2_ENDPOINT_HOST_ALLOWLIST`。 |
 | `PUBLIC_ORIGIN` / `ALLOWED_HOSTS` | Reverse Proxy Host/CSRF 強化。 |
 | `ENABLE_NGINX_ACCEL_REDIRECT` / `PUBLIC_IMAGE_BASE_URL` / `PUBLIC_THUMBNAIL_BASE_URL` | 選用的 nginx/CDN 圖片位元組傳送行為。 |
@@ -289,8 +309,10 @@ Overall Config 會將 Override 持久化至 SQLite。部分設定可熱更新；
 | `POST` | `/api/assistant/image/prompt/optimize` | 結合上傳的來源圖片，最佳化反推提示詞結果。 |
 | `POST/GET` | `/api/assistant/gallery/*` | 描述、反推 Prompt、分析、批次分析及讀取本機 Gallery AI 中繼資料。 |
 | `POST` | `/api/generate` | 建立生成工作。 |
-| `POST` | `/api/edits`, `/api/edits/from-gallery/{image_id}` | 以上傳或 Gallery 來源圖片建立編輯工作。 |
-| `GET` | `/api/generate/jobs`, `/api/generate/jobs/events` | 查詢工作與訂閱工作清單 SSE。 |
+| `POST` | `/api/edits` | 以上傳的來源圖片建立編輯工作。 |
+| `POST` | `/api/edits/from-gallery/{image_id}` | 以現有 Gallery 圖片建立編輯工作。 |
+| `GET` | `/api/generate/jobs` | 列出即時工作與選用的持久化歷史。 |
+| `GET` | `/api/generate/jobs/events` | 工作清單更新的 SSE 串流。 |
 | `GET/DELETE` | `/api/generate/{job_id}` | 讀取或取消單一生成/編輯工作。 |
 | `GET` | `/api/generate/{job_id}/events` | 單一工作 SSE。 |
 | `DELETE` | `/api/generate/jobs/history` | 清除已終止的工作歷史。 |
@@ -305,9 +327,12 @@ Overall Config 會將 Override 持久化至 SQLite。部分設定可熱更新；
 | `GET` | `/api/gallery/export-jobs/{job_id}/download` | 下載已完成的受追蹤匯出 ZIP。 |
 | `POST` | `/api/gallery/sync-jobs` | 建立 R2 備份同步工作。 |
 | `GET` | `/api/gallery/sync-jobs/{job_id}`, `/api/gallery/sync-jobs/{job_id}/events` | 讀取或訂閱 R2 備份同步工作狀態。 |
-| `GET` | `/api/gallery/import-jobs/{job_id}`, `/api/gallery/import-jobs/{job_id}/events` | 讀取或訂閱非同步匯入工作狀態。 |
-| `GET` | `/api/image/{filename}`, `/api/thumb/{filename}` | 傳回通過驗證的圖片或 Gallery 縮圖。 |
-| `GET` | `/api/download/{filename}`, `/api/download-all` | 下載單張圖片或串流匯出 Gallery ZIP。 |
+| `GET` | `/api/gallery/import-jobs/{job_id}` | 讀取非同步匯入工作狀態。 |
+| `GET` | `/api/gallery/import-jobs/{job_id}/events` | 非同步匯入工作狀態的 SSE 串流。 |
+| `GET` | `/api/image/{filename}` | 提供通過授權的圖片位元組。 |
+| `GET` | `/api/thumb/{filename}` | 提供已生成的 Gallery 縮圖。 |
+| `GET` | `/api/download/{filename}` | 下載單張 Gallery 圖片。 |
+| `GET` | `/api/download-all` | 串流匯出 Gallery ZIP。 |
 | `POST` | `/api/import` | 匯入 Gallery ZIP；`async_job=true` 會建立匯入工作。 |
 | `GET` | `/api/metrics`, `/api/metrics/prometheus` | 設定 `ENABLE_METRICS=true` 時可用。 |
 
@@ -316,10 +341,25 @@ Overall Config 會將 Override 持久化至 SQLite。部分設定可熱更新；
 ## 貢獻者界線
 
 - 瀏覽器要求應維持同源 `/api/*`；請勿從前端直接呼叫上游模型 API、R2、webhook 目標或任意圖片 URL。
-- 維持現有程式碼分層：路由與要求協調位於 `backend/app/api/routers/`、DTO 位於 `backend/app/schemas/`、持久化位於 `backend/app/repositories/`、上游整合位於 `backend/app/integrations/`、前端鏡像 API 型別位於 `frontend/src/lib/api/types.ts`。
-- 除非刻意進行破壞性變更，否則請維持 API 契約，以及生成/編輯佇列生命週期、取消語意與多 Worker SQLite 協調行為。
-- 集中管理圖片驗證、安全路徑、縮圖/封存輔助函式、SSRF 敏感 URL 與 Secret 遮罩/環境變數參照。
-- 編輯工作最多接受 16 張點陣來源圖片；Gallery ZIP 沿用既有安全限制；SSE 使用 SQLite Slot Lease；R2 同步僅作備份。
+- 維持現有程式碼分層：
+  - 路由與要求協調位於 `backend/app/api/routers/`
+  - DTO 位於 `backend/app/schemas/`
+  - 持久化與 SQLite 協調位於 `backend/app/repositories/`
+  - 上游整合位於 `backend/app/integrations/`
+  - 前端鏡像 API 型別位於 `frontend/src/lib/api/types.ts`
+- 除非刻意進行破壞性變更，否則請維持下列公開契約：
+  - API 路徑、方法、狀態碼、Cookie、SSE 事件名稱與回應結構
+  - 生成/編輯佇列生命週期、取消語意與多 Worker SQLite 協調
+  - 檔案系統競爭透過 UUID 檔名、原子替換與孤兒檔案 GC 來容忍；請勿依賴程序內鎖實作跨 Worker 互斥
+- 集中管理驗證與安全邏輯：
+  - 圖片位元組驗證、安全路徑、縮圖/封存輔助函式
+  - SSRF 敏感 URL 處理應位於 Validator、Safe Connector 與整合 Client
+  - 前端只能看到遮罩後的 Secret 或環境變數參照中繼資料
+- 保留目前的執行期限制：
+  - 編輯工作最多接受 16 張點陣來源圖片
+  - Gallery ZIP 匯入/匯出沿用既有安全限制
+  - SSE 使用具有全域/單一 IP 上限與 TTL 的 SQLite Slot Lease
+  - R2 同步僅作備份；本機 SQLite 記錄與本機圖片檔案仍是唯一真實來源
 - 新增或修改環境變數時，請同步更新 `backend/app/core/settings.py`、必要時的 `backend/app/core/overall_config.py`、`.env.example`、`docker-compose.yml` 與 README。
 - 請勿提交 `images/`、`data/`、`frontend/build/`、`.svelte-kit/`、Playwright 報告、測試結果、相依套件目錄、本機資料庫或日誌等執行期/產生檔案。
 

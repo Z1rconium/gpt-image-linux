@@ -13,6 +13,17 @@
     简体中文 ·
     <a href="./README.zh-TW.md">繁體中文</a>
   </p>
+
+  <p>
+    <img alt="CI 通过" src="https://img.shields.io/badge/CI-passing-2cc653?logo=github&logoColor=white" />
+    <img alt="版本 v1.3.3" src="https://img.shields.io/badge/release-v1.3.3-0e8dcc" />
+    <img alt="Python 3.11+" src="https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white" />
+    <img alt="Node.js 24" src="https://img.shields.io/badge/Node.js-24-339933?logo=node.js&logoColor=white" />
+    <img alt="FastAPI 0.115+" src="https://img.shields.io/badge/FastAPI-0.115+-009688?logo=fastapi&logoColor=white" />
+    <img alt="SvelteKit 2" src="https://img.shields.io/badge/SvelteKit-2-FF3E00?logo=svelte&logoColor=white" />
+    <img alt="许可证 CC BY-NC 4.0" src="https://img.shields.io/badge/License-CC_BY--NC_4.0-6f42c1" />
+    <img alt="GHCR 镜像" src="https://img.shields.io/badge/GHCR-gpt--image--linux-1f6f8b?logo=github&logoColor=white" />
+  </p>
 </div>
 
 ## 概述
@@ -38,6 +49,7 @@ GPT Image Panel 是一个轻量级 Web UI，用于图像生成、图像编辑、
 - 后端：`backend/app/` 下的 FastAPI；ASGI 入口是 `backend.app.main:app`。
 - 前端：`frontend/` 下的 SvelteKit 静态应用；生产后端服务 `frontend/build/`。
 - 运行时存储：图片默认在 `images/`，缩略图在 `images/thumbs/`，SQLite 数据在 `data/app.sqlite3`，日志在 `data/logs/`。
+- 多 worker 协调：排队任务、后台 lease、SSE slot 和调度器所有权使用 SQLite lease。图片和缩略图文件的写入/删除仅使用进程内锁，并通过 UUID 文件名、原子 `Path.replace()` 和孤儿文件 GC TTL 清理容忍跨进程竞争。
 - 公共 API 路由：`backend/app/api/contract_app.py`。
 - DTO：`backend/app/schemas/`。
 - 持久化：`backend/app/repositories/`。
@@ -210,6 +222,7 @@ ALLOW_UNAUTHENTICATED=true .venv/bin/granian --interface asgi backend.app.main:a
 | 变量 | 用途 |
 | --- | --- |
 | `ACCESS_KEY` | 访问密钥。除非清空该变量并设置 `ALLOW_UNAUTHENTICATED=true`，否则必填。 |
+| `ADMIN_KEY` | 设置管理的二次验证密钥。应设置为不同的值；省略时会回退到 `ACCESS_KEY`，并在启动日志中发出警告。 |
 | `DEFAULT_API_URL` | 默认上游 API base URL，可带或不带 `/v1`。 |
 | `DEFAULT_API_KEY` | 默认上游 API key。Web Settings 中建议用 `${OPENAI_API_KEY}` 这类 env ref。 |
 | `DEFAULT_API_PATH` | `/v1/images/generations`、`/v1/responses` 或 `/v1/chat/completions`。 |
@@ -337,6 +350,7 @@ Overall Config 会把 override 持久化到 SQLite。部分配置可热更新；
 - 除非明确要做 breaking change，否则保持这些公共契约稳定：
   - API 路径、方法、状态码、cookie、SSE 事件名、响应结构
   - 生成/编辑队列生命周期、取消语义、多 worker 下的 SQLite 协调
+  - 文件系统竞争通过 UUID 文件名、原子替换和孤儿文件 GC 来容忍；不要依赖进程内锁实现跨 worker 互斥
 - 校验与安全逻辑保持集中：
   - 图片字节校验、安全路径、缩略图/归档 helper
   - SSRF 敏感 URL 处理继续放在 validators、safe connector、integration client 中
