@@ -391,6 +391,12 @@ def test_redaction_skips_regex_for_plain_text_but_still_masks_cached_secret(monk
     assert redaction.redact_sensitive_text("contains needle-value") == "contains [REDACTED]"
 
 
+def test_redaction_masks_bearer_token_separated_by_tab(monkeypatch):
+    monkeypatch.setattr(secrets, "active_secret_values", lambda: ())
+
+    assert redaction.redact_sensitive_text("Bearer\tsecret-token") == "Bearer [REDACTED]"
+
+
 def test_active_secret_values_cache_reuses_registry_resolution(monkeypatch):
     monkeypatch.setenv("CACHED_SECRET_VALUE", "cached-secret")
     payload = {

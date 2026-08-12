@@ -265,6 +265,48 @@ def test_access_failures_stays_bounded_under_unique_ips(tmp_path, monkeypatch):
         assert len(failures) == 3
 
 
+def test_access_failures_normalize_ipv6_and_lockout_reads_without_write_transaction(
+    tmp_path,
+    monkeypatch,
+):
+    _configure_runtime(tmp_path, access_key="secret", allow_unauthenticated=False)
+    expanded_ip = "2001:0DB8:0000:0000:0000:0000:0000:0001"
+    compressed_ip = "2001:db8::1"
+
+    coordination_repo.record_access_failure(
+        expanded_ip,
+        lockout_seconds=60,
+        max_entries=100,
+        now=100,
+    )
+    coordination_repo.record_access_failure(
+        compressed_ip,
+        lockout_seconds=60,
+        max_entries=100,
+        now=101,
+    )
+    monkeypatch.setattr(
+        coordination_repo,
+        "_transaction",
+        lambda conn: (_ for _ in ()).throw(AssertionError("unexpected write transaction")),
+    )
+
+    assert coordination_repo.get_access_lockout(
+        expanded_ip,
+        max_failures=2,
+        lockout_seconds=60,
+        now=102,
+    ) == 59
+    assert coordination_repo.list_access_failures() == [
+        {
+            "client_ip": compressed_ip,
+            "failure_count": 2,
+            "first_failed_at": 100.0,
+            "last_failed_at": 101.0,
+        }
+    ]
+
+
 def test_session_pool_close_all_closes_retired_sessions(monkeypatch):
     created_sessions = []
 

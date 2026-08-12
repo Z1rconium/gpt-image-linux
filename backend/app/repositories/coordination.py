@@ -1,12 +1,17 @@
 """SQLite-backed leases, worker coordination, and gallery task records."""
 
+import ipaddress
 import time
 
 from .db import *
 
 
 def _normalize_access_client_ip(client_ip: str) -> str:
-    return str(client_ip or "unknown").strip()[:256] or "unknown"
+    value = str(client_ip or "unknown").strip()[:256] or "unknown"
+    try:
+        return ipaddress.ip_address(value).compressed
+    except ValueError:
+        return value
 
 
 def _cleanup_expired_access_failures_on_conn(
@@ -37,21 +42,19 @@ def get_access_lockout(
     lockout = max(1, int(lockout_seconds or 1))
     normalized_ip = _normalize_access_client_ip(client_ip)
     with _connect() as conn:
-        with _transaction(conn):
-            _cleanup_expired_access_failures_on_conn(conn, current_time, lockout)
-            row = conn.execute(
-                """
-                SELECT failure_count, last_failed_at
-                FROM access_failures
-                WHERE client_ip = ?
-                """,
-                (normalized_ip,),
-            ).fetchone()
-            if not row:
-                return 0
-            elapsed = current_time - float(row["last_failed_at"] or 0)
-            if elapsed < lockout and int(row["failure_count"] or 0) >= max_count:
-                return max(1, int(lockout - elapsed))
+        row = conn.execute(
+            """
+            SELECT failure_count, last_failed_at
+            FROM access_failures
+            WHERE client_ip = ?
+            """,
+            (normalized_ip,),
+        ).fetchone()
+        if not row:
+            return 0
+        elapsed = current_time - float(row["last_failed_at"] or 0)
+        if elapsed < lockout and int(row["failure_count"] or 0) >= max_count:
+            return max(1, int(lockout - elapsed))
     return 0
 
 

@@ -18,7 +18,7 @@ _CREDENTIAL_RE = re.compile(
 _REDACTION_HINTS = (
     "://",
     "authorization",
-    "bearer ",
+    "bearer",
     "api_key",
     "apikey",
     "api-key",

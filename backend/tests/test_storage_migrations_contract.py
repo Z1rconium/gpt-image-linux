@@ -276,6 +276,35 @@ def test_schema_migrations_are_recorded_and_idempotent(tmp_path):
     ]
 
 
+def test_gallery_and_access_migrations_own_only_their_schema():
+    with sqlite3.connect(":memory:") as conn:
+        conn.row_factory = sqlite3.Row
+        db_repo._migration_gallery_page_anchors(conn)
+        tables_after_gallery = {
+            row["name"]
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+        gallery_version = conn.execute(
+            "SELECT value FROM gallery_meta WHERE key = 'gallery_version'"
+        ).fetchone()
+
+        assert {"gallery_meta", "gallery_page_anchors"}.issubset(tables_after_gallery)
+        assert "access_failures" not in tables_after_gallery
+        assert gallery_version["value"] == 0
+
+    with sqlite3.connect(":memory:") as conn:
+        conn.row_factory = sqlite3.Row
+        db_repo._migration_access_failures(conn)
+        tables_after_access = {
+            row["name"]
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+
+        assert "access_failures" in tables_after_access
+        assert "gallery_meta" not in tables_after_access
+        assert "gallery_page_anchors" not in tables_after_access
+
+
 def test_schema_migrations_upgrade_legacy_gallery_schema(tmp_path):
     _configure_runtime(tmp_path)
     db_path = Path(config.DATABASE_FILE)

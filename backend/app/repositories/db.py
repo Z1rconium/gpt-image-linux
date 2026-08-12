@@ -1538,25 +1538,6 @@ def _migration_gallery_page_anchors(conn: sqlite3.Connection):
         )
         """
     )
-
-
-def _migration_access_failures(conn: sqlite3.Connection):
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS access_failures (
-            client_ip TEXT PRIMARY KEY,
-            failure_count INTEGER NOT NULL DEFAULT 0,
-            first_failed_at REAL NOT NULL,
-            last_failed_at REAL NOT NULL
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_access_failures_last_failed_at
-            ON access_failures(last_failed_at)
-        """
-    )
     conn.execute(
         """
         INSERT OR IGNORE INTO gallery_meta (key, value)
@@ -1582,6 +1563,25 @@ def _migration_access_failures(conn: sqlite3.Connection):
         """
         CREATE INDEX IF NOT EXISTS idx_gallery_page_anchors_lookup
             ON gallery_page_anchors(query_key, page_size, gallery_version, page)
+        """
+    )
+
+
+def _migration_access_failures(conn: sqlite3.Connection):
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS access_failures (
+            client_ip TEXT PRIMARY KEY,
+            failure_count INTEGER NOT NULL DEFAULT 0,
+            first_failed_at REAL NOT NULL,
+            last_failed_at REAL NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_access_failures_last_failed_at
+            ON access_failures(last_failed_at)
         """
     )
 
