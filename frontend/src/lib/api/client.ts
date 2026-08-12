@@ -24,6 +24,11 @@ export function setUnauthorizedHandler(handler: UnauthorizedHandler | null) {
   unauthorizedHandler = typeof handler === 'function' ? handler : null;
 }
 
+function shouldUseDefaultTimeout(options: RequestInit): boolean {
+  if (options.signal) return false;
+  return !(typeof FormData !== 'undefined' && options.body instanceof FormData);
+}
+
 function responseIsJson(response: Response): boolean {
   const contentType = (response.headers.get('content-type') || '').toLowerCase();
   return contentType.includes('application/json') || contentType.includes('+json');
@@ -47,7 +52,7 @@ async function readErrorBody(response: Response, isJson: boolean): Promise<{ bod
 export async function apiFetch<T>(url: string, options: RequestInit = {}, action = 'request'): Promise<T> {
   let response: Response;
   try {
-    const signal = options.signal || AbortSignal.timeout(DEFAULT_API_TIMEOUT_MS);
+    const signal = shouldUseDefaultTimeout(options) ? AbortSignal.timeout(DEFAULT_API_TIMEOUT_MS) : options.signal;
     response = await fetch(url, {
       credentials: 'same-origin',
       ...options,

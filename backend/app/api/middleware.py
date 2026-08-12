@@ -33,6 +33,7 @@ CSRF_SAFE_METHODS = {"GET", "HEAD", "OPTIONS", "TRACE"}
 _INVALID_HOST_RE = re.compile(r"[\x00-\x1f\x7f]")
 _GZIP_BYPASS_PATHS = {"/api/download-all"}
 _GZIP_BYPASS_PREFIXES = ("/api/image/", "/api/thumb/", "/api/download/")
+_API_CACHE_CONTROL_PRESERVE_PREFIXES = _GZIP_BYPASS_PREFIXES
 _GZIP_TEXT_CONTENT_TYPES = {
     "application/javascript",
     "application/json",
@@ -113,6 +114,15 @@ def apply_security_headers(response: Response) -> Response:
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "same-origin"
     return response
+
+
+def _add_vary_cookie(response: Response) -> None:
+    vary = response.headers.get("Vary")
+    if not vary:
+        response.headers["Vary"] = "Cookie"
+        return
+    if not any(value.strip().lower() == "cookie" for value in vary.split(",")):
+        response.headers["Vary"] = f"{vary}, Cookie"
 
 
 def _correlation_id(request: Request) -> str:
@@ -519,9 +529,18 @@ def register_middleware(app):
             elapsed_ms = (time.perf_counter() - request_started_at) * 1000
             metrics.observe_ms("http.request", elapsed_ms)
 
-        if request.url.path.startswith("/api/") or response.status_code >= 400:
+        preserves_cache_control = (
+            response.status_code < 400
+            and "Cache-Control" in response.headers
+            and request.url.path.startswith(_API_CACHE_CONTROL_PRESERVE_PREFIXES)
+        )
+        if response.status_code >= 400 or (
+            request.url.path.startswith("/api/") and not preserves_cache_control
+        ):
             response.headers["Cache-Control"] = "private, no-store"
-            response.headers["Vary"] = "Cookie"
+            _add_vary_cookie(response)
+        elif preserves_cache_control:
+            _add_vary_cookie(response)
         elif request.url.path == "/":
             response.headers["Cache-Control"] = "no-cache"
 

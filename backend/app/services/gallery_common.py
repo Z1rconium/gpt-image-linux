@@ -116,7 +116,7 @@ def granian_worker_count() -> int:
         return 1
 logger = logging.getLogger(__name__)
 PRIVATE_GALLERY_CACHE_CONTROL = "private, no-store"
-IMMUTABLE_GALLERY_CACHE_CONTROL = PRIVATE_GALLERY_CACHE_CONTROL
+IMMUTABLE_GALLERY_CACHE_CONTROL = "private, max-age=31536000, immutable"
 GALLERY_EXPORT_TERMINAL_STATUSES = {"success", "error"}
 GALLERY_SYNC_TERMINAL_STATUSES = {"success", "error"}
 GALLERY_IMPORT_TERMINAL_STATUSES = {"success", "error"}
@@ -255,7 +255,7 @@ def _x_accel_response(
 ) -> Response:
     headers = {
         "X-Accel-Redirect": f"{internal_prefix}{quote(path.name, safe='')}",
-        "Cache-Control": PRIVATE_GALLERY_CACHE_CONTROL,
+        "Cache-Control": IMMUTABLE_GALLERY_CACHE_CONTROL,
     }
     if download:
         extension = path.suffix.lstrip(".") or "png"

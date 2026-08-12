@@ -311,13 +311,13 @@ async def _image_file_response(filename: str, *, download: bool = False):
             path,
             media_type=media_type,
             filename=f"gpt-image-{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.{extension}",
-            headers={"Cache-Control": PRIVATE_GALLERY_CACHE_CONTROL},
+            headers={"Cache-Control": IMMUTABLE_GALLERY_CACHE_CONTROL},
         )
 
     return FileResponse(
         path,
         media_type=media_type,
-        headers={"Cache-Control": PRIVATE_GALLERY_CACHE_CONTROL},
+        headers={"Cache-Control": IMMUTABLE_GALLERY_CACHE_CONTROL},
     )
 
 
@@ -350,7 +350,7 @@ async def serve_thumbnail(filename: str):
     return FileResponse(
         path,
         media_type=THUMBNAIL_CONTENT_TYPE,
-        headers={"Cache-Control": PRIVATE_GALLERY_CACHE_CONTROL},
+        headers={"Cache-Control": IMMUTABLE_GALLERY_CACHE_CONTROL},
     )
 
 

@@ -51,7 +51,7 @@ def test_gallery_image_download_and_zip(client, monkeypatch):
     assert image.headers["content-length"] == str(len(PNG_BYTES))
     assert image.headers["accept-ranges"] == "bytes"
     assert image.headers.get("content-encoding") is None
-    assert image.headers["cache-control"] == "public, max-age=31536000, immutable"
+    assert image.headers["cache-control"] == "private, max-age=31536000, immutable"
 
     image_range = client.get(
         "/api/image/gallery-zip.png",
@@ -65,7 +65,7 @@ def test_gallery_image_download_and_zip(client, monkeypatch):
 
     thumb = client.get("/api/thumb/gallery-zip.png")
     assert thumb.status_code == 404
-    assert thumb.headers["cache-control"] == "no-cache"
+    assert thumb.headers["cache-control"] == "private, no-store"
     assert gallery_queries.get_gallery_entry("gallery-zip").thumbnail_filename is None
 
     monkeypatch.setattr(gallery_maintenance, "generate_thumbnail_for_image", original_generate_thumbnail)
@@ -73,7 +73,7 @@ def test_gallery_image_download_and_zip(client, monkeypatch):
     thumb = client.get("/api/thumb/gallery-zip.png")
     assert thumb.status_code == 200
     assert thumb.headers["content-type"].startswith("image/webp")
-    assert thumb.headers["cache-control"] == "public, max-age=31536000, immutable"
+    assert thumb.headers["cache-control"] == "private, max-age=31536000, immutable"
     assert thumb.headers.get("content-encoding") is None
 
     download = client.get("/api/download/gallery-zip.png")
@@ -82,7 +82,7 @@ def test_gallery_image_download_and_zip(client, monkeypatch):
     assert download.headers["content-length"] == str(len(PNG_BYTES))
     assert download.headers["accept-ranges"] == "bytes"
     assert download.headers.get("content-encoding") is None
-    assert download.headers["cache-control"] == "public, max-age=31536000, immutable"
+    assert download.headers["cache-control"] == "private, max-age=31536000, immutable"
 
     archive = client.get("/api/download-all")
     assert archive.status_code == 200
@@ -157,7 +157,7 @@ def test_gallery_image_responses_use_x_accel_redirect_when_enabled(client):
     image = client.get("/api/image/gallery%20accel.png")
     assert image.status_code == 200
     assert image.headers["x-accel-redirect"] == "/_protected/images/gallery%20accel.png"
-    assert image.headers["cache-control"].startswith("public")
+    assert image.headers["cache-control"] == "private, max-age=31536000, immutable"
     assert image.headers["content-type"].startswith("image/png")
     assert image.content == b""
 
@@ -170,7 +170,7 @@ def test_gallery_image_responses_use_x_accel_redirect_when_enabled(client):
     assert thumbnail_path is not None
     assert thumb.status_code == 200
     assert thumb.headers["x-accel-redirect"] == f"/_protected/thumbs/{updated.thumbnail_filename}"
-    assert thumb.headers["cache-control"].startswith("public")
+    assert thumb.headers["cache-control"] == "private, max-age=31536000, immutable"
     assert thumb.headers["content-type"].startswith("image/webp")
     assert thumbnail_path.exists()
 
