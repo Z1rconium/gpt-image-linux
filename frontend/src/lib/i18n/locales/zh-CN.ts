@@ -516,6 +516,7 @@ const zh: Translation = {
     galleryImageReady: '图库图片已设为编辑源',
     galleryImageNotFound: '未找到图片',
     imageUploadRequired: '请上传图片文件',
+    editSourceFromClipboardAdded: '已从剪贴板添加参考图',
     promptCopied: '提示词已复制',
     promptOptimized: '提示词已优化',
     promptOptimizeFailed: '提示词优化失败',

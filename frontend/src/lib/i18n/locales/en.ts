@@ -514,6 +514,7 @@ const en = {
     galleryImageReady: 'Gallery image ready for edits',
     galleryImageNotFound: 'Image not found',
     imageUploadRequired: 'Please upload an image file',
+    editSourceFromClipboardAdded: 'Reference image added from clipboard',
     promptCopied: 'Prompt copied',
     promptOptimized: 'Prompt optimized',
     promptOptimizeFailed: 'Prompt optimization failed',

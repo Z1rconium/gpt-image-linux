@@ -62,10 +62,39 @@ function createEditSourceStore() {
     state = value;
   });
 
+  function addFiles(files: File[], setError: (message: string) => void) {
+    const validFiles = files.filter(isImageFile);
+    const invalidCount = files.length - validFiles.length;
+    if (!validFiles.length) {
+      if (files.length) setError(get(t).messages.imageUploadRequired);
+      return 0;
+    }
+
+    const current = state;
+    const availableSlots = MAX_EDIT_SOURCE_IMAGES - editSourceCount(current);
+    if (availableSlots <= 0) {
+      setError(get(t).messages.editSourceLimit(MAX_EDIT_SOURCE_IMAGES));
+      return 0;
+    }
+
+    const acceptedFiles = validFiles.slice(0, availableSlots);
+    const overLimitCount = validFiles.length - acceptedFiles.length;
+    if (invalidCount > 0) setError(get(t).messages.imageUploadRequired);
+    if (overLimitCount > 0) setError(get(t).messages.editSourceSomeSkipped(MAX_EDIT_SOURCE_IMAGES));
+
+    const nextUploads = acceptedFiles.map(makeUploadSource);
+    update((source) => ({
+      ...source,
+      files: [...source.files, ...nextUploads]
+    }));
+    return nextUploads.length;
+  }
+
   return {
     subscribe,
     set,
     update,
+    addFiles,
     clear(input?: HTMLInputElement) {
       revokeEditSourceUrls(state);
       set({ ...initialEditSourceState, files: [] });
@@ -74,37 +103,7 @@ function createEditSourceStore() {
     handleFile(event: Event, setError: (message: string) => void, input?: HTMLInputElement) {
       const target = event.currentTarget as HTMLInputElement;
       const selectedFiles = Array.from(target.files || []);
-      if (!selectedFiles.length) {
-        target.value = '';
-        return;
-      }
-
-      const validFiles = selectedFiles.filter(isImageFile);
-      const invalidCount = selectedFiles.length - validFiles.length;
-      if (!validFiles.length) {
-        setError(get(t).messages.imageUploadRequired);
-        target.value = '';
-        return;
-      }
-
-      const current = state;
-      const availableSlots = MAX_EDIT_SOURCE_IMAGES - editSourceCount(current);
-      if (availableSlots <= 0) {
-        setError(get(t).messages.editSourceLimit(MAX_EDIT_SOURCE_IMAGES));
-        target.value = '';
-        return;
-      }
-
-      const acceptedFiles = validFiles.slice(0, availableSlots);
-      const overLimitCount = validFiles.length - acceptedFiles.length;
-      if (invalidCount > 0) setError(get(t).messages.imageUploadRequired);
-      if (overLimitCount > 0) setError(get(t).messages.editSourceSomeSkipped(MAX_EDIT_SOURCE_IMAGES));
-
-      const nextUploads = acceptedFiles.map(makeUploadSource);
-      update((source) => ({
-        ...source,
-        files: [...source.files, ...nextUploads]
-      }));
+      addFiles(selectedFiles, setError);
       if (input) input.value = '';
       else target.value = '';
     },

@@ -31,6 +31,7 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
   import { settingsActivityStore, settingsStore } from '$lib/stores/settings';
   import { toastStore, uiStore, type ToastOptions } from '$lib/stores/ui';
   import { versionStore } from '$lib/stores/version';
+  import { extractImageFilesFromClipboard } from '$lib/utils/clipboard';
   import { copyText, displayImageSize, imageUrl } from '$lib/utils/format';
   import { canPrefetchNonCritical } from '$lib/utils/network';
   import { buildPromptOptimizeRequest } from '$lib/utils/promptOptimizer';
@@ -1013,6 +1014,29 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
       void applyUrlStateToApp();
     };
 
+    const isEditableTarget = (target: EventTarget | null) => {
+      const element = target instanceof HTMLElement ? target : null;
+      return Boolean(element?.closest('input, textarea') || element?.isContentEditable);
+    };
+
+    const isBlockingDialogOpen = () =>
+      $uiStore.settingsOpen ||
+      $uiStore.promptSnippetsOpen ||
+      $uiStore.imagePromptOpen ||
+      $uiStore.sizeDialogOpen ||
+      Boolean($lightboxStore.image);
+
+    const paste = (event: ClipboardEvent) => {
+      if (isEditableTarget(event.target) || isBlockingDialogOpen()) return;
+
+      const files = extractImageFilesFromClipboard(event.clipboardData);
+      if (!files.length) return;
+
+      event.preventDefault();
+      const addedCount = editSourceStore.addFiles(files, previewStore.setError);
+      if (addedCount > 0) showToast($t.messages.editSourceFromClipboardAdded);
+    };
+
     const keydown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         if ($uiStore.imagePromptOpen) closeImagePromptDialog();
@@ -1034,6 +1058,7 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
     return installWorkspaceLifecycle({
       onPopstate: popstate,
       onKeydown: keydown,
+      onPaste: paste,
       shouldPrefetch: canPrefetchNonCritical,
       prefetchCommonPanels: () => {
         prefetchPanel('settings');
