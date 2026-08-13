@@ -884,9 +884,9 @@ async function mockApi(page: Page, options: MockOptions = {}) {
       const ids = resolveBatchIds(body);
       const results = ids.map((id) => {
         const image = galleryImages.find((entry) => entry.id === id);
-        if (!image) return { image_id: id, status: 'error', url: null, markdown: null, error: 'Gallery entry not found' };
+        if (!image) return { image_id: id, filename: null, status: 'error', url: null, markdown: null, error: 'Gallery entry not found' };
         const direct = `https://cdn.nodeimage.com/${encodeURIComponent(image.filename)}`;
-        return { image_id: id, status: 'ok', url: direct, markdown: `![${image.prompt}](${direct})`, error: null };
+        return { image_id: id, filename: image.filename, status: 'ok', url: direct, markdown: `![${image.prompt}](${direct})`, error: null };
       });
       const uploadedCount = results.filter((item) => item.status === 'ok').length;
       await route.fulfill(json({

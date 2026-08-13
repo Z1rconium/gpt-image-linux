@@ -100,6 +100,56 @@ test('gallery uploads single and selected images to NodeImage and copies result 
   await expect(resultDialog.getByText('Direct link')).toHaveCount(2);
 });
 
+test('NodeImage batch results use response filenames for cross-page selection', async ({ page }) => {
+  await loadApp(page, { galleryImages: manyGalleryImages(10) });
+
+  await page.getByLabel('Filter prompt').fill('Paged gallery image');
+  await expect(page.getByRole('img', { name: 'Paged gallery image 1', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Select' }).click();
+  await page.getByRole('button', { name: 'Select filtered' }).click();
+  await expect(page.getByText('10 selected from current filters')).toBeVisible();
+  await page.getByRole('button', { name: 'Upload selected to NodeImage', exact: true }).click();
+
+  const resultDialog = page.getByRole('dialog', { name: 'NodeImage upload results' });
+  await expect(resultDialog).toBeVisible();
+  await expect(resultDialog.getByRole('heading', { name: 'paged-img-10.png' })).toBeVisible();
+});
+
+test('NodeImage batch results fall back for legacy responses without filenames', async ({ page }) => {
+  await loadApp(page);
+  await page.route('**/api/gallery/batch/nodeimage-upload', async (route) => {
+    await route.fulfill(json({
+      requested_count: 2,
+      uploaded_count: 1,
+      failed_count: 1,
+      results: [
+        {
+          image_id: 'img-1',
+          status: 'ok',
+          url: 'https://cdn.nodeimage.com/img-1.png',
+          markdown: '![image](https://cdn.nodeimage.com/img-1.png)',
+          error: null
+        },
+        {
+          image_id: 'missing-legacy-id',
+          status: 'error',
+          url: null,
+          markdown: null,
+          error: 'Gallery entry not found'
+        }
+      ]
+    }));
+  });
+
+  await page.getByRole('button', { name: 'Select' }).click();
+  await page.getByRole('button', { name: 'Select page' }).click();
+  await page.getByRole('button', { name: 'Upload selected to NodeImage', exact: true }).click();
+
+  const resultDialog = page.getByRole('dialog', { name: 'NodeImage upload results' });
+  await expect(resultDialog.getByRole('heading', { name: 'img-1.png' })).toBeVisible();
+  await expect(resultDialog.getByRole('heading', { name: 'missing-legacy-id' })).toBeVisible();
+});
+
 test('gallery hides NodeImage upload actions when the integration is unavailable', async ({ page }) => {
   await loadApp(page, {
     settings: {

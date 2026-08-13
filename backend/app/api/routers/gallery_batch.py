@@ -272,58 +272,103 @@ async def upload_gallery_batch_to_nodeimage(req: GalleryBatchRequest):
     except NodeImageConfigurationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    auth_error = "NodeImage API key was rejected."
+    auth_failed = asyncio.Event()
     semaphore = asyncio.Semaphore(4)
 
-    async def upload_entry(entry: GalleryEntry) -> NodeImageBatchUploadItem:
+    def error_item(entry: GalleryEntry, error: str) -> NodeImageBatchUploadItem:
+        return NodeImageBatchUploadItem(
+            image_id=entry.id,
+            filename=entry.filename,
+            status="error",
+            error=error,
+        )
+
+    async def read_entry(
+        entry: GalleryEntry,
+    ) -> tuple[Path | None, bytes | None, NodeImageBatchUploadItem | None]:
+        path = safe_image_path(entry.filename)
+        if not path:
+            return None, None, error_item(entry, "Image file not found")
+        try:
+            if not path.exists():
+                return None, None, error_item(entry, "Image file not found")
+            return path, await asyncio.to_thread(path.read_bytes), None
+        except OSError:
+            return path, None, error_item(entry, "Image file could not be read")
+
+    async def upload_entry(
+        entry: GalleryEntry,
+        *,
+        prepared: tuple[Path, bytes] | None = None,
+    ) -> NodeImageBatchUploadItem:
         async with semaphore:
+            if auth_failed.is_set():
+                return error_item(entry, auth_error)
             try:
-                path = await asyncio.to_thread(
-                    _resolve_gallery_image_path,
-                    entry.filename,
-                )
-                if not path:
-                    return NodeImageBatchUploadItem(
-                        image_id=entry.id,
-                        status="error",
-                        error="Image file not found",
-                    )
-                image_bytes = await asyncio.to_thread(path.read_bytes)
+                if prepared is None:
+                    path, image_bytes, read_error = await read_entry(entry)
+                    if read_error:
+                        return read_error
+                    assert path is not None and image_bytes is not None
+                else:
+                    path, image_bytes = prepared
+                if auth_failed.is_set():
+                    return error_item(entry, auth_error)
                 result = await upload_image_bytes(image_bytes, path.name, effective)
                 return NodeImageBatchUploadItem(
                     image_id=entry.id,
+                    filename=entry.filename,
                     status="ok",
                     url=result.url,
                     markdown=result.markdown,
                 )
-            except (NodeImageAuthError, NodeImageUploadError) as exc:
-                return NodeImageBatchUploadItem(
-                    image_id=entry.id,
-                    status="error",
-                    error=str(exc),
-                )
-            except OSError:
-                return NodeImageBatchUploadItem(
-                    image_id=entry.id,
-                    status="error",
-                    error="Image file could not be read",
-                )
+            except NodeImageAuthError:
+                auth_failed.set()
+                return error_item(entry, auth_error)
+            except NodeImageUploadError as exc:
+                return error_item(entry, str(exc))
             except Exception as exc:
                 logger.error(
                     "Unexpected NodeImage batch upload failure for gallery entry %s (%s)",
                     entry.id,
                     type(exc).__name__,
                 )
-                return NodeImageBatchUploadItem(
-                    image_id=entry.id,
-                    status="error",
-                    error="Unexpected upload failure",
-                )
+                return error_item(entry, "Unexpected upload failure")
 
-    uploaded_items = await asyncio.gather(*(upload_entry(entry) for entry in entries))
-    result_by_id = {item.image_id: item for item in uploaded_items}
+    result_by_id: dict[str, NodeImageBatchUploadItem] = {}
+    probe_entry: GalleryEntry | None = None
+    probe_file: tuple[Path, bytes] | None = None
+    for entry in entries:
+        path, image_bytes, read_error = await read_entry(entry)
+        if read_error:
+            result_by_id[entry.id] = read_error
+            continue
+        assert path is not None and image_bytes is not None
+        probe_entry = entry
+        probe_file = (path, image_bytes)
+        break
+
+    if probe_entry is not None and probe_file is not None:
+        probe_result = await upload_entry(probe_entry, prepared=probe_file)
+        result_by_id[probe_entry.id] = probe_result
+        remaining_entries = [
+            entry for entry in entries if entry.id not in result_by_id
+        ]
+        if auth_failed.is_set():
+            for entry in remaining_entries:
+                _path, _image_bytes, read_error = await read_entry(entry)
+                result_by_id[entry.id] = read_error or error_item(entry, auth_error)
+        else:
+            uploaded_items = await asyncio.gather(
+                *(upload_entry(entry) for entry in remaining_entries)
+            )
+            result_by_id.update({item.image_id: item for item in uploaded_items})
+
     for missing_id in missing_ids:
         result_by_id[missing_id] = NodeImageBatchUploadItem(
             image_id=missing_id,
+            filename=None,
             status="error",
             error="Gallery entry not found",
         )

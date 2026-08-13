@@ -10,6 +10,7 @@ class NodeImageUploadResponse(BaseModel):
 
 class NodeImageBatchUploadItem(BaseModel):
     image_id: str
+    filename: Optional[str] = None
     status: Literal["ok", "error"]
     url: Optional[str] = None
     markdown: Optional[str] = None

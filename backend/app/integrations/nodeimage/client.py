@@ -114,13 +114,15 @@ async def _read_response_json(response: aiohttp.ClientResponse) -> dict[str, Any
     return parsed
 
 
-def _error_text(payload: dict[str, Any], status: int) -> str:
+def _error_text(payload: dict[str, Any], status: int, api_key: str) -> str:
     error = payload.get("error")
     if isinstance(error, dict):
         error = error.get("message") or error.get("detail")
     message = str(
         error or payload.get("message") or f"NodeImage returned HTTP {status}"
     ).strip()
+    if api_key:
+        message = message.replace(api_key, "[REDACTED]")
     return redact_sensitive_text(message)[:500]
 
 
@@ -179,18 +181,15 @@ async def upload_image_bytes(
                         continue
                     raise
 
-                message = _error_text(payload, response.status).replace(
-                    effective.api_key,
-                    "[REDACTED]",
-                )
-                if _is_auth_error(message):
-                    raise NodeImageAuthError("NodeImage API key was rejected.")
+                message = _error_text(payload, response.status, effective.api_key)
                 if response.status >= 500:
                     last_error = NodeImageUploadError(message)
                     if attempt == 0:
                         await asyncio.sleep(0.2)
                         continue
                     raise last_error
+                if _is_auth_error(message):
+                    raise NodeImageAuthError("NodeImage API key was rejected.")
                 if response.status >= 400 or payload.get("success") is False:
                     raise NodeImageUploadError(message)
 

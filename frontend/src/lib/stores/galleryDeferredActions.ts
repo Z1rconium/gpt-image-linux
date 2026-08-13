@@ -512,7 +512,7 @@ export function createDeferredGalleryActions(deps: GalleryActionDeps) {
       );
       const items: NodeImageResultItem[] = result.results.map((item) => ({
         imageId: item.image_id,
-        label: entryLabels.get(item.image_id) || item.image_id,
+        label: item.filename || entryLabels.get(item.image_id) || item.image_id,
         status: item.status,
         url: item.url || '',
         markdown: item.markdown || '',

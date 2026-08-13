@@ -71,6 +71,7 @@ export type NodeImageUploadResponse = {
 
 export type NodeImageBatchUploadItem = {
   image_id: string;
+  filename?: string | null;
   status: 'ok' | 'error';
   url?: string | null;
   markdown?: string | null;
