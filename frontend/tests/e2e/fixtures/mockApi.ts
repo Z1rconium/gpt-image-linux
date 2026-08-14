@@ -47,6 +47,7 @@ type MockOptions = {
   promptSnippets?: PromptSnippetFixture[];
   settings?: Record<string, unknown>;
   generatedJob?: unknown;
+  generatedJobs?: unknown[];
   runningJobs?: unknown[];
   historyJobs?: unknown[];
   language?: 'en' | 'zh-CN' | null;
@@ -442,6 +443,10 @@ async function mockApi(page: Page, options: MockOptions = {}) {
   let imagePromptOptimizeCount = 0;
   const selectionTokens = new Map<string, { prompt: string; favorite?: boolean | null }>();
   const runningJobs = options.runningJobs ?? [];
+  const generatedJobs = options.generatedJobs?.length
+    ? options.generatedJobs
+    : [options.generatedJob ?? job('job-generated', 'browser smoke prompt')];
+  let generatedJobIndex = 0;
   let historyJobs = options.historyJobs ?? [job('history-1', 'saved prompt')];
   const initialLanguage = options.language === undefined ? 'en' : options.language;
 
@@ -912,7 +917,18 @@ async function mockApi(page: Page, options: MockOptions = {}) {
       return;
     }
     if (url.pathname === '/api/generate' && request.method() === 'POST') {
-      await route.fulfill(json({ job_id: 'job-generated', status: 'queued', stage: 'queued', operation: 'generation' }, 202));
+      const generatedJob = generatedJobs[Math.min(generatedJobIndex++, generatedJobs.length - 1)] as Record<string, unknown>;
+      await route.fulfill(
+        json(
+          {
+            job_id: generatedJob.job_id,
+            status: 'queued',
+            stage: 'queued',
+            operation: generatedJob.operation || 'generation'
+          },
+          202
+        )
+      );
       return;
     }
     if (url.pathname === '/api/edits/from-gallery/img-1' && request.method() === 'POST') {
@@ -946,7 +962,7 @@ async function mockApi(page: Page, options: MockOptions = {}) {
       await route.fulfill({
         status: 200,
         contentType: 'text/event-stream',
-        body: `event: job\ndata: ${JSON.stringify(options.generatedJob ?? job('job-generated', 'browser smoke prompt'))}\n\n`
+        body: `event: job\ndata: ${JSON.stringify(generatedJobs.find((candidate) => (candidate as { job_id?: string }).job_id === 'job-generated') || generatedJobs[0])}\n\n`
       });
       return;
     }
@@ -966,9 +982,19 @@ async function mockApi(page: Page, options: MockOptions = {}) {
       });
       return;
     }
+    const eventJobMatch = url.pathname.match(/^\/api\/generate\/(job-[^/]+)\/events$/);
+    if (eventJobMatch) {
+      const eventJob = generatedJobs.find((candidate) => (candidate as { job_id?: string }).job_id === eventJobMatch[1]);
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/event-stream',
+        body: `event: job\ndata: ${JSON.stringify(eventJob || job(eventJobMatch[1], 'polled prompt'))}\n\n`
+      });
+      return;
+    }
     if (url.pathname.startsWith('/api/generate/job-')) {
       const id = url.pathname.split('/').pop() || 'job-generated';
-      const generatedJob = id === 'job-generated' ? options.generatedJob : null;
+      const generatedJob = generatedJobs.find((candidate) => (candidate as { job_id?: string }).job_id === id);
       await route.fulfill(json(generatedJob ?? job(id, 'polled prompt')));
       return;
     }

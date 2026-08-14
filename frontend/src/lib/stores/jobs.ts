@@ -1,5 +1,5 @@
 import { get, writable } from 'svelte/store';
-import { apiFetch } from '$lib/api/client';
+import { ApiError, apiFetch } from '$lib/api/client';
 import { openJsonEventSource } from '$lib/api/events';
 import { t } from '$lib/i18n';
 import { filenameFromImageUrl, jobFailureMessage } from '$lib/utils/format';
@@ -126,11 +126,14 @@ function createJobsStore() {
   let jobsSource: EventSource | null = null;
   let jobsPollingTimer: ReturnType<typeof setInterval> | null = null;
   let jobsFeedHealthy = false;
+  let activeJobSource: EventSource | null = null;
+  let activeJobFeedHealthy = false;
   let activeJobPollingTimer: ReturnType<typeof setTimeout> | null = null;
-  const activeJobPollsInFlight = new Set<string>();
+  const activeJobPollsInFlight = new Set<number>();
   let trackedJobId: string | null = null;
   let trackedJobUpdate: ((job: GenerateJobStatus) => Promise<void>) | null = null;
   let trackedJobError: ((message: string) => void) | null = null;
+  let trackedJobGeneration = 0;
   let historyRequestSeq = 0;
 
   subscribe((value) => {
@@ -287,29 +290,25 @@ function createJobsStore() {
       onEvent: ({ event, data }) => {
         stopJobsPolling();
         jobsFeedHealthy = true;
-        clearActiveJobPollingTimer();
         if (event === 'jobs' && Array.isArray(data)) {
           applyActiveJobs(data);
         } else if (event === 'job' && !Array.isArray(data)) {
-          applyTrackedJob(data);
+          void applyTrackedJob(data);
         }
       },
       onNetworkError: () => {
         jobsFeedHealthy = false;
         startJobsPolling();
-        startTrackedJobPolling();
       },
       onError: () => {
         jobsFeedHealthy = false;
         startJobsPolling();
-        startTrackedJobPolling();
       }
     }, ['jobs', 'job']);
     source.onopen = () => {
       if (jobsSource !== source) return;
       jobsFeedHealthy = true;
       stopJobsPolling();
-      clearActiveJobPollingTimer();
     };
     jobsSource = source;
   }
@@ -348,14 +347,43 @@ function createJobsStore() {
     trackedJobId = jobId;
     trackedJobUpdate = updatePreviewFromJob;
     trackedJobError = setPreviewError;
-    void pollJob(jobId, updatePreviewFromJob, setPreviewError);
+    const generation = trackedJobGeneration;
+    const source = openJsonEventSource<GenerateJobStatus>(`/api/generate/${encodeURIComponent(jobId)}/events`, {
+      onEvent: ({ data }) => {
+        if (
+          activeJobSource !== source ||
+          trackedJobId !== jobId ||
+          trackedJobGeneration !== generation ||
+          data.job_id !== jobId
+        ) return;
+        activeJobFeedHealthy = true;
+        clearActiveJobPollingTimer();
+        void applyTrackedJob(data);
+      },
+      onNetworkError: () => {
+        if (activeJobSource !== source || trackedJobId !== jobId || trackedJobGeneration !== generation) return;
+        activeJobFeedHealthy = false;
+        startTrackedJobPolling();
+      },
+      onError: () => {
+        if (activeJobSource !== source || trackedJobId !== jobId || trackedJobGeneration !== generation) return;
+        closeActiveJobEventSource();
+        startTrackedJobPolling();
+      }
+    }, ['job']);
+    activeJobSource = source;
   }
 
-  function applyTrackedJob(job: GenerateJobStatus) {
+  async function applyTrackedJob(job: GenerateJobStatus) {
     if (trackedJobId !== job.job_id || !trackedJobUpdate) return;
+    const generation = trackedJobGeneration;
     const updatePreviewFromJob = trackedJobUpdate;
-    void updatePreviewFromJob(job);
-    if (!isActiveJobStatus(job.status)) closeActiveJobSource();
+    await updatePreviewFromJob(job);
+    if (
+      trackedJobId === job.job_id &&
+      trackedJobGeneration === generation &&
+      !isActiveJobStatus(job.status)
+    ) closeActiveJobSource();
   }
 
   function startTrackedJobPolling() {
@@ -364,40 +392,48 @@ function createJobsStore() {
       !trackedJobUpdate ||
       !trackedJobError ||
       activeJobPollingTimer ||
-      activeJobPollsInFlight.has(trackedJobId)
+      activeJobPollsInFlight.has(trackedJobGeneration)
     ) return;
-    void pollJob(trackedJobId, trackedJobUpdate, trackedJobError);
+    void pollJob(trackedJobId, trackedJobGeneration);
   }
 
-  async function pollJob(
-    jobId: string,
-    updatePreviewFromJob: (job: GenerateJobStatus) => Promise<void>,
-    setPreviewError: (message: string) => void
-  ) {
-    if (trackedJobId !== jobId || activeJobPollsInFlight.has(jobId)) return;
+  function scheduleTrackedJobPoll(jobId: string, generation: number) {
+    if (activeJobPollingTimer || trackedJobId !== jobId || trackedJobGeneration !== generation) return;
+    activeJobPollingTimer = setTimeout(() => {
+      activeJobPollingTimer = null;
+      if (trackedJobId === jobId && trackedJobGeneration === generation) void pollJob(jobId, generation);
+    }, 1200);
+  }
+
+  async function pollJob(jobId: string, generation: number) {
+    if (
+      trackedJobId !== jobId ||
+      trackedJobGeneration !== generation ||
+      activeJobPollsInFlight.has(generation)
+    ) return;
     clearActiveJobPollingTimer();
-    activeJobPollsInFlight.add(jobId);
+    activeJobPollsInFlight.add(generation);
     try {
       const job = await apiFetch<GenerateJobStatus>(`/api/generate/${encodeURIComponent(jobId)}`, {}, 'loading job');
-      if (trackedJobId !== jobId) return;
-      await updatePreviewFromJob(job);
-      if (trackedJobId !== jobId) return;
+      if (trackedJobId !== jobId || trackedJobGeneration !== generation || !trackedJobUpdate) return;
+      await trackedJobUpdate(job);
+      if (trackedJobId !== jobId || trackedJobGeneration !== generation) return;
       if (isActiveJobStatus(job.status)) {
-        if (!jobsFeedHealthy) {
-          activeJobPollingTimer = setTimeout(() => {
-            activeJobPollingTimer = null;
-            if (trackedJobId === jobId) void pollJob(jobId, updatePreviewFromJob, setPreviewError);
-          }, 1200);
-        }
+        if (!activeJobFeedHealthy) scheduleTrackedJobPoll(jobId, generation);
       } else {
         closeActiveJobSource();
       }
     } catch (error) {
-      if (trackedJobId !== jobId) return;
-      setPreviewError(error instanceof Error ? error.message : get(t).messages.jobLoadFailed);
-      closeActiveJobSource();
+      if (trackedJobId !== jobId || trackedJobGeneration !== generation) return;
+      const permanentError = error instanceof ApiError && error.status >= 400 && error.status < 500 && ![408, 429].includes(error.status);
+      if (permanentError) {
+        trackedJobError?.(error.message || get(t).messages.jobLoadFailed);
+        closeActiveJobSource();
+      } else {
+        scheduleTrackedJobPoll(jobId, generation);
+      }
     } finally {
-      activeJobPollsInFlight.delete(jobId);
+      activeJobPollsInFlight.delete(generation);
     }
   }
 
@@ -437,7 +473,15 @@ function createJobsStore() {
     activeJobPollingTimer = null;
   }
 
+  function closeActiveJobEventSource() {
+    activeJobSource?.close();
+    activeJobSource = null;
+    activeJobFeedHealthy = false;
+  }
+
   function closeActiveJobSource() {
+    trackedJobGeneration += 1;
+    closeActiveJobEventSource();
     clearActiveJobPollingTimer();
     trackedJobId = null;
     trackedJobUpdate = null;

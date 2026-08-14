@@ -34,6 +34,80 @@ async function dispatchImagePaste(page: Page, targetSelector: string, fileNames:
   );
 }
 
+type EventSourceScenario = {
+  globalJobs?: unknown[];
+  perJobModes?: Record<string, 'terminal' | 'disconnect' | 'hold' | 'delayed'>;
+  perJobEvents?: Record<string, unknown>;
+};
+
+async function installEventSourceScenario(page: Page, scenario: EventSourceScenario) {
+  await page.addInitScript((config: EventSourceScenario) => {
+    const state = { opened: [] as string[], closed: [] as string[] };
+    class MockEventSource extends EventTarget {
+      static readonly CONNECTING = 0;
+      static readonly OPEN = 1;
+      static readonly CLOSED = 2;
+      readonly url: string;
+      readonly withCredentials = false;
+      readyState = MockEventSource.CONNECTING;
+      onopen: ((event: Event) => void) | null = null;
+      onerror: ((event: Event) => void) | null = null;
+
+      constructor(url: string) {
+        super();
+        this.url = url;
+        state.opened.push(url);
+        setTimeout(() => this.initialize(config), 0);
+      }
+
+      private initialize(currentConfig: EventSourceScenario) {
+        if (this.readyState === MockEventSource.CLOSED) return;
+        this.readyState = MockEventSource.OPEN;
+        const openEvent = new Event('open');
+        this.dispatchEvent(openEvent);
+        this.onopen?.(openEvent);
+
+        if (this.url.endsWith('/api/generate/jobs/events')) {
+          this.dispatchMessage('jobs', currentConfig.globalJobs || []);
+          return;
+        }
+
+        const match = this.url.match(/\/api\/generate\/(job-[^/]+)\/events$/);
+        if (!match) return;
+        const jobId = match[1];
+        const mode = currentConfig.perJobModes?.[jobId] || 'terminal';
+        if (mode === 'disconnect') {
+          this.readyState = MockEventSource.CONNECTING;
+          this.onerror?.(new Event('error'));
+          return;
+        }
+        if (mode === 'hold') return;
+        if (mode === 'delayed') {
+          setTimeout(() => {
+            if (this.readyState !== MockEventSource.CLOSED) this.dispatchMessage('job', currentConfig.perJobEvents?.[jobId]);
+          }, 300);
+          return;
+        }
+        this.dispatchMessage('job', currentConfig.perJobEvents?.[jobId]);
+      }
+
+      private dispatchMessage(eventName: string, payload: unknown) {
+        const event = new MessageEvent(eventName, { data: JSON.stringify(payload) });
+        this.dispatchEvent(event);
+      }
+
+      close() {
+        if (this.readyState === MockEventSource.CLOSED) return;
+        this.readyState = MockEventSource.CLOSED;
+        state.closed.push(this.url);
+      }
+    }
+
+    (window as Window & { __eventSourceScenario?: typeof state }).__eventSourceScenario = state;
+    window.EventSource = MockEventSource as unknown as typeof EventSource;
+  }, scenario);
+}
+
 test('empty quantity falls back to 1 on generate', async ({ page }) => {
   await loadApp(page);
 
@@ -86,11 +160,10 @@ test('multi-image job results can be previewed individually', async ({ page }) =
 });
 
 test('initial load resumes only the newest active job and shows its result', async ({ page }) => {
-  const polledJobIds: string[] = [];
+  const perJobEventRequests: string[] = [];
   page.on('request', (request) => {
-    if (request.method() !== 'GET') return;
-    const match = new URL(request.url()).pathname.match(/^\/api\/generate\/(job-[^/]+)$/);
-    if (match) polledJobIds.push(match[1]);
+    const pathname = new URL(request.url()).pathname;
+    if (/^\/api\/generate\/(?!jobs\/)[^/]+\/events$/.test(pathname)) perJobEventRequests.push(pathname);
   });
 
   await loadApp(page, {
@@ -103,10 +176,11 @@ test('initial load resumes only the newest active job and shows its result', asy
   const preview = page.locator('section').filter({ has: page.getByRole('heading', { name: 'Preview' }) });
   await expect(preview.getByRole('img', { name: 'Generated preview' })).toBeVisible();
   await expect(preview.getByRole('link', { name: 'Download' })).toHaveAttribute('href', '/api/download/img-1.png');
-  await expect.poll(() => polledJobIds).toEqual(['job-newest']);
+  await expect.poll(() => perJobEventRequests).toContain('/api/generate/job-newest/events');
+  expect(perJobEventRequests).not.toContain('/api/generate/job-older/events');
 });
 
-test('successful jobs refresh page one lightly without opening a per-job event stream', async ({ page }) => {
+test('successful jobs refresh page one lightly after the current job event stream completes', async ({ page }) => {
   const galleryRefreshes: Array<Record<string, unknown>> = [];
   const perJobEventRequests: string[] = [];
   page.on('request', (request) => {
@@ -131,7 +205,78 @@ test('successful jobs refresh page one lightly without opening a per-job event s
     include_counts: false,
     include_filter_options: false
   });
-  expect(perJobEventRequests).toEqual([]);
+  expect(perJobEventRequests).toEqual(['/api/generate/job-generated/events']);
+});
+
+test('a healthy global feed still lets the current job stream deliver the terminal preview', async ({ page }) => {
+  const generatedJob = job('job-generated', 'global active list prompt');
+  const galleryRefreshes: Array<Record<string, unknown>> = [];
+  await installEventSourceScenario(page, {
+    globalJobs: [{ ...generatedJob, status: 'running', stage: 'waiting_for_api' }],
+    perJobEvents: { 'job-generated': generatedJob }
+  });
+  page.on('request', (request) => {
+    if (request.method() === 'POST' && new URL(request.url()).pathname === '/api/gallery/search') {
+      galleryRefreshes.push(request.postDataJSON() as Record<string, unknown>);
+    }
+  });
+  await loadApp(page, { generatedJob });
+
+  await page.getByRole('textbox', { name: 'Prompt', exact: true }).fill('global active list prompt');
+  await page.getByRole('button', { name: 'Generate', exact: true }).click();
+
+  await expect(page.getByRole('img', { name: 'Generated preview' })).toBeVisible();
+  await expect.poll(() => galleryRefreshes.length).toBe(1);
+  const sourceState = await page.evaluate(() => (window as Window & { __eventSourceScenario?: { opened: string[]; closed: string[] } }).__eventSourceScenario);
+  expect(sourceState?.opened).toContain('/api/generate/job-generated/events');
+  expect(sourceState?.closed).toContain('/api/generate/job-generated/events');
+});
+
+test('a failed job stream falls back to precise terminal polling', async ({ page }) => {
+  const generatedJob = job('job-generated', 'disconnected stream prompt');
+  const polledJobIds: string[] = [];
+  await installEventSourceScenario(page, {
+    perJobModes: { 'job-generated': 'disconnect' }
+  });
+  page.on('request', (request) => {
+    if (request.method() !== 'GET') return;
+    const match = new URL(request.url()).pathname.match(/^\/api\/generate\/(job-[^/]+)$/);
+    if (match) polledJobIds.push(match[1]);
+  });
+  await loadApp(page, { generatedJob });
+
+  await page.getByRole('textbox', { name: 'Prompt', exact: true }).fill('disconnected stream prompt');
+  await page.getByRole('button', { name: 'Generate', exact: true }).click();
+
+  await expect(page.getByRole('img', { name: 'Generated preview' })).toBeVisible();
+  await expect.poll(() => polledJobIds).toContain('job-generated');
+  const sourceState = await page.evaluate(() => (window as Window & { __eventSourceScenario?: { opened: string[]; closed: string[] } }).__eventSourceScenario);
+  expect(sourceState?.closed).toContain('/api/generate/job-generated/events');
+});
+
+test('submitting a second job closes the first stream before its result can update Preview', async ({ page }) => {
+  const firstJob = job('job-first', 'first prompt', 'success');
+  const secondJob = job('job-second', 'second prompt');
+  await installEventSourceScenario(page, {
+    perJobModes: { 'job-first': 'delayed', 'job-second': 'terminal' },
+    perJobEvents: { 'job-first': firstJob, 'job-second': secondJob }
+  });
+  await loadApp(page, { generatedJobs: [firstJob, secondJob] });
+
+  await page.getByRole('textbox', { name: 'Prompt', exact: true }).fill('first prompt');
+  await page.getByRole('button', { name: 'Generate', exact: true }).click();
+  await expect(page.getByRole('status')).toBeVisible();
+  const preview = page.locator('section').filter({ has: page.getByRole('heading', { name: 'Preview' }) });
+  await preview.getByRole('button', { name: 'Clear', exact: true }).click();
+
+  await page.getByRole('textbox', { name: 'Prompt', exact: true }).fill('second prompt');
+  await page.getByRole('button', { name: 'Generate', exact: true }).click();
+  await expect(page.getByRole('img', { name: 'Generated preview' })).toBeVisible();
+  await expect(page.getByText('second prompt', { exact: true })).toBeVisible();
+
+  const sourceState = await page.evaluate(() => (window as Window & { __eventSourceScenario?: { opened: string[]; closed: string[] } }).__eventSourceScenario);
+  expect(sourceState?.closed).toContain('/api/generate/job-first/events');
+  expect(sourceState?.opened).toContain('/api/generate/job-second/events');
 });
 
 test('successful jobs keep a later gallery page in place and announce new images', async ({ page }) => {
