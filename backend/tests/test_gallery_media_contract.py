@@ -1,11 +1,32 @@
+from urllib.parse import parse_qs, urlsplit
+
 from backend.tests.support.contract import *  # noqa: F403
+
+
+def _assert_signed_media_url(url: str, base_url: str, path_suffix: str) -> None:
+    parsed = urlsplit(url)
+    base = urlsplit(base_url)
+    assert (parsed.scheme, parsed.netloc) == (base.scheme, base.netloc)
+    assert parsed.path == f"{base.path.rstrip('/')}/{path_suffix}"
+    query = parse_qs(parsed.query)
+    assert query.get("exp")
+    assert query.get("sig")
+
 
 def test_gallery_slow_query_logs_filters_page_and_total(client, caplog):
     _fake_gallery_entry("gallery-slow", "slow query prompt", "1024x1024", "gallery-slow.png")
     config.SLOW_GALLERY_QUERY_MS = 0
 
     with caplog.at_level(logging.WARNING, logger="backend.app.api.routers.gallery"):
-        resp = client.get("/api/gallery?prompt=slow&page=1&page_size=1&include_total_bytes=true")
+        resp = client.post(
+            "/api/gallery/search",
+            json={
+                "prompt": "slow",
+                "page": 1,
+                "page_size": 1,
+                "include_total_bytes": True,
+            },
+        )
 
     assert resp.status_code == 200
     assert resp.json()["total"] == 1
@@ -332,16 +353,32 @@ def test_gallery_filter_options_are_materialized_and_incremental(client):
 def test_public_image_and_thumbnail_base_urls_are_returned(client):
     config.PUBLIC_IMAGE_BASE_URL = "https://cdn.example.com/images"
     config.PUBLIC_THUMBNAIL_BASE_URL = "https://cdn.example.com/thumbs"
+    config.CDN_SIGNING_SECRET = "test-cdn-signing-secret-32-bytes!!"
 
     entry = _fake_gallery_entry("public-url", "public", "1024x1024", "public url.png")
-    assert entry.image_url == "https://cdn.example.com/images/public%20url.png"
-    assert entry.thumbnail_url.startswith("https://cdn.example.com/thumbs/")
-    assert entry.thumbnail_url.endswith(".webp")
+    _assert_signed_media_url(
+        entry.image_url,
+        "https://cdn.example.com/images",
+        "public%20url.png",
+    )
+    assert entry.thumbnail_url is not None
+    thumbnail_path = urlsplit(entry.thumbnail_url).path
+    assert thumbnail_path.startswith("/thumbs/")
+    assert thumbnail_path.endswith(".webp")
+    _assert_signed_media_url(
+        entry.thumbnail_url,
+        "https://cdn.example.com/thumbs",
+        thumbnail_path.removeprefix("/thumbs/"),
+    )
 
     gallery = client.get("/api/gallery")
     assert gallery.status_code == 200
     image = gallery.json()["images"][0]
-    assert image["image_url"] == "https://cdn.example.com/images/public%20url.png"
+    _assert_signed_media_url(
+        image["image_url"],
+        "https://cdn.example.com/images",
+        "public%20url.png",
+    )
     assert image["thumbnail_url"].startswith("https://cdn.example.com/thumbs/")
 
     resp = client.post(
@@ -762,6 +799,7 @@ def test_gallery_sync_job_accepts_enabled_r2_env_defaults(tmp_path, monkeypatch)
     monkeypatch.setenv("R2_SECRET_ACCESS_KEY", "env-r2-secret")
     config.R2_BACKUP_ENABLED = True
     config.R2_ENDPOINT_URL = "https://account.r2.cloudflarestorage.com"
+    config.R2_ENDPOINT_HOST_ALLOWLIST = "account.r2.cloudflarestorage.com"
     config.R2_BUCKET_NAME = "env-image-backups"
     config.R2_REGION = "auto"
     config.R2_KEY_PREFIX = "gallery-env/"
@@ -773,8 +811,8 @@ def test_gallery_sync_job_accepts_enabled_r2_env_defaults(tmp_path, monkeypatch)
     def fake_sync(settings, entries, *, total_count, progress_cb=None, client_factory=None):
         assert settings["enabled"] is True
         assert settings["bucket_name"] == "env-image-backups"
-        assert settings["access_key_id"] == "${R2_ACCESS_KEY_ID}"
-        assert settings["secret_access_key"] == "${R2_SECRET_ACCESS_KEY}"
+        assert settings["access_key_id"] == "builtin-r2-access-key-id"
+        assert settings["secret_access_key"] == "builtin-r2-secret-access-key"
         assert len(list(entries)) == 1
         return r2_sync.R2SyncResult(total_count=total_count, compared_count=1)
 
@@ -955,7 +993,7 @@ def test_gallery_prompt_search_uses_fts_and_short_like_fallback(client):
     _fake_gallery_entry("fts-1", "alpha needle beta", "1024x1024", "fts-1.png")
     _fake_gallery_entry("fts-2", "unrelated prompt", "1024x1024", "fts-2.png")
 
-    fts = client.get("/api/gallery", params={"prompt": "needle"})
+    fts = client.post("/api/gallery/search", json={"prompt": "needle"})
     assert fts.status_code == 200
     assert [image["id"] for image in fts.json()["images"]] == ["fts-1"]
 
@@ -970,7 +1008,7 @@ def test_gallery_prompt_search_uses_fts_and_short_like_fallback(client):
         ).fetchall()
         assert rows
 
-    short_fallback = client.get("/api/gallery", params={"prompt": "al"})
+    short_fallback = client.post("/api/gallery/search", json={"prompt": "al"})
     assert short_fallback.status_code == 200
     assert [image["id"] for image in short_fallback.json()["images"]] == ["fts-1"]
 

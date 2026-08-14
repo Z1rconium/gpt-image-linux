@@ -376,6 +376,40 @@ def test_batch_nodeimage_upload_accepts_filtered_selection_token(client, monkeyp
     }
 
 
+def test_batch_nodeimage_upload_rejects_selection_token_over_limit(
+    client,
+    monkeypatch,
+):
+    for index in range(3):
+        _fake_gallery_entry(
+            f"node-token-limit-{index}",
+            "nodeimage token over limit",
+            "1024x1024",
+            f"node-token-limit-{index}.png",
+        )
+
+    async def fail_upload(_image_bytes, _filename, _effective):
+        raise AssertionError("NodeImage upload should not start over the batch cap")
+
+    monkeypatch.setattr(gallery_batch, "NODEIMAGE_BATCH_MAX", 2)
+    monkeypatch.setattr(gallery_batch, "upload_image_bytes", fail_upload)
+    token_response = client.post(
+        "/api/gallery/batch/selection-tokens",
+        json={"filters": {"prompt": "nodeimage token over limit"}},
+    )
+    assert token_response.status_code == 201
+    assert token_response.json()["count"] == 3
+
+    response = client.post(
+        "/api/gallery/batch/nodeimage-upload",
+        json={"selection_token": token_response.json()["selection_token"]},
+    )
+
+    assert response.status_code == 422
+    assert "at most 2 images" in response.json()["detail"]
+    assert "selected 3" in response.json()["detail"]
+
+
 def test_nodeimage_settings_round_trip_and_secret_origin_binding(client):
     current = client.get("/api/settings").json()
     assert current["nodeimage"]["enabled"] is False
@@ -454,11 +488,13 @@ class _ResponseContent:
     def __init__(self, payload):
         self.payload = (
             payload
-            if isinstance(payload, bytes)
+            if isinstance(payload, (bytes, Exception))
             else json.dumps(payload).encode("utf-8")
         )
 
     async def iter_chunked(self, _size):
+        if isinstance(self.payload, Exception):
+            raise self.payload
         yield self.payload
 
 
@@ -611,11 +647,11 @@ def test_nodeimage_client_retries_5xx_with_auth_text(monkeypatch):
     assert len(session.calls) == 2
 
 
-def test_nodeimage_client_retries_network_error_once(monkeypatch):
+def test_nodeimage_client_retries_connect_error_once(monkeypatch):
     effective = nodeimage_client.NodeImageEffectiveSettings(True, "test-key")
     session = _Session(
         [
-            aiohttp.ClientConnectionError("temporary"),
+            aiohttp.ClientConnectorError(None, OSError("temporary")),
             _Response(
                 200,
                 {
@@ -639,6 +675,45 @@ def test_nodeimage_client_retries_network_error_once(monkeypatch):
     )
     assert result.url.endswith("network.png")
     assert len(session.calls) == 2
+
+
+def test_nodeimage_client_does_not_retry_ambiguous_network_errors(monkeypatch):
+    effective = nodeimage_client.NodeImageEffectiveSettings(True, "test-key")
+
+    async def no_sleep(_delay):
+        raise AssertionError("ambiguous network failures must not be retried")
+
+    monkeypatch.setattr(nodeimage_client.asyncio, "sleep", no_sleep)
+
+    client_error_session = _Session([aiohttp.ClientConnectionError("temporary")])
+    monkeypatch.setattr(
+        nodeimage_client,
+        "get_pool",
+        lambda: _Pool(client_error_session),
+    )
+    with pytest.raises(
+        nodeimage_client.NodeImageUploadError,
+        match="upload request failed",
+    ):
+        asyncio.run(
+            nodeimage_client.upload_image_bytes(PNG_BYTES, "client-error.png", effective)
+        )
+    assert len(client_error_session.calls) == 1
+
+    timeout_session = _Session([_Response(200, asyncio.TimeoutError())])
+    monkeypatch.setattr(
+        nodeimage_client,
+        "get_pool",
+        lambda: _Pool(timeout_session),
+    )
+    with pytest.raises(
+        nodeimage_client.NodeImageUploadError,
+        match="unreadable response",
+    ):
+        asyncio.run(
+            nodeimage_client.upload_image_bytes(PNG_BYTES, "timeout.png", effective)
+        )
+    assert len(timeout_session.calls) == 1
 
 
 def test_nodeimage_client_rejects_unsafe_direct_link(monkeypatch):

@@ -126,6 +126,41 @@ from ...services.gallery_maintenance import kick_gallery_file_gc
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+NODEIMAGE_BATCH_MAX = 200
+
+
+def _raise_nodeimage_batch_too_large(requested_count: int) -> None:
+    raise HTTPException(
+        status_code=422,
+        detail=(
+            "NodeImage batch upload supports at most "
+            f"{NODEIMAGE_BATCH_MAX} images per request; selected "
+            f"{requested_count}. Please split the selection into smaller batches."
+        ),
+    )
+
+
+async def _resolve_nodeimage_batch_ids(
+    req: GalleryBatchRequest,
+) -> tuple[list[str], list[GalleryEntry], int, list[str]]:
+    if req.selection_token:
+        filters = await _gallery_filters_from_selection_token(req.selection_token)
+        requested_count = await asyncio.to_thread(get_gallery_count, filters)
+        if requested_count > NODEIMAGE_BATCH_MAX:
+            _raise_nodeimage_batch_too_large(requested_count)
+        if requested_count <= 0:
+            return [], [], 0, []
+        ids = await asyncio.to_thread(get_gallery_ids, filters)
+        if len(ids) > NODEIMAGE_BATCH_MAX:
+            _raise_nodeimage_batch_too_large(len(ids))
+        entries = await asyncio.to_thread(get_gallery_entries_by_ids, ids)
+        missing_ids = _missing_gallery_ids(ids, entries)
+        return ids, entries, len(ids), missing_ids
+
+    ids, entries, requested_count, missing_ids = await _resolve_gallery_batch_ids(req)
+    if requested_count > NODEIMAGE_BATCH_MAX:
+        _raise_nodeimage_batch_too_large(requested_count)
+    return ids, entries, requested_count, missing_ids
 
 @router.post("/api/gallery/batch/selection-tokens", response_model=GallerySelectionTokenResponse, status_code=201)
 async def create_gallery_batch_selection_token(req: GallerySelectionTokenRequest):
@@ -261,7 +296,7 @@ async def download_gallery_batch(req: GalleryBatchRequest):
     response_model=NodeImageBatchUploadResponse,
 )
 async def upload_gallery_batch_to_nodeimage(req: GalleryBatchRequest):
-    ids, entries, requested_count, missing_ids = await _resolve_gallery_batch_ids(req)
+    ids, entries, requested_count, missing_ids = await _resolve_nodeimage_batch_ids(req)
     if not entries:
         raise HTTPException(status_code=404, detail="Gallery entries not found")
 

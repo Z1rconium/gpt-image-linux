@@ -21,6 +21,10 @@ NODEIMAGE_API_URL = "https://api.nodeimage.com"
 NODEIMAGE_UPLOAD_URL = f"{NODEIMAGE_API_URL}/api/upload"
 NODEIMAGE_HOST_ALLOWLIST = "api.nodeimage.com"
 MAX_NODEIMAGE_RESPONSE_BYTES = 2 * 1024 * 1024
+RETRYABLE_CONNECT_ERRORS = (
+    aiohttp.ClientConnectorError,
+    aiohttp.ClientProxyConnectionError,
+)
 
 
 class NodeImageConfigurationError(ValueError):
@@ -152,7 +156,6 @@ async def upload_image_bytes(
     safe_filename = Path(str(filename or "image.png")).name or "image.png"
     content_type = mimetypes.guess_type(safe_filename)[0] or "application/octet-stream"
     headers = {"X-API-Key": effective.api_key}
-    last_error: Exception | None = None
 
     for attempt in range(2):
         form = aiohttp.FormData()
@@ -175,7 +178,6 @@ async def upload_image_bytes(
                 try:
                     payload = await _read_response_json(response)
                 except NodeImageUploadError as exc:
-                    last_error = exc
                     if response.status >= 500 and attempt == 0:
                         await asyncio.sleep(0.2)
                         continue
@@ -183,11 +185,10 @@ async def upload_image_bytes(
 
                 message = _error_text(payload, response.status, effective.api_key)
                 if response.status >= 500:
-                    last_error = NodeImageUploadError(message)
                     if attempt == 0:
                         await asyncio.sleep(0.2)
                         continue
-                    raise last_error
+                    raise NodeImageUploadError(message)
                 if _is_auth_error(message):
                     raise NodeImageAuthError("NodeImage API key was rejected.")
                 if response.status >= 400 or payload.get("success") is False:
@@ -207,17 +208,14 @@ async def upload_image_bytes(
                 return NodeImageUploadResult(url=direct, markdown=markdown)
         except NodeImageAuthError:
             raise
-        except NodeImageUploadError as exc:
-            last_error = exc
-            if attempt == 0 and str(exc) == "NodeImage returned an unreadable response.":
-                await asyncio.sleep(0.2)
-                continue
+        except NodeImageUploadError:
             raise
-        except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
-            last_error = exc
+        except RETRYABLE_CONNECT_ERRORS as exc:
             if attempt == 0:
                 await asyncio.sleep(0.2)
                 continue
             raise NodeImageUploadError("NodeImage upload request failed.") from exc
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
+            raise NodeImageUploadError("NodeImage upload request failed.") from exc
 
-    raise NodeImageUploadError("NodeImage upload request failed.") from last_error
+    raise NodeImageUploadError("NodeImage upload request failed.")
