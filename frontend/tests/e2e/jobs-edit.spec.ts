@@ -85,6 +85,27 @@ test('multi-image job results can be previewed individually', async ({ page }) =
   await expect(preview.getByRole('link', { name: 'Download' })).toHaveAttribute('href', '/api/download/multi-2.png');
 });
 
+test('initial load resumes only the newest active job and shows its result', async ({ page }) => {
+  const polledJobIds: string[] = [];
+  page.on('request', (request) => {
+    if (request.method() !== 'GET') return;
+    const match = new URL(request.url()).pathname.match(/^\/api\/generate\/(job-[^/]+)$/);
+    if (match) polledJobIds.push(match[1]);
+  });
+
+  await loadApp(page, {
+    runningJobs: [
+      { ...job('job-newest', 'newest active prompt', 'running'), updated_at: '2026-05-18T12:02:00Z' },
+      { ...job('job-older', 'older active prompt', 'running'), updated_at: '2026-05-18T12:01:00Z' }
+    ]
+  });
+
+  const preview = page.locator('section').filter({ has: page.getByRole('heading', { name: 'Preview' }) });
+  await expect(preview.getByRole('img', { name: 'Generated preview' })).toBeVisible();
+  await expect(preview.getByRole('link', { name: 'Download' })).toHaveAttribute('href', '/api/download/img-1.png');
+  await expect.poll(() => polledJobIds).toEqual(['job-newest']);
+});
+
 test('successful jobs refresh page one lightly without opening a per-job event stream', async ({ page }) => {
   const galleryRefreshes: Array<Record<string, unknown>> = [];
   const perJobEventRequests: string[] = [];
@@ -191,7 +212,7 @@ test('job history clear removes persisted history rows', async ({ page }) => {
   await expect(jobsDrawer.getByText('saved prompt', { exact: true })).toBeHidden();
 });
 
-test('uploaded edit sources append, submit, and clear', async ({ page }) => {
+test('uploaded edit sources route to edits and clearing restores generation', async ({ page }) => {
   await loadApp(page);
 
   const upload = page.getByLabel('Upload edit image');
@@ -214,8 +235,20 @@ test('uploaded edit sources append, submit, and clear', async ({ page }) => {
   await page.getByRole('button', { name: 'Clear edit sources' }).click();
   await expect(page.getByRole('button', { name: /Upload · first\.png/ })).toBeHidden();
   await expect(page.getByRole('button', { name: /Upload · second\.png/ })).toBeHidden();
-  await page.getByRole('button', { name: 'Edits' }).click();
-  await expect(page.getByText('Please upload an image or choose one from gallery first')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Generate', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Edits', exact: true })).toHaveCount(0);
+
+  const submitRequestPromise = page.waitForRequest((request) => {
+    const pathname = new URL(request.url()).pathname;
+    return (
+      request.method() === 'POST' &&
+      (pathname === '/api/generate' || pathname === '/api/edits' || pathname.startsWith('/api/edits/from-gallery/'))
+    );
+  });
+  await page.getByRole('button', { name: 'Generate', exact: true }).click();
+  const submitRequest = await submitRequestPromise;
+  expect(new URL(submitRequest.url()).pathname).toBe('/api/generate');
+  expect(submitRequest.postDataJSON()).toMatchObject({ prompt: 'browser upload edit prompt' });
 });
 
 test('pasted clipboard images become edit sources outside editable controls', async ({ page }) => {

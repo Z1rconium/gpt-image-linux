@@ -21,7 +21,7 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
   import { accessStore } from '$lib/stores/access';
   import { assistantStore, isAbortError } from '$lib/stores/assistant';
   import { confirmStore } from '$lib/stores/confirm';
-  import { editSourceStore, MAX_EDIT_SOURCE_IMAGES } from '$lib/stores/editSource';
+  import { editSourceCount, editSourceStore, MAX_EDIT_SOURCE_IMAGES } from '$lib/stores/editSource';
   import { galleryActivityStore, galleryStore } from '$lib/stores/gallery';
   import { jobsStore } from '$lib/stores/jobs';
   import { lightboxStore } from '$lib/stores/lightbox';
@@ -83,6 +83,7 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
   let gallerySuccessRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   const handledTerminalJobIds = new Set<string>();
   const panelFocusTargets: Partial<Record<LazyPanel, HTMLElement>> = {};
+  $: hasEditSource = editSourceCount($editSourceStore) > 0;
   const urlSync = createUrlSyncScheduler((mode) => {
     writePageUrl(
       {
@@ -157,6 +158,8 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
 
   async function loadInitialData() {
     await Promise.all([settingsStore.loadSettings(), jobsStore.loadJobs(), applyUrlStateToApp()]);
+    const activeJob = $jobsStore.jobs[0];
+    if (activeJob) trackJob(activeJob.job_id);
     urlSync.setReady();
     urlSync.flush();
     jobsStore.startJobsEvents();
@@ -508,6 +511,11 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
       trackJob,
       jobsStore.shouldRefreshJobsAfterSubmit() ? jobsStore.loadJobs : undefined
     );
+  }
+
+  function submitPrompt() {
+    if (hasEditSource) editImage();
+    else generateImage();
   }
 
   async function planEdit() {
@@ -1216,8 +1224,8 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
     optimizerEnabled={optimizerAvailable}
     editPlannerEnabled={aiAssistantAvailable}
     editPlanning={$assistantStore.editPlanLoading}
-    onGenerate={generateImage}
-    onEdit={editImage}
+    onSubmit={submitPrompt}
+    {hasEditSource}
     onPlanEdit={planEdit}
     onOptimize={optimizePrompt}
     onAppendPromptTag={appendPromptTag}

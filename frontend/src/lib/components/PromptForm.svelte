@@ -11,8 +11,8 @@
   export let optimizerEnabled = false;
   export let editPlannerEnabled = false;
   export let editPlanning = false;
-  export let onGenerate: () => void = () => {};
-  export let onEdit: () => void = () => {};
+  export let hasEditSource = false;
+  export let onSubmit: () => void = () => {};
   export let onOpenSize: () => void = () => {};
   export let onOptimize: () => void = () => {};
   export let onPlanEdit: () => void = () => {};
@@ -166,9 +166,6 @@
   <div class="mt-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
     <slot name="edit-source" />
     <div class="flex gap-2">
-      <button type="button" disabled={loading} class="ui-button-secondary px-4" on:click={onEdit}>
-        {$t.promptForm.edits}
-      </button>
       <button
         type="button"
         disabled={loading || editPlanning || !editPlannerEnabled || !form.prompt.trim()}
@@ -177,8 +174,8 @@
       >
         {editPlanning ? $t.promptForm.planningEdit : $t.promptForm.planEdit}
       </button>
-      <button type="button" disabled={loading} class="ui-button-primary px-4" on:click={onGenerate}>
-        {$t.promptForm.generate}
+      <button type="button" disabled={loading} class="ui-button-primary px-4" on:click={onSubmit}>
+        {hasEditSource ? $t.promptForm.edits : $t.promptForm.generate}
       </button>
     </div>
   </div>
