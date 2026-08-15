@@ -110,6 +110,14 @@ package.json
 ```bash
 cp .env.example .env
 # 編輯 .env：至少設定 ACCESS_KEY，並視需要填入預設上游 API
+# 建立不可登入的系統帳號，不授予應用程式以外的權限
+sudo useradd --system --user-group --home-dir /nonexistent --shell /usr/sbin/nologin gpt-image
+APP_UID="$(id -u gpt-image)"
+APP_GID="$(id -g gpt-image)"
+# 僅授予此帳號執行期 Bind Mount 的存取權
+sudo install -d -o "$APP_UID" -g "$APP_GID" -m 0750 images data data/logs
+sudo chown -R "$APP_UID:$APP_GID" images data
+sed -i "s/^PUID=.*/PUID=$APP_UID/; s/^PGID=.*/PGID=$APP_GID/" .env
 # 此範例透過迴環位址使用 HTTP，需要停用 Secure cookie
 ACCESS_COOKIE_SECURE=false docker-compose up -d --force-recreate
 ```
@@ -118,11 +126,20 @@ ACCESS_COOKIE_SECURE=false docker-compose up -d --force-recreate
 
 此本機 HTTP 範例需要設定 `ACCESS_COOKIE_SECURE=false`；透過 HTTPS 提供服務時應保持為 `true`。預設必須設定 `ACCESS_KEY`。僅在本機測試時，清空 `ACCESS_KEY` 並設定 `ALLOW_UNAUTHENTICATED=true`，這會讓所有非 health API 都不需要驗證。
 
+正式環境容器以 `.env` 中的 UID/GID（`PUID`/`PGID`）執行，且根檔案系統為唯讀。上述命令會建立不可登入的 `gpt-image` 系統帳號，並僅授予其 `images/`、`data/`（包括 `data/logs/`）的存取權。應用程式目錄保持唯讀；只有這些 Bind Mount 與受限的 `/tmp` tmpfs 可寫。若帳號已存在，請略過 `useradd` 命令並使用其 UID/GID。
+
 ### Docker
+
+下方命令假設已依上方 Docker Compose 步驟建立不可登入的 `gpt-image` 帳號，並設定執行期目錄的擁有者。
 
 ```bash
 docker build -t gpt-image-panel .
 docker run -d --name gpt-image-panel \
+  --user "$(id -u gpt-image):$(id -g gpt-image)" \
+  --read-only \
+  --security-opt no-new-privileges:true \
+  --cap-drop ALL \
+  --tmpfs /tmp:rw,noexec,nosuid,nodev,size=640m,mode=1777 \
   -p 127.0.0.1:9090:9090 \
   -e ACCESS_KEY=change-me \
   -e ACCESS_COOKIE_SECURE=false \
@@ -137,6 +154,7 @@ Docker Hub 速度過慢或無法存取時：
 docker build \
   --build-arg PYTHON_BASE_IMAGE=docker.m.daocloud.io/library/python:3.11-slim \
   --build-arg NODE_BASE_IMAGE=docker.m.daocloud.io/library/node:24-alpine \
+  --build-arg NGINX_BASE_IMAGE=docker.m.daocloud.io/library/nginx:alpine \
   -t gpt-image-panel .
 ```
 
@@ -156,7 +174,11 @@ panel.example.com {
 PUBLIC_ORIGIN=https://panel.example.com
 ALLOWED_HOSTS=panel.example.com
 ACCESS_COOKIE_SECURE=true
+TRUST_PROXY_HEADERS=true
+TRUSTED_PROXY_IPS=127.0.0.1/32
 ```
+
+`TRUSTED_PROXY_IPS` 必須識別 Caddy 連線至應用程式時的實際對端。只有 Caddy 與應用程式在同一主機執行時才保留迴環位址；容器化 Proxy 應填入 Caddy 容器或網路 CIDR。其他對端傳送的 Proxy Header 會被忽略。
 
 只有一個上游時，建議使用上面的基本反代設定。如果確實需要主動健康檢查，請先確認 `/health` 在相同 `Host` Request Header 下回傳 `200`，再使用複數形式的 `health_headers` 設定區塊：
 
@@ -238,6 +260,10 @@ ALLOW_UNAUTHENTICATED=true .venv/bin/granian --interface asgi backend.app.main:a
 | `MAX_ACTIVE_GENERATE_JOBS` | 全域執行中的生成/編輯 image unit 上限。 |
 | `MAX_QUEUED_GENERATE_JOBS` | 佇列容量；超過後的新工作會回傳 `429`。 |
 | `MAX_PENDING_EDIT_SOURCE_MB` | 全域待處理編輯來源圖片的位元組保留上限。 |
+| `MAX_FILE_SIZE_MB` / `EDIT_UPLOAD_MAX_MB` / `IMPORT_ARCHIVE_MAX_MB` | 單張圖片、編輯 Multipart 總量與 Gallery 匯入壓縮檔上限；編輯最多接受 8 個檔案。 |
+| `UPLOAD_INFLIGHT_MAX_MB` / `UPLOAD_INFLIGHT_PER_IP_MAX_MB` / `UPLOAD_RESERVATION_TTL_SECONDS` | 跨程序 SQLite 上傳位元組預約與過期 Lease 清理。 |
+| `ADMIN_MAX_FAILURES` / `ADMIN_LOCKOUT_SECONDS` | 獨立管理員二次驗證失敗門檻與依用戶端 IP 計算的鎖定時間。 |
+| `WEBHOOK_MAX_CONCURRENCY` / `WEBHOOK_QUEUE_MAX_SIZE` | 每個 Granian Worker 程序的固定投遞 Worker 與待處理 Webhook 佇列；佇列滿時會捨棄新投遞並增加捨棄指標。 |
 | `MAX_SSE_SUBSCRIBERS_GLOBAL` / `MAX_SSE_SUBSCRIBERS_PER_IP` / `SSE_CONNECTION_TTL_SECONDS` | SSE slot 限制與最長連線生命週期。 |
 | `IMAGES_DIR` | 圖片儲存目錄。 |
 | `THUMBNAILS_DIR` / `THUMBNAIL_*` | Gallery 縮圖儲存與產生控制。 |
@@ -255,6 +281,8 @@ ALLOW_UNAUTHENTICATED=true .venv/bin/granian --interface asgi backend.app.main:a
 Secret 欄位優先使用 `${ENV_VAR_NAME}` 參照。若要將純文字 Secret 儲存在 SQLite，必須明確設定 `ALLOW_PLAINTEXT_SECRETS=true`。
 
 Overall Config 會將 Override 持久化至 SQLite。部分設定可熱更新；需要重新啟動或僅影響建置的設定會在 UI 中標示。為了可重現部署，仍建議透過 `.env`/Compose 管理。
+
+Webhook 並行與佇列限制依程序生效。使用多個 `GRANIAN_WORKERS` 時，總投遞並行數與佇列容量會隨 Worker 數量線性增加。
 
 ## 使用方式
 
@@ -357,7 +385,7 @@ Overall Config 會將 Override 持久化至 SQLite。部分設定可熱更新；
   - SSRF 敏感 URL 處理應位於 Validator、Safe Connector 與整合 Client
   - 前端只能看到遮罩後的 Secret 或環境變數參照中繼資料
 - 保留目前的執行期限制：
-  - 編輯工作最多接受 16 張點陣來源圖片
+  - 編輯工作最多接受 8 張點陣來源圖片
   - Gallery ZIP 匯入/匯出沿用既有安全限制
   - SSE 使用具有全域/單一 IP 上限與 TTL 的 SQLite Slot Lease
   - R2 同步僅作備份；本機 SQLite 記錄與本機圖片檔案仍是唯一真實來源

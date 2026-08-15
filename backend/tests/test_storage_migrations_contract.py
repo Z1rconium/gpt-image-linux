@@ -261,7 +261,7 @@ def test_schema_migrations_are_recorded_and_idempotent(tmp_path):
         anchor_table = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE name = 'gallery_page_anchors'"
         ).fetchone()
-    assert [row["version"] for row in versions] == list(range(1, 16))
+    assert [row["version"] for row in versions] == list(range(1, 17))
     assert gallery_version["value"] == 0
     assert anchor_table is not None
 
@@ -390,7 +390,7 @@ def test_schema_migrations_upgrade_legacy_gallery_schema(tmp_path):
             "SELECT favorite, sort_seq, bytes, thumbnail_filename, completed_at, sha256 FROM gallery_entries WHERE id = 'legacy-1'"
         ).fetchone()
 
-    assert versions == list(range(1, 16))
+        assert versions == list(range(1, 17))
     assert {"favorite", "sort_seq", "bytes", "thumbnail_filename", "completed_at", "sha256"}.issubset(gallery_columns)
     assert {"default_model", "default_response_format"}.issubset(preset_columns)
     assert row["favorite"] == 0

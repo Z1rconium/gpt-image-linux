@@ -760,7 +760,7 @@ def test_edit_from_gallery_combines_uploaded_sources(client, monkeypatch):
     assert seen["filenames"] == ["gallery-combo.png", "upload.png"]
 
 
-def test_edit_rejects_more_than_16_sources(client):
+def test_edit_rejects_more_than_8_sources(client):
     resp = client.post(
         "/api/edits",
         data={
@@ -772,12 +772,38 @@ def test_edit_rejects_more_than_16_sources(client):
         },
         files=[
             ("image", (f"source-{index}.png", PNG_BYTES, "image/png"))
-            for index in range(17)
+            for index in range(9)
         ],
     )
 
     assert resp.status_code == 400
-    assert resp.json()["detail"] == "At most 16 edit source images are supported."
+    assert resp.json()["detail"] == "At most 8 edit source images are supported."
+
+
+def test_edit_rejects_zero_quantity(client):
+    response = client.post(
+        "/api/edits",
+        data={"prompt": "invalid quantity", "model": "gpt-image-2", "n": "0"},
+        files={"image": ("source.png", PNG_BYTES, "image/png")},
+    )
+
+    assert response.status_code == 422
+
+
+def test_gallery_edit_rejects_eight_uploaded_sources(client):
+    response = client.post(
+        "/api/edits/from-gallery/missing",
+        data={"prompt": "too many uploaded sources", "model": "gpt-image-2"},
+        files=[
+            ("image", (f"source-{index}.png", PNG_BYTES, "image/png"))
+            for index in range(8)
+        ],
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == (
+        "At most 7 uploaded edit source images are supported when editing from the gallery."
+    )
 
 
 def test_upstream_edit_api_sends_multiple_sources_as_image_array(client, tmp_path, monkeypatch):

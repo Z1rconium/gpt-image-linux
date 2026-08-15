@@ -198,42 +198,11 @@ def validate_job_webhook_url(webhook_url: str | None) -> str | None:
     return normalized_url
 
 
-def get_webhook_delivery_tasks() -> set[asyncio.Task]:
-    tasks = getattr(app.state, "webhook_delivery_tasks", None)
-    if not isinstance(tasks, set):
-        tasks = set()
-        app.state.webhook_delivery_tasks = tasks
-    return tasks
-
-
-def _track_webhook_delivery_task(task: asyncio.Task) -> asyncio.Task:
-    tasks = get_webhook_delivery_tasks()
-    tasks.add(task)
-
-    def discard(completed: asyncio.Task) -> None:
-        tasks.discard(completed)
-        if completed.cancelled():
-            return
-        try:
-            completed.result()
-        except Exception:
-            logger.warning("Webhook delivery task failed", exc_info=True)
-
-    task.add_done_callback(discard)
-    return task
-
-
-def _create_webhook_delivery_task(webhook_url: str, job: dict) -> asyncio.Task:
-    return _track_webhook_delivery_task(
-        asyncio.create_task(webhooks.deliver_webhook(webhook_url, public_generate_job(job)))
-    )
-
-
 def dispatch_job_webhook(job: dict):
     webhook_url = pop_generate_job_webhook(job["job_id"])
     if not webhook_url:
         return
-    _create_webhook_delivery_task(webhook_url, job)
+    webhooks.enqueue_webhook(app.state, webhook_url, public_generate_job(job))
 
 
 async def dispatch_job_webhook_async(job: dict):
@@ -243,7 +212,7 @@ async def dispatch_job_webhook_async(job: dict):
         metric_name="pop_generate_job_webhook",
     )
     if webhook_url:
-        _create_webhook_delivery_task(webhook_url, job)
+        webhooks.enqueue_webhook(app.state, webhook_url, public_generate_job(job))
 
 
 def build_job_update(job_id: str, updates: dict) -> dict:

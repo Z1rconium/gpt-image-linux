@@ -1,0 +1,10 @@
+aiohttp==3.14.1
+aiohttp-socks==0.11.0
+boto3==1.43.46
+botocore==1.43.46
+fastapi==0.139.0
+granian[reload,uvloop]==2.7.9
+pillow==12.3.0
+pydantic==2.13.4
+python-multipart==0.0.32
+zipstream-ng==1.9.2

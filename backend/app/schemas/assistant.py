@@ -2,6 +2,7 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
+from ..api.edit_limits import MAX_EDIT_SOURCE_IMAGES
 from .common import ApiPath, GalleryImportJobStatusValue, StrictRequestModel
 from .gallery import GalleryBatchRequest
 
@@ -174,7 +175,7 @@ class AssistantJobDiagnoseResponse(AssistantBaseResponse):
 
 class AssistantEditPlanRequest(StrictRequestModel):
     goal: str = Field(..., min_length=1, max_length=2000)
-    source_count: int = Field(default=0, ge=0, le=16)
+    source_count: int = Field(default=0, ge=0, le=MAX_EDIT_SOURCE_IMAGES)
     current_prompt: Optional[str] = Field(default=None, max_length=4000)
     target_size: Optional[str] = Field(default=None, max_length=40)
 
@@ -249,5 +250,4 @@ class AssistantGalleryBatchJobStatus(BaseModel):
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
     error: Optional[str] = None
-
 

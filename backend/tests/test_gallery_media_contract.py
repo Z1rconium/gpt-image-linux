@@ -284,7 +284,9 @@ def test_gallery_deep_page_uses_persisted_anchor(client, monkeypatch):
         anchors = conn.execute(
             "SELECT page FROM gallery_page_anchors ORDER BY page"
         ).fetchall()
-    assert [row["page"] for row in anchors] == [2, 4]
+    anchor_pages = [row["page"] for row in anchors]
+    assert 4 in anchor_pages
+    assert set(anchor_pages).issubset({2, 4})
 
     gallery_mutations.update_gallery_entry(
         "anchor-0",

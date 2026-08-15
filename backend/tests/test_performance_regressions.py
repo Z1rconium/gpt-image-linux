@@ -306,27 +306,39 @@ def test_gallery_page_query_uses_db_executor(monkeypatch):
     assert calls == [(gallery_queries_router.get_gallery_page, "get_gallery_page")]
 
 
-def test_webhook_delivery_tasks_are_strongly_tracked(monkeypatch):
+def test_webhook_delivery_uses_bounded_workers(monkeypatch):
     async def scenario() -> None:
-        job_events.app.state.webhook_delivery_tasks = set()
         started = asyncio.Event()
+        release = asyncio.Event()
+        monkeypatch.setattr(config, "WEBHOOK_MAX_CONCURRENCY", 1)
+        monkeypatch.setattr(config, "WEBHOOK_QUEUE_MAX_SIZE", 1)
 
         async def fake_deliver_webhook(webhook_url, job):
             started.set()
-            await asyncio.Event().wait()
+            await release.wait()
 
         monkeypatch.setattr(job_events.webhooks, "deliver_webhook", fake_deliver_webhook)
-
-        task = job_events._create_webhook_delivery_task(
+        job_events.webhooks.start_webhook_workers(job_events.app.state)
+        assert job_events.webhooks.enqueue_webhook(
+            job_events.app.state,
             "https://hooks.example.com/job",
             {"job_id": "job-1", "status": "success", "webhook_url": "secret"},
         )
         await started.wait()
-        assert task in job_events.get_webhook_delivery_tasks()
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
+        assert len(job_events.app.state.webhook_delivery_workers) == 1
+        assert job_events.webhooks.enqueue_webhook(
+            job_events.app.state,
+            "https://hooks.example.com/job",
+            {"job_id": "job-2", "status": "success"},
+        )
+        assert not job_events.webhooks.enqueue_webhook(
+            job_events.app.state,
+            "https://hooks.example.com/job",
+            {"job_id": "job-3", "status": "success"},
+        )
+        release.set()
         await asyncio.sleep(0)
-        assert task not in job_events.get_webhook_delivery_tasks()
+        await job_events.webhooks.stop_webhook_workers(job_events.app.state)
 
     asyncio.run(scenario())
 

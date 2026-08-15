@@ -4,21 +4,118 @@ import hmac
 import json
 import logging
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
 import aiohttp
 
 from ..core import settings as config
-from ..core.redaction import redact_sensitive_text
 from ..core import validators as ssrf
 from ..core.safe_connector import create_safe_connector
+from ..core.observability import metrics
 from ..core.utils import utc_now
 
 logger = logging.getLogger(__name__)
 
 WEBHOOK_USER_AGENT = "gpt-image-panel-webhook"
 _WEBHOOK_RESPONSE_MAX_BYTES = 64 * 1024  # 64 KB
+
+
+@dataclass(frozen=True)
+class WebhookDelivery:
+    webhook_url: str
+    job: dict[str, Any]
+
+
+def start_webhook_workers(app_state: Any) -> None:
+    queue: asyncio.Queue[WebhookDelivery] = asyncio.Queue(
+        maxsize=config.WEBHOOK_QUEUE_MAX_SIZE
+    )
+    app_state.webhook_delivery_queue = queue
+    app_state.webhook_delivery_accepting = True
+    app_state.webhook_delivery_semaphore = asyncio.Semaphore(
+        config.WEBHOOK_MAX_CONCURRENCY
+    )
+    app_state.webhook_delivery_workers = [
+        asyncio.create_task(_webhook_worker(app_state), name=f"webhook-worker-{index}")
+        for index in range(config.WEBHOOK_MAX_CONCURRENCY)
+    ]
+
+
+def enqueue_webhook(app_state: Any, webhook_url: str, job: dict[str, Any]) -> bool:
+    queue = getattr(app_state, "webhook_delivery_queue", None)
+    if not getattr(app_state, "webhook_delivery_accepting", False) or not isinstance(
+        queue, asyncio.Queue
+    ):
+        metrics.increment("webhooks.dropped.not_accepting")
+        logger.warning(
+            "Webhook delivery dropped: reason=not_accepting job_id=%s",
+            job.get("job_id"),
+        )
+        return False
+    try:
+        queue.put_nowait(WebhookDelivery(webhook_url, dict(job)))
+    except asyncio.QueueFull:
+        metrics.increment("webhooks.dropped.queue_full")
+        logger.warning(
+            "Webhook delivery dropped: reason=queue_full job_id=%s queue_max=%s",
+            job.get("job_id"),
+            config.WEBHOOK_QUEUE_MAX_SIZE,
+        )
+        return False
+    metrics.increment("webhooks.queued")
+    return True
+
+
+async def _webhook_worker(app_state: Any) -> None:
+    queue: asyncio.Queue[WebhookDelivery] = app_state.webhook_delivery_queue
+    semaphore: asyncio.Semaphore = app_state.webhook_delivery_semaphore
+    while True:
+        delivery = await queue.get()
+        try:
+            async with semaphore:
+                await deliver_webhook(delivery.webhook_url, delivery.job)
+            metrics.increment("webhooks.processed")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            metrics.increment("webhooks.failed.unexpected")
+            logger.warning(
+                "Webhook delivery worker failed: job_id=%s",
+                delivery.job.get("job_id"),
+                exc_info=True,
+            )
+        finally:
+            queue.task_done()
+
+
+async def stop_webhook_workers(app_state: Any) -> None:
+    app_state.webhook_delivery_accepting = False
+    queue = getattr(app_state, "webhook_delivery_queue", None)
+    if isinstance(queue, asyncio.Queue):
+        dropped = 0
+        while True:
+            try:
+                queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            else:
+                queue.task_done()
+                dropped += 1
+        if dropped:
+            metrics.increment("webhooks.dropped.shutdown", dropped)
+            logger.warning(
+                "Webhook deliveries dropped: reason=shutdown count=%s",
+                dropped,
+            )
+    workers = list(getattr(app_state, "webhook_delivery_workers", []))
+    for worker in workers:
+        if not worker.done():
+            worker.cancel()
+    if workers:
+        await asyncio.gather(*workers, return_exceptions=True)
+    app_state.webhook_delivery_workers = []
 
 
 async def _drain_response_limited(
@@ -133,7 +230,7 @@ async def deliver_webhook(webhook_url: str, job: dict[str, Any]):
                         return
                     last_error = f"HTTP {response.status}"
             except Exception as error:
-                last_error = redact_sensitive_text(str(error) or error.__class__.__name__)
+                last_error = error.__class__.__name__
 
             if attempt < attempts:
                 await asyncio.sleep(min(2 ** (attempt - 1), 4))

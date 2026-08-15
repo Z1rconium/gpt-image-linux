@@ -114,6 +114,14 @@ package.json
 ```bash
 cp .env.example .env
 # edit .env: set ACCESS_KEY and any default upstream API values you want
+# create a non-login system account with no application privileges
+sudo useradd --system --user-group --home-dir /nonexistent --shell /usr/sbin/nologin gpt-image
+APP_UID="$(id -u gpt-image)"
+APP_GID="$(id -g gpt-image)"
+# give that account access only to the runtime bind mounts
+sudo install -d -o "$APP_UID" -g "$APP_GID" -m 0750 images data data/logs
+sudo chown -R "$APP_UID:$APP_GID" images data
+sed -i "s/^PUID=.*/PUID=$APP_UID/; s/^PGID=.*/PGID=$APP_GID/" .env
 # this example uses plain HTTP on loopback, so disable Secure cookies
 ACCESS_COOKIE_SECURE=false docker-compose up -d --force-recreate
 ```
@@ -122,11 +130,20 @@ Open `http://127.0.0.1:9090`.
 
 This local HTTP example requires `ACCESS_COOKIE_SECURE=false`; keep it `true` when serving the panel over HTTPS. By default, `ACCESS_KEY` is required. For local-only testing, unset `ACCESS_KEY` and set `ALLOW_UNAUTHENTICATED=true`; this makes every non-health API route accessible.
 
+The production container is read-only and runs as the UID/GID in `.env` (`PUID`/`PGID`). The commands above create a non-login `gpt-image` system account and grant it access only to `images/` and `data/` (including `data/logs/`). The application directory remains read-only; only those bind mounts and the restricted `/tmp` tmpfs are writable. If the account already exists, omit the `useradd` command and reuse its UID/GID.
+
 ### Docker
+
+The command below assumes the non-login `gpt-image` account and runtime directory ownership created in the Docker Compose steps above.
 
 ```bash
 docker build -t gpt-image-panel .
 docker run -d --name gpt-image-panel \
+  --user "$(id -u gpt-image):$(id -g gpt-image)" \
+  --read-only \
+  --security-opt no-new-privileges:true \
+  --cap-drop ALL \
+  --tmpfs /tmp:rw,noexec,nosuid,nodev,size=640m,mode=1777 \
   -p 127.0.0.1:9090:9090 \
   -e ACCESS_KEY=change-me \
   -e ACCESS_COOKIE_SECURE=false \
@@ -141,6 +158,7 @@ If Docker Hub is slow or blocked:
 docker build \
   --build-arg PYTHON_BASE_IMAGE=docker.m.daocloud.io/library/python:3.11-slim \
   --build-arg NODE_BASE_IMAGE=docker.m.daocloud.io/library/node:24-alpine \
+  --build-arg NGINX_BASE_IMAGE=docker.m.daocloud.io/library/nginx:alpine \
   -t gpt-image-panel .
 ```
 
@@ -160,7 +178,11 @@ For an HTTPS deployment, set the matching application origin and Host allowlist 
 PUBLIC_ORIGIN=https://panel.example.com
 ALLOWED_HOSTS=panel.example.com
 ACCESS_COOKIE_SECURE=true
+TRUST_PROXY_HEADERS=true
+TRUSTED_PROXY_IPS=127.0.0.1/32
 ```
+
+`TRUSTED_PROXY_IPS` must identify the actual Caddy-to-application peer. Keep the loopback value only when Caddy runs on the same host; use the Caddy container/network CIDR for a containerized proxy. Headers from any other peer are ignored.
 
 The basic proxy is recommended when there is only one upstream. If active health checks are required, first confirm that `/health` returns `200` with the same `Host` header, then use the plural `health_headers` block:
 
@@ -242,6 +264,10 @@ Most runtime options live in `.env.example`. API presets, prompt optimizer, R2 b
 | `MAX_ACTIVE_GENERATE_JOBS` | Global running generation/edit image-unit limit. |
 | `MAX_QUEUED_GENERATE_JOBS` | Queue capacity before new jobs return `429`. |
 | `MAX_PENDING_EDIT_SOURCE_MB` | Global pending edit-source byte reservation cap. |
+| `MAX_FILE_SIZE_MB` / `EDIT_UPLOAD_MAX_MB` / `IMPORT_ARCHIVE_MAX_MB` | Per-image, total edit multipart, and Gallery import archive limits. Edits accept at most 8 files. |
+| `UPLOAD_INFLIGHT_MAX_MB` / `UPLOAD_INFLIGHT_PER_IP_MAX_MB` / `UPLOAD_RESERVATION_TTL_SECONDS` | Cross-process SQLite upload byte reservations and expired-lease cleanup. |
+| `ADMIN_MAX_FAILURES` / `ADMIN_LOCKOUT_SECONDS` | Independent administrator step-up failure threshold and per-client-IP lockout duration. |
+| `WEBHOOK_MAX_CONCURRENCY` / `WEBHOOK_QUEUE_MAX_SIZE` | Fixed delivery workers and pending webhook queue per Granian worker process. Full queues drop new deliveries and increment drop metrics. |
 | `MAX_SSE_SUBSCRIBERS_GLOBAL` / `MAX_SSE_SUBSCRIBERS_PER_IP` / `SSE_CONNECTION_TTL_SECONDS` | SSE slot limits and max connection lifetime. |
 | `IMAGES_DIR` | Saved image directory. |
 | `THUMBNAILS_DIR` / `THUMBNAIL_*` | Gallery thumbnail storage and generation controls. |
@@ -259,6 +285,8 @@ Most runtime options live in `.env.example`. API presets, prompt optimizer, R2 b
 Secret fields prefer `${ENV_VAR_NAME}` references. Literal secrets stored in SQLite require `ALLOW_PLAINTEXT_SECRETS=true`.
 
 Overall Config persists overrides in SQLite. Some settings are hot-reloaded; restart-required and build-only settings are marked in the UI and should still be changed through `.env`/Compose for reproducible deployments.
+
+Webhook concurrency and queue limits are process-local. With multiple `GRANIAN_WORKERS`, aggregate delivery concurrency and queue capacity increase linearly with the worker count.
 
 ## Usage
 
@@ -361,7 +389,7 @@ The public API surface is contract-tested; keep paths, methods, status codes, SS
   - SSRF-sensitive URL handling in validators, safe connector, and integration clients
   - secrets exposed to the frontend only as masked values or env-ref metadata
 - Preserve current runtime constraints:
-  - edits accept up to 16 raster source images
+  - edits accept up to 8 raster source images
   - gallery ZIP import/export keeps existing safety limits
   - SSE uses SQLite slot leases with global/per-IP caps and TTL
   - R2 sync is backup-only; local SQLite rows and local image files remain the source of truth

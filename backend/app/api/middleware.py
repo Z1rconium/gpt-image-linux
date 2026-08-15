@@ -1,3 +1,4 @@
+import asyncio
 from urllib.parse import urlsplit
 import re
 import logging
@@ -16,6 +17,12 @@ from ..core.redaction import redact_sensitive_text
 from ..core import security as auth
 from ..core import settings as config
 from ..core.observability import metrics
+from ..repositories.coordination import (
+    release_upload_reservation,
+    renew_upload_reservation,
+    reserve_upload_capacity,
+)
+from .body_limit import upload_reservation_policy
 
 
 logger = logging.getLogger(__name__)
@@ -49,6 +56,39 @@ _GZIP_BINARY_CONTENT_TYPES = {
     "application/pdf",
     "application/zip",
 }
+
+
+def _upload_reservation_renewal_interval_seconds(lease_ttl_seconds: int) -> float:
+    return max(1.0, float(lease_ttl_seconds) / 3.0)
+
+
+async def _maintain_upload_reservation(
+    reservation_id: str,
+    lease_ttl_seconds: int,
+) -> None:
+    interval = _upload_reservation_renewal_interval_seconds(lease_ttl_seconds)
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            renewed = await asyncio.to_thread(
+                renew_upload_reservation,
+                reservation_id,
+                lease_ttl_seconds=lease_ttl_seconds,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "Failed to renew active upload reservation id=%s",
+                reservation_id,
+            )
+            continue
+        if not renewed:
+            logger.warning(
+                "Active upload reservation disappeared before request completed id=%s",
+                reservation_id,
+            )
+            return
 
 
 def _is_gzip_text_content_type(value: str) -> bool:
@@ -523,9 +563,73 @@ def register_middleware(app):
                     "Admin re-authentication required",
                 )
 
+        upload_reservation_id = None
+        upload_reservation_renewal_task = None
+        upload_policy = upload_reservation_policy(
+            request.url.path,
+            request.headers.get("content-type", ""),
+        )
+        if upload_policy is not None and request.method.upper() == "POST":
+            route, route_max_bytes = upload_policy
+            content_length_raw = request.headers.get("content-length")
+            try:
+                declared_bytes = int(content_length_raw or "")
+            except (TypeError, ValueError):
+                declared_bytes = 0
+            reservation_bytes = (
+                declared_bytes
+                if 0 < declared_bytes <= route_max_bytes
+                else route_max_bytes
+            )
+            upload_reservation_id = uuid.uuid4().hex
+            reserved, reason = await asyncio.to_thread(
+                reserve_upload_capacity,
+                reservation_id=upload_reservation_id,
+                client_ip=auth.get_client_ip(request),
+                route=route,
+                byte_count=reservation_bytes,
+                max_total_bytes=config.UPLOAD_INFLIGHT_MAX_MB * 1024 * 1024,
+                max_per_ip_bytes=(
+                    config.UPLOAD_INFLIGHT_PER_IP_MAX_MB * 1024 * 1024
+                ),
+                lease_ttl_seconds=config.UPLOAD_RESERVATION_TTL_SECONDS,
+                import_rate_limit=(
+                    config.IMPORT_UPLOADS_PER_IP_PER_MINUTE
+                    if route == "import"
+                    else None
+                ),
+            )
+            if not reserved:
+                upload_reservation_id = None
+                if reason == "ip_rate":
+                    detail = "Too many import uploads from this IP"
+                elif reason == "ip_bytes":
+                    detail = "Upload in-flight limit exceeded for this IP"
+                else:
+                    detail = "Global upload in-flight limit exceeded"
+                return error_response(request, 429, "upload_capacity_exceeded", detail)
+            request.state.upload_reservation_id = upload_reservation_id
+            upload_reservation_renewal_task = asyncio.create_task(
+                _maintain_upload_reservation(
+                    upload_reservation_id,
+                    config.UPLOAD_RESERVATION_TTL_SECONDS,
+                )
+            )
+
         try:
             response = await call_next(request)
         finally:
+            if upload_reservation_renewal_task is not None:
+                upload_reservation_renewal_task.cancel()
+                try:
+                    await upload_reservation_renewal_task
+                except asyncio.CancelledError:
+                    pass
+            if upload_reservation_id:
+                await asyncio.to_thread(
+                    release_upload_reservation,
+                    upload_reservation_id,
+                )
             elapsed_ms = (time.perf_counter() - request_started_at) * 1000
             metrics.observe_ms("http.request", elapsed_ms)
 

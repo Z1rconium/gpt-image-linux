@@ -13,11 +13,16 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import APIRouter, Body, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Body, HTTPException, Request, UploadFile
+from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from ..api import presets
 from ..api.app_state import app
-from ..api.uploads import is_image_upload, resolve_upload_content_type
+from ..api.uploads import (
+    is_image_upload,
+    parse_limited_multipart,
+    resolve_upload_content_type,
+)
 from ..core import settings as config
 from ..core import validators as ssrf
 from ..core.utils import utc_now
@@ -116,11 +121,25 @@ async def _read_image_prompt_upload(image: UploadFile) -> bytes:
 
 
 async def prompt_from_uploaded_image(
-    image: UploadFile = File(...),
-    target_language: Literal["en", "zh-CN"] = Form("en"),
+    request: Request,
 ):
+    form = await parse_limited_multipart(
+        request,
+        max_files=1,
+        max_fields=1,
+        allowed_file_fields={"image"},
+    )
+    image = form.get("image")
+    if not isinstance(image, StarletteUploadFile):
+        raise HTTPException(status_code=422, detail="Upload image is required")
+    target_language = str(form.get("target_language") or "en")
+    if target_language not in {"en", "zh-CN"}:
+        raise HTTPException(status_code=422, detail="target_language must be 'en' or 'zh-CN'")
     runtime = await _resolve_runtime_async(vision=True)
-    image_bytes = await _read_image_prompt_upload(image)
+    try:
+        image_bytes = await _read_image_prompt_upload(image)
+    finally:
+        await image.close()
     try:
         preview = await asyncio.to_thread(
             assistant_client.prepare_vision_preview_bytes,
@@ -239,10 +258,23 @@ def _generated_image_mime_type(image_bytes: bytes) -> str:
 
 
 async def optimize_uploaded_image_prompt(
-    image: UploadFile = File(...),
-    prompt: str = Form(..., min_length=1, max_length=4000),
-    target_language: Literal["en", "zh-CN"] = Form("en"),
+    request: Request,
 ):
+    form = await parse_limited_multipart(
+        request,
+        max_files=1,
+        max_fields=2,
+        allowed_file_fields={"image"},
+    )
+    image = form.get("image")
+    if not isinstance(image, StarletteUploadFile):
+        raise HTTPException(status_code=422, detail="Upload image is required")
+    prompt = str(form.get("prompt") or "")
+    if len(prompt) > 4000:
+        raise HTTPException(status_code=422, detail="prompt must contain at most 4000 characters")
+    target_language = str(form.get("target_language") or "en")
+    if target_language not in {"en", "zh-CN"}:
+        raise HTTPException(status_code=422, detail="target_language must be 'en' or 'zh-CN'")
     normalized_prompt = prompt.strip()
     if not normalized_prompt:
         raise HTTPException(status_code=422, detail="prompt must not be empty")
@@ -251,7 +283,10 @@ async def optimize_uploaded_image_prompt(
     api_url, api_key, model, response_format, socks5_proxy = await asyncio.to_thread(
         _prompt_preview_generation_config
     )
-    image_bytes = await _read_image_prompt_upload(image)
+    try:
+        image_bytes = await _read_image_prompt_upload(image)
+    finally:
+        await image.close()
     try:
         target_preview = await asyncio.to_thread(
             assistant_client.prepare_vision_preview_bytes,

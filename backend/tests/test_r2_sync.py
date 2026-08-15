@@ -11,6 +11,7 @@ from backend.app.core.validators import (
 from backend.app.integrations.r2 import client as r2_client
 from backend.app.integrations.r2 import config as r2_config
 from backend.app.integrations.r2 import sync as r2_algorithm
+from backend.app.integrations.r2 import safe_session as r2_safe_session
 from backend.app.repositories import db as db_repo
 from backend.app.repositories.gallery import sync_state as gallery_sync_state
 
@@ -305,6 +306,85 @@ def test_r2_endpoint_allowlist_allows_public_custom_hostname(monkeypatch):
     monkeypatch.setattr(config, "R2_ENDPOINT_HOST_ALLOWLIST", "storage.example.com")
 
     assert normalize_r2_endpoint_url("https://storage.example.com") == "https://storage.example.com"
+
+
+def test_r2_safe_socket_filters_private_dns_and_connects_numeric_public_ip(monkeypatch):
+    connected = []
+
+    class FakeSocket:
+        def settimeout(self, value):
+            pass
+
+        def setsockopt(self, *option):
+            pass
+
+        def connect(self, address):
+            connected.append(address)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        r2_safe_session.socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [
+            (r2_safe_session.socket.AF_INET, r2_safe_session.socket.SOCK_STREAM, 6, "", ("10.0.0.5", 443)),
+            (r2_safe_session.socket.AF_INET6, r2_safe_session.socket.SOCK_STREAM, 6, "", ("2606:4700::1", 443, 0, 0)),
+            (r2_safe_session.socket.AF_INET, r2_safe_session.socket.SOCK_STREAM, 6, "", ("104.16.1.1", 443)),
+        ],
+    )
+    monkeypatch.setattr(r2_safe_session.socket, "socket", lambda *args: FakeSocket())
+    monkeypatch.setattr(r2_safe_session.sys, "audit", lambda *args: None)
+
+    connection = r2_safe_session.SafeR2AWSHTTPSConnection(
+        "account.r2.cloudflarestorage.com",
+        port=443,
+    )
+    connection._new_conn()
+
+    assert connected == [("2606:4700::1", 443, 0, 0)]
+    assert connection.host == "account.r2.cloudflarestorage.com"
+
+
+def test_r2_safe_socket_rejects_all_non_public_addresses_before_connect(monkeypatch):
+    monkeypatch.setattr(
+        r2_safe_session.socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [
+            (r2_safe_session.socket.AF_INET, r2_safe_session.socket.SOCK_STREAM, 6, "", ("127.0.0.1", 443)),
+            (r2_safe_session.socket.AF_INET6, r2_safe_session.socket.SOCK_STREAM, 6, "", ("fe80::1", 443, 0, 0)),
+        ],
+    )
+    monkeypatch.setattr(
+        r2_safe_session.socket,
+        "socket",
+        lambda *args: pytest.fail("socket must not be created for rejected addresses"),
+    )
+    with pytest.raises(r2_safe_session.R2UnsafeEndpointError, match="non-public"):
+        r2_safe_session.SafeR2AWSHTTPSConnection(
+            "account.r2.cloudflarestorage.com",
+            port=443,
+        )._new_conn()
+
+
+def test_r2_client_disables_environment_proxies(monkeypatch):
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9999")
+    effective = r2_config.R2EffectiveSettings(
+        enabled=True,
+        endpoint_url="https://account.r2.cloudflarestorage.com",
+        bucket_name="bucket",
+        region="auto",
+        key_prefix="gallery/",
+        access_key_id="access",
+        secret_access_key="secret",
+    )
+    client = r2_client._build_s3_client(effective)
+    try:
+        assert client.meta.config.proxies == {}
+        assert isinstance(client._endpoint.http_session, r2_safe_session.SafeR2URLLib3Session)
+        assert client._endpoint.http_session._proxy_config._proxies == {}
+    finally:
+        client.close()
 
 
 def test_r2_sync_uploads_only_missing_and_leaves_bucket_only_keys(image_dir):

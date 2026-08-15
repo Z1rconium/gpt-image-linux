@@ -1418,6 +1418,16 @@ def _ensure_database():
                 CREATE INDEX IF NOT EXISTS idx_access_failures_last_failed_at
                     ON access_failures(last_failed_at);
 
+                CREATE TABLE IF NOT EXISTS admin_failures (
+                    client_ip TEXT PRIMARY KEY,
+                    failure_count INTEGER NOT NULL DEFAULT 0,
+                    first_failed_at REAL NOT NULL,
+                    last_failed_at REAL NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_admin_failures_last_failed_at
+                    ON admin_failures(last_failed_at);
+
                 CREATE TABLE IF NOT EXISTS worker_metric_snapshots (
                     worker_id TEXT PRIMARY KEY,
                     snapshot_json TEXT NOT NULL,
@@ -1447,6 +1457,29 @@ def _ensure_database():
                     ON import_upload_reservations(lease_expires_at);
                 CREATE INDEX IF NOT EXISTS idx_import_upload_reservations_client
                     ON import_upload_reservations(client_ip, created_at);
+
+                CREATE TABLE IF NOT EXISTS upload_reservations (
+                    reservation_id TEXT PRIMARY KEY,
+                    client_ip TEXT NOT NULL,
+                    route TEXT NOT NULL,
+                    byte_count INTEGER NOT NULL,
+                    created_at REAL NOT NULL,
+                    lease_expires_at REAL NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_upload_reservations_expires
+                    ON upload_reservations(lease_expires_at);
+                CREATE INDEX IF NOT EXISTS idx_upload_reservations_client
+                    ON upload_reservations(client_ip, lease_expires_at);
+
+                CREATE TABLE IF NOT EXISTS import_upload_events (
+                    event_id TEXT PRIMARY KEY,
+                    client_ip TEXT NOT NULL,
+                    created_at REAL NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_import_upload_events_client
+                    ON import_upload_events(client_ip, created_at);
 
                 CREATE TABLE IF NOT EXISTS prompt_snippets (
                     id TEXT PRIMARY KEY,
@@ -1905,6 +1938,42 @@ def _migration_gallery_ai_metadata_schema(conn: sqlite3.Connection):
     )
 
 
+def _migration_security_resource_limits(conn: sqlite3.Connection):
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS admin_failures (
+            client_ip TEXT PRIMARY KEY,
+            failure_count INTEGER NOT NULL DEFAULT 0,
+            first_failed_at REAL NOT NULL,
+            last_failed_at REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_admin_failures_last_failed_at
+            ON admin_failures(last_failed_at);
+
+        CREATE TABLE IF NOT EXISTS upload_reservations (
+            reservation_id TEXT PRIMARY KEY,
+            client_ip TEXT NOT NULL,
+            route TEXT NOT NULL,
+            byte_count INTEGER NOT NULL,
+            created_at REAL NOT NULL,
+            lease_expires_at REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_upload_reservations_expires
+            ON upload_reservations(lease_expires_at);
+        CREATE INDEX IF NOT EXISTS idx_upload_reservations_client
+            ON upload_reservations(client_ip, lease_expires_at);
+
+        CREATE TABLE IF NOT EXISTS import_upload_events (
+            event_id TEXT PRIMARY KEY,
+            client_ip TEXT NOT NULL,
+            created_at REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_import_upload_events_client
+            ON import_upload_events(client_ip, created_at);
+        """
+    )
+
+
 SCHEMA_MIGRATIONS = (
     (1, "baseline_legacy_schema", _migration_baseline_legacy_schema),
     (2, "gallery_filter_options", _migration_gallery_filter_options),
@@ -1921,6 +1990,7 @@ SCHEMA_MIGRATIONS = (
     (13, "prompt_snippets_schema", _migration_prompt_snippets_schema),
     (14, "gallery_ai_metadata_schema", _migration_gallery_ai_metadata_schema),
     (15, "generate_job_counts", _migration_generate_job_counts),
+    (16, "security_resource_limits", _migration_security_resource_limits),
 )
 
 

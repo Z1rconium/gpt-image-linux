@@ -9,11 +9,13 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote
 
-from fastapi import APIRouter, Body, File, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Body, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from starlette.background import BackgroundTask
+from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from ..app_state import app
+from ..uploads import multipart_openapi_request_body, parse_limited_multipart
 from ...services.gallery_archive_export import (
     iter_gallery_zip_chunks,
     prepare_gallery_zip_chunks,
@@ -451,29 +453,48 @@ async def download_all_images(export_job_id: str | None = Query(default=None)):
     )
 
 
-@router.post("/api/import")
+@router.post(
+    "/api/import",
+    openapi_extra=multipart_openapi_request_body(
+        {"archive": {"type": "string", "format": "binary"}},
+        required=["archive"],
+    ),
+)
 async def import_gallery_archive(
     request: Request,
-    archive: UploadFile = File(...),
     async_job: bool = Query(default=False),
 ):
     del async_job
+    form = await parse_limited_multipart(
+        request,
+        max_files=1,
+        max_fields=0,
+        allowed_file_fields={"archive"},
+    )
+    archive = form.get("archive")
+    if not isinstance(archive, StarletteUploadFile):
+        raise HTTPException(status_code=422, detail="Import archive is required")
     reservation_id = uuid.uuid4().hex
     reservation_bytes = import_archive_max_bytes()
     lease_expires_at = (
         datetime.now(timezone.utc)
         + timedelta(seconds=config.IMPORT_UPLOAD_RESERVATION_TTL_SECONDS)
     ).isoformat()
-    reserved, reason = await asyncio.to_thread(
-        reserve_import_upload_capacity,
-        reservation_id=reservation_id,
-        client_ip=auth.get_client_ip(request),
-        byte_count=reservation_bytes,
-        max_total_bytes=config.IMPORT_TEMP_RESERVATION_MAX_MB * 1024 * 1024,
-        per_ip_limit=config.IMPORT_UPLOADS_PER_IP_PER_MINUTE,
-        lease_expires_at=lease_expires_at,
-    )
+    try:
+        reserved, reason = await asyncio.to_thread(
+            reserve_import_upload_capacity,
+            reservation_id=reservation_id,
+            client_ip=auth.get_client_ip(request),
+            byte_count=reservation_bytes,
+            max_total_bytes=config.IMPORT_TEMP_RESERVATION_MAX_MB * 1024 * 1024,
+            per_ip_limit=config.IMPORT_UPLOADS_PER_IP_PER_MINUTE,
+            lease_expires_at=lease_expires_at,
+        )
+    except BaseException:
+        await archive.close()
+        raise
     if not reserved:
+        await archive.close()
         if reason == "ip_rate":
             raise HTTPException(status_code=429, detail="Too many import uploads from this IP")
         raise HTTPException(status_code=429, detail="Import temporary storage is full")
@@ -510,6 +531,8 @@ async def import_gallery_archive(
         if temp_path:
             temp_path.unlink(missing_ok=True)
         raise
+    finally:
+        await archive.close()
     kick_gallery_job_dispatchers()
     return JSONResponse(
         status_code=202,

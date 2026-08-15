@@ -591,12 +591,12 @@ def test_json_body_limit_rejects_oversized_json(client):
 
 def test_edits_body_limit_matches_source_image_count(client):
     config.MAX_FILE_SIZE_MB = 2
+    config.EDIT_UPLOAD_MAX_MB = 200
     config.MAX_ACTIVE_GENERATE_JOBS = 20
 
-    assert body_limit._max_body_for_path("/api/edits", "multipart/form-data") == (
-        config.MAX_FILE_SIZE_MB * MAX_EDIT_SOURCE_IMAGES * 1024 * 1024
-        + EDIT_MULTIPART_METADATA_OVERHEAD_BYTES
-    )
+    assert body_limit._max_body_for_path(
+        "/api/edits", "multipart/form-data"
+    ) == config.EDIT_UPLOAD_MAX_MB * 1024 * 1024
 
 
 def test_request_models_forbid_extra_fields_and_require_prompt(client):

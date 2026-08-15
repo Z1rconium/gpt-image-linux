@@ -23,6 +23,7 @@ ProgressCallback = Callable[[dict[str, Any]], None]
 ClientFactory = Callable[["R2EffectiveSettings"], Any]
 SyncStateRecorder = Callable[[Iterable[dict[str, Any]]], None]
 from .config import *
+from .safe_session import install_safe_r2_http_session
 
 def _normalize_concurrency(value: Any | None = None) -> int:
     try:
@@ -45,7 +46,7 @@ def _build_s3_client(
             "boto3 is not installed. Install backend requirements before using R2 sync."
         ) from e
 
-    return boto3.client(
+    client = boto3.client(
         "s3",
         endpoint_url=effective.endpoint_url,
         region_name=effective.region,
@@ -53,8 +54,11 @@ def _build_s3_client(
         aws_secret_access_key=effective.secret_access_key,
         config=BotocoreConfig(
             max_pool_connections=_normalize_concurrency(max_pool_connections),
+            proxies={},
         ),
     )
+    install_safe_r2_http_session(client)
+    return client
 
 
 def _client_for(
@@ -134,4 +138,3 @@ def probe_r2_settings(
 
 
 __all__ = [name for name in globals() if not name.startswith("__")]
-

@@ -2,6 +2,7 @@
 
 import ipaddress
 import time
+import uuid
 
 from .db import *
 
@@ -144,6 +145,316 @@ def list_access_failures() -> list[dict[str, Any]]:
             ORDER BY last_failed_at ASC, client_ip ASC
             """
         ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def _cleanup_expired_failure_rows_on_conn(
+    conn: sqlite3.Connection,
+    table: str,
+    now: float,
+    lockout_seconds: int,
+) -> int:
+    cutoff = float(now) - max(1, int(lockout_seconds or 1))
+    cursor = conn.execute(
+        f"DELETE FROM {table} WHERE last_failed_at <= ?",
+        (cutoff,),
+    )
+    return int(cursor.rowcount or 0)
+
+
+def _get_failure_lockout(
+    table: str,
+    client_ip: str,
+    *,
+    max_failures: int,
+    lockout_seconds: int,
+    now: float | None = None,
+) -> int:
+    _ensure_database()
+    current_time = float(time.time() if now is None else now)
+    max_count = max(1, int(max_failures or 1))
+    lockout = max(1, int(lockout_seconds or 1))
+    normalized_ip = _normalize_access_client_ip(client_ip)
+    with _connect() as conn:
+        row = conn.execute(
+            f"SELECT failure_count, last_failed_at FROM {table} WHERE client_ip = ?",
+            (normalized_ip,),
+        ).fetchone()
+    if not row:
+        return 0
+    elapsed = current_time - float(row["last_failed_at"] or 0)
+    if elapsed < lockout and int(row["failure_count"] or 0) >= max_count:
+        return max(1, int(lockout - elapsed))
+    return 0
+
+
+def _record_failure(
+    table: str,
+    client_ip: str,
+    *,
+    lockout_seconds: int,
+    max_entries: int,
+    now: float | None = None,
+) -> int:
+    _ensure_database()
+    current_time = float(time.time() if now is None else now)
+    lockout = max(1, int(lockout_seconds or 1))
+    max_size = max(1, int(max_entries or 1))
+    normalized_ip = _normalize_access_client_ip(client_ip)
+    with _connect() as conn:
+        with _transaction(conn):
+            _cleanup_expired_failure_rows_on_conn(conn, table, current_time, lockout)
+            row = conn.execute(
+                f"SELECT failure_count, first_failed_at FROM {table} WHERE client_ip = ?",
+                (normalized_ip,),
+            ).fetchone()
+            count = 1 if not row else int(row["failure_count"] or 0) + 1
+            first_failed_at = (
+                current_time if not row else float(row["first_failed_at"] or current_time)
+            )
+            conn.execute(
+                f"""
+                INSERT INTO {table} (
+                    client_ip, failure_count, first_failed_at, last_failed_at
+                ) VALUES (?, ?, ?, ?)
+                ON CONFLICT(client_ip) DO UPDATE SET
+                    failure_count = excluded.failure_count,
+                    first_failed_at = excluded.first_failed_at,
+                    last_failed_at = excluded.last_failed_at
+                """,
+                (normalized_ip, count, first_failed_at, current_time),
+            )
+            overflow_row = conn.execute(
+                f"SELECT COUNT(*) - ? FROM {table}",
+                (max_size,),
+            ).fetchone()
+            overflow = max(0, int(overflow_row[0] or 0) if overflow_row else 0)
+            if overflow:
+                conn.execute(
+                    f"""
+                    DELETE FROM {table}
+                    WHERE client_ip IN (
+                        SELECT client_ip FROM {table}
+                        ORDER BY last_failed_at ASC, client_ip ASC LIMIT ?
+                    )
+                    """,
+                    (overflow,),
+                )
+    return count
+
+
+def _clear_failure(table: str, client_ip: str) -> bool:
+    _ensure_database()
+    normalized_ip = _normalize_access_client_ip(client_ip)
+    with _connect() as conn:
+        with _transaction(conn):
+            cursor = conn.execute(
+                f"DELETE FROM {table} WHERE client_ip = ?",
+                (normalized_ip,),
+            )
+    return int(cursor.rowcount or 0) > 0
+
+
+def get_admin_lockout(
+    client_ip: str,
+    *,
+    max_failures: int,
+    lockout_seconds: int,
+    now: float | None = None,
+) -> int:
+    return _get_failure_lockout(
+        "admin_failures",
+        client_ip,
+        max_failures=max_failures,
+        lockout_seconds=lockout_seconds,
+        now=now,
+    )
+
+
+def record_admin_failure(
+    client_ip: str,
+    *,
+    lockout_seconds: int,
+    max_entries: int,
+    now: float | None = None,
+) -> int:
+    return _record_failure(
+        "admin_failures",
+        client_ip,
+        lockout_seconds=lockout_seconds,
+        max_entries=max_entries,
+        now=now,
+    )
+
+
+def clear_admin_failure(client_ip: str) -> bool:
+    return _clear_failure("admin_failures", client_ip)
+
+
+def list_admin_failures() -> list[dict[str, Any]]:
+    _ensure_database()
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT client_ip, failure_count, first_failed_at, last_failed_at
+            FROM admin_failures
+            ORDER BY last_failed_at ASC, client_ip ASC
+            """
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def reserve_upload_capacity(
+    *,
+    reservation_id: str,
+    client_ip: str,
+    route: str,
+    byte_count: int,
+    max_total_bytes: int,
+    max_per_ip_bytes: int,
+    lease_ttl_seconds: int,
+    import_rate_limit: int | None = None,
+    now: float | None = None,
+) -> tuple[bool, str]:
+    """Atomically reserve request bytes across application worker processes."""
+
+    _ensure_database()
+    normalized_id = str(reservation_id or "").strip()
+    normalized_ip = _normalize_access_client_ip(client_ip)
+    normalized_route = str(route or "upload").strip()[:128] or "upload"
+    requested_bytes = max(0, int(byte_count or 0))
+    total_limit = max(1, int(max_total_bytes or 1))
+    per_ip_limit = max(1, int(max_per_ip_bytes or 1))
+    current_time = float(time.time() if now is None else now)
+    expires_at = current_time + max(1, int(lease_ttl_seconds or 1))
+    if not normalized_id or requested_bytes <= 0:
+        return False, "invalid"
+
+    with _connect() as conn:
+        with _transaction(conn):
+            conn.execute(
+                "DELETE FROM upload_reservations WHERE lease_expires_at <= ?",
+                (current_time,),
+            )
+            conn.execute(
+                "DELETE FROM import_upload_events WHERE created_at <= ?",
+                (current_time - 60.0,),
+            )
+            total_row = conn.execute(
+                "SELECT COALESCE(SUM(byte_count), 0) FROM upload_reservations"
+            ).fetchone()
+            current_total = int(total_row[0] or 0) if total_row else 0
+            if current_total + requested_bytes > total_limit:
+                return False, "global_bytes"
+
+            ip_row = conn.execute(
+                """
+                SELECT COALESCE(SUM(byte_count), 0)
+                FROM upload_reservations
+                WHERE client_ip = ?
+                """,
+                (normalized_ip,),
+            ).fetchone()
+            current_ip_bytes = int(ip_row[0] or 0) if ip_row else 0
+            if current_ip_bytes + requested_bytes > per_ip_limit:
+                return False, "ip_bytes"
+
+            if import_rate_limit is not None:
+                rate_row = conn.execute(
+                    """
+                    SELECT COUNT(*) FROM import_upload_events
+                    WHERE client_ip = ? AND created_at > ?
+                    """,
+                    (normalized_ip, current_time - 60.0),
+                ).fetchone()
+                if int(rate_row[0] or 0) >= max(1, int(import_rate_limit)):
+                    return False, "ip_rate"
+
+            conn.execute(
+                """
+                INSERT INTO upload_reservations (
+                    reservation_id, client_ip, route, byte_count,
+                    created_at, lease_expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    normalized_id,
+                    normalized_ip,
+                    normalized_route,
+                    requested_bytes,
+                    current_time,
+                    expires_at,
+                ),
+            )
+            if import_rate_limit is not None:
+                conn.execute(
+                    """
+                    INSERT INTO import_upload_events (event_id, client_ip, created_at)
+                    VALUES (?, ?, ?)
+                    """,
+                    (uuid.uuid4().hex, normalized_ip, current_time),
+                )
+    return True, "reserved"
+
+
+def release_upload_reservation(reservation_id: str) -> bool:
+    _ensure_database()
+    normalized_id = str(reservation_id or "").strip()
+    if not normalized_id:
+        return False
+    with _connect() as conn:
+        with _transaction(conn):
+            cursor = conn.execute(
+                "DELETE FROM upload_reservations WHERE reservation_id = ?",
+                (normalized_id,),
+            )
+    return int(cursor.rowcount or 0) > 0
+
+
+def renew_upload_reservation(
+    reservation_id: str,
+    *,
+    lease_ttl_seconds: int,
+    now: float | None = None,
+) -> bool:
+    """Extend an existing upload reservation without recreating released leases."""
+
+    _ensure_database()
+    normalized_id = str(reservation_id or "").strip()
+    if not normalized_id:
+        return False
+    current_time = float(time.time() if now is None else now)
+    expires_at = current_time + max(1, int(lease_ttl_seconds or 1))
+    with _connect() as conn:
+        with _transaction(conn):
+            cursor = conn.execute(
+                """
+                UPDATE upload_reservations
+                SET lease_expires_at = ?
+                WHERE reservation_id = ?
+                """,
+                (expires_at, normalized_id),
+            )
+    return int(cursor.rowcount or 0) > 0
+
+
+def list_upload_reservations(*, now: float | None = None) -> list[dict[str, Any]]:
+    _ensure_database()
+    current_time = float(time.time() if now is None else now)
+    with _connect() as conn:
+        with _transaction(conn):
+            conn.execute(
+                "DELETE FROM upload_reservations WHERE lease_expires_at <= ?",
+                (current_time,),
+            )
+            rows = conn.execute(
+                """
+                SELECT reservation_id, client_ip, route, byte_count,
+                       created_at, lease_expires_at
+                FROM upload_reservations
+                ORDER BY created_at, reservation_id
+                """
+            ).fetchall()
     return [dict(row) for row in rows]
 
 

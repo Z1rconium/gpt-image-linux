@@ -528,16 +528,16 @@ test('pasted clipboard images become edit sources outside editable controls', as
 test('clipboard paste at the edit source limit reports an error without a success toast', async ({ page }) => {
   await loadApp(page);
 
-  const fileNames = Array.from({ length: 16 }, (_, index) => `clipboard-${index + 1}.png`);
+  const fileNames = Array.from({ length: 8 }, (_, index) => `clipboard-${index + 1}.png`);
   await dispatchImagePaste(page, 'body', fileNames);
-  await expect(page.getByRole('button', { name: /^Upload · clipboard-\d+\.png$/ })).toHaveCount(16);
+  await expect(page.getByRole('button', { name: /^Upload · clipboard-\d+\.png$/ })).toHaveCount(8);
   await expect(page.getByRole('status')).toContainText('Reference image added from clipboard');
   await expect(page.getByRole('status')).toHaveCount(0, { timeout: 4_000 });
 
-  const fullPasteDefaultAllowed = await dispatchImagePaste(page, 'body', ['clipboard-17.png']);
+  const fullPasteDefaultAllowed = await dispatchImagePaste(page, 'body', ['clipboard-9.png']);
   expect(fullPasteDefaultAllowed).toBe(false);
-  await expect(page.getByText('At most 16 edit source images are supported')).toBeVisible();
-  await expect(page.getByRole('button', { name: /Upload · clipboard-17\.png/ })).toHaveCount(0);
+  await expect(page.getByText('At most 8 edit source images are supported')).toBeVisible();
+  await expect(page.getByRole('button', { name: /Upload · clipboard-9\.png/ })).toHaveCount(0);
   await expect(page.getByRole('status')).toHaveCount(0);
 });
 

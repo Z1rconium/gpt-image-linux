@@ -1,5 +1,15 @@
 from backend.tests.support.contract import *  # noqa: F403
 
+
+def test_edit_plan_rejects_more_sources_than_submission_api(client):
+    response = client.post(
+        "/api/assistant/edit/plan",
+        json={"goal": "combine sources", "source_count": MAX_EDIT_SOURCE_IMAGES + 1},
+    )
+
+    assert response.status_code == 422
+
+
 def test_ai_assistant_health_reports_success_and_config_errors(client, monkeypatch):
     settings = client.get("/api/settings").json()
 

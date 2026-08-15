@@ -110,6 +110,14 @@ package.json
 ```bash
 cp .env.example .env
 # 修改 .env：至少设置 ACCESS_KEY，并按需填默认上游 API
+# 创建不可登录的系统账户，不授予应用以外的权限
+sudo useradd --system --user-group --home-dir /nonexistent --shell /usr/sbin/nologin gpt-image
+APP_UID="$(id -u gpt-image)"
+APP_GID="$(id -g gpt-image)"
+# 仅授予该账户运行期 bind mount 的访问权限
+sudo install -d -o "$APP_UID" -g "$APP_GID" -m 0750 images data data/logs
+sudo chown -R "$APP_UID:$APP_GID" images data
+sed -i "s/^PUID=.*/PUID=$APP_UID/; s/^PGID=.*/PGID=$APP_GID/" .env
 # 此示例通过回环地址使用 HTTP，需要禁用 Secure cookie
 ACCESS_COOKIE_SECURE=false docker-compose up -d --force-recreate
 ```
@@ -118,11 +126,20 @@ ACCESS_COOKIE_SECURE=false docker-compose up -d --force-recreate
 
 此本地 HTTP 示例需要设置 `ACCESS_COOKIE_SECURE=false`；通过 HTTPS 提供服务时应保持为 `true`。默认必须设置 `ACCESS_KEY`。仅本地测试时，清空 `ACCESS_KEY` 并设置 `ALLOW_UNAUTHENTICATED=true`，这会让所有非 health API 都不需要鉴权。
 
+生产容器以 `.env` 中的 UID/GID（`PUID`/`PGID`）运行，且根文件系统为只读。上述命令会创建不可登录的 `gpt-image` 系统账户，并仅授予其 `images/`、`data/`（包括 `data/logs/`）的访问权限。应用目录保持只读；只有这些 bind mount 和受限的 `/tmp` tmpfs 可写。若账户已经存在，请跳过 `useradd` 命令并使用其 UID/GID。
+
 ### Docker
+
+下方命令假设已按上方 Docker Compose 步骤创建不可登录的 `gpt-image` 账户，并设置了运行目录的属主。
 
 ```bash
 docker build -t gpt-image-panel .
 docker run -d --name gpt-image-panel \
+  --user "$(id -u gpt-image):$(id -g gpt-image)" \
+  --read-only \
+  --security-opt no-new-privileges:true \
+  --cap-drop ALL \
+  --tmpfs /tmp:rw,noexec,nosuid,nodev,size=640m,mode=1777 \
   -p 127.0.0.1:9090:9090 \
   -e ACCESS_KEY=change-me \
   -e ACCESS_COOKIE_SECURE=false \
@@ -137,6 +154,7 @@ Docker Hub 慢或不可访问时：
 docker build \
   --build-arg PYTHON_BASE_IMAGE=docker.m.daocloud.io/library/python:3.11-slim \
   --build-arg NODE_BASE_IMAGE=docker.m.daocloud.io/library/node:24-alpine \
+  --build-arg NGINX_BASE_IMAGE=docker.m.daocloud.io/library/nginx:alpine \
   -t gpt-image-panel .
 ```
 
@@ -156,7 +174,11 @@ panel.example.com {
 PUBLIC_ORIGIN=https://panel.example.com
 ALLOWED_HOSTS=panel.example.com
 ACCESS_COOKIE_SECURE=true
+TRUST_PROXY_HEADERS=true
+TRUSTED_PROXY_IPS=127.0.0.1/32
 ```
+
+`TRUSTED_PROXY_IPS` 必须标识 Caddy 连接应用时的实际对端。只有 Caddy 与应用运行在同一主机时才保留回环地址；容器化代理应填写 Caddy 容器或网络 CIDR。其他对端发送的代理头会被忽略。
 
 只有一个上游时，推荐使用上面的基础反代配置。如果确实需要主动健康检查，请先确认 `/health` 在相同 `Host` 请求头下返回 `200`，然后使用复数形式的 `health_headers` 配置块：
 
@@ -238,6 +260,10 @@ ALLOW_UNAUTHENTICATED=true .venv/bin/granian --interface asgi backend.app.main:a
 | `MAX_ACTIVE_GENERATE_JOBS` | 全局运行中的生成/编辑 image unit 上限。 |
 | `MAX_QUEUED_GENERATE_JOBS` | 队列容量，超过后新任务返回 `429`。 |
 | `MAX_PENDING_EDIT_SOURCE_MB` | 全局待处理编辑源图片字节预留上限。 |
+| `MAX_FILE_SIZE_MB` / `EDIT_UPLOAD_MAX_MB` / `IMPORT_ARCHIVE_MAX_MB` | 单张图片、编辑 multipart 总量和 Gallery 导入压缩包上限；编辑最多接受 8 个文件。 |
+| `UPLOAD_INFLIGHT_MAX_MB` / `UPLOAD_INFLIGHT_PER_IP_MAX_MB` / `UPLOAD_RESERVATION_TTL_SECONDS` | 跨进程 SQLite 上传字节预约和过期 lease 清理。 |
+| `ADMIN_MAX_FAILURES` / `ADMIN_LOCKOUT_SECONDS` | 独立管理员二次验证失败阈值和按客户端 IP 计算的锁定时长。 |
+| `WEBHOOK_MAX_CONCURRENCY` / `WEBHOOK_QUEUE_MAX_SIZE` | 每个 Granian worker 进程的固定投递 worker 和待处理 webhook 队列；满队列会丢弃新投递并增加丢弃指标。 |
 | `MAX_SSE_SUBSCRIBERS_GLOBAL` / `MAX_SSE_SUBSCRIBERS_PER_IP` / `SSE_CONNECTION_TTL_SECONDS` | SSE slot 限制和最大连接生命周期。 |
 | `IMAGES_DIR` | 图片保存目录。 |
 | `THUMBNAILS_DIR` / `THUMBNAIL_*` | Gallery 缩略图存储和生成控制。 |
@@ -255,6 +281,8 @@ ALLOW_UNAUTHENTICATED=true .venv/bin/granian --interface asgi backend.app.main:a
 Secret 字段优先使用 `${ENV_VAR_NAME}` 引用。若要把明文 secret 写入 SQLite，必须显式设置 `ALLOW_PLAINTEXT_SECRETS=true`。
 
 Overall Config 会把 override 持久化到 SQLite。部分配置可热更新；需要重启或只影响构建的配置会在 UI 中标记，可复现部署仍建议通过 `.env`/Compose 管理。
+
+Webhook 并发和队列限制按进程生效。使用多个 `GRANIAN_WORKERS` 时，总投递并发和队列容量会随 worker 数量线性增加。
 
 ## 使用
 
@@ -357,7 +385,7 @@ Overall Config 会把 override 持久化到 SQLite。部分配置可热更新；
   - SSRF 敏感 URL 处理继续放在 validators、safe connector、integration client 中
   - 前端可见 secret 只能是打码值或 env-ref 元数据
 - 保持现有运行时约束：
-  - 编辑任务最多接受 16 张 raster 源图
+  - 编辑任务最多接受 8 张 raster 源图
   - Gallery ZIP 导入导出继续沿用现有安全限制
   - SSE 使用 SQLite slot lease、全局/单 IP 限制和连接 TTL
   - R2 同步只是备份；本地 SQLite 记录和本地图片文件始终是源数据

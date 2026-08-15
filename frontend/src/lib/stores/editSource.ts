@@ -1,7 +1,7 @@
 import { get, writable } from 'svelte/store';
 import { t } from '$lib/i18n';
 
-export const MAX_EDIT_SOURCE_IMAGES = 16;
+export const MAX_EDIT_SOURCE_IMAGES = 8;
 
 export type EditUploadSource = {
   id: string;

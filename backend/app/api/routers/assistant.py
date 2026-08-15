@@ -17,6 +17,7 @@ from ...schemas.assistant import (
     AssistantRecommendParamsResponse,
 )
 from ...services import assistant_batch, assistant_text, assistant_vision
+from ..uploads import multipart_openapi_request_body
 
 router = APIRouter()
 
@@ -27,8 +28,41 @@ router.add_api_route("/api/assistant/prompt/variants", assistant_text.prompt_var
 router.add_api_route("/api/assistant/generate/recommend-params", assistant_text.recommend_generate_params, methods=["POST"], response_model=AssistantRecommendParamsResponse)
 router.add_api_route("/api/assistant/jobs/{job_id}/diagnose", assistant_text.diagnose_job, methods=["POST"], response_model=AssistantJobDiagnoseResponse)
 router.add_api_route("/api/assistant/edit/plan", assistant_text.plan_edit, methods=["POST"], response_model=AssistantEditPlanResponse)
-router.add_api_route("/api/assistant/image/prompt", assistant_vision.prompt_from_uploaded_image, methods=["POST"], response_model=AssistantImagePromptResponse)
-router.add_api_route("/api/assistant/image/prompt/optimize", assistant_vision.optimize_uploaded_image_prompt, methods=["POST"], response_model=AssistantImagePromptOptimizeResponse)
+router.add_api_route(
+    "/api/assistant/image/prompt",
+    assistant_vision.prompt_from_uploaded_image,
+    methods=["POST"],
+    response_model=AssistantImagePromptResponse,
+    openapi_extra=multipart_openapi_request_body(
+        {
+            "image": {"type": "string", "format": "binary"},
+            "target_language": {
+                "type": "string",
+                "enum": ["en", "zh-CN"],
+                "default": "en",
+            },
+        },
+        required=["image"],
+    ),
+)
+router.add_api_route(
+    "/api/assistant/image/prompt/optimize",
+    assistant_vision.optimize_uploaded_image_prompt,
+    methods=["POST"],
+    response_model=AssistantImagePromptOptimizeResponse,
+    openapi_extra=multipart_openapi_request_body(
+        {
+            "image": {"type": "string", "format": "binary"},
+            "prompt": {"type": "string", "minLength": 1, "maxLength": 4000},
+            "target_language": {
+                "type": "string",
+                "enum": ["en", "zh-CN"],
+                "default": "en",
+            },
+        },
+        required=["image", "prompt"],
+    ),
+)
 router.add_api_route("/api/assistant/gallery/{image_id}/metadata", assistant_vision.get_gallery_metadata, methods=["GET"], response_model=AssistantGalleryMetadataResponse)
 router.add_api_route("/api/assistant/gallery/batch/analyze", assistant_batch.batch_analyze_gallery, methods=["POST"], response_model=AssistantGalleryBatchJobStatus, status_code=202)
 router.add_api_route("/api/assistant/gallery/batch/analyze/{job_id}", assistant_batch.get_batch_analyze_job, methods=["GET"], response_model=AssistantGalleryBatchJobStatus)
