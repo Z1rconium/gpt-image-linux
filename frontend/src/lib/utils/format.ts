@@ -79,14 +79,28 @@ export function displayImageSize(image: ImageSizeLike | null | undefined) {
 
 export function stageLabel(job: GenerateJobStatus | null, labels?: Record<string, string>) {
   if (!job?.stage) return '';
-  const failureMessage = jobFailureMessage(job);
-  if (failureMessage) return failureMessage;
-
   const translated = labels?.[job.stage];
-  if (!translated) return job.message || job.stage.replaceAll('_', ' ');
+  const legacyProgressMatch = job.message?.match(/\((\d+\/\d+)(?: completed)?\)\s*$/);
+  const messageWithoutProgress = legacyProgressMatch
+    ? job.message?.slice(0, legacyProgressMatch.index).trim()
+    : job.message;
+  const baseLabel = translated || messageWithoutProgress || job.stage.replaceAll('_', ' ');
+  const completedCount = job.completed_count;
+  const totalCount = job.n;
+  if (
+    Number.isInteger(completedCount) &&
+    Number.isInteger(totalCount) &&
+    Number(completedCount) >= 0 &&
+    Number(totalCount) > 0
+  ) {
+    return `${baseLabel} (${completedCount}/${totalCount})`;
+  }
 
-  const progressSuffix = job.message?.match(/\(\d+\/\d+\)$/)?.[0];
-  return progressSuffix ? `${translated} ${progressSuffix}` : translated;
+  const legacyProgress = legacyProgressMatch?.[1];
+  if (legacyProgress) return `${baseLabel} (${legacyProgress})`;
+
+  const failureMessage = jobFailureMessage(job);
+  return failureMessage || baseLabel;
 }
 
 export function jobFailureMessage(job: GenerateJobStatus | null | undefined, fallback = '') {

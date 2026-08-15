@@ -135,6 +135,9 @@ def test_multi_image_job_returns_all_results(client, monkeypatch):
     job = _wait_for_job(client, job_id)
     assert job["status"] == "success"
     assert job["n"] == 3
+    assert job["completed_count"] == 3
+    assert job["success_count"] == 3
+    assert job["failure_count"] == 0
     assert len(job["images"]) == 3
     assert job["image_id"] == job["images"][0]["image_id"]
     assert job["image_url"] == job["images"][0]["image_url"]
@@ -198,8 +201,12 @@ def test_multi_image_job_succeeds_with_partial_upstream_failures(client, monkeyp
     assert resp.status_code == 202
 
     job = _wait_for_job(client, resp.json()["job_id"])
-    assert job["status"] == "success"
+    assert job["status"] == "partial_failure"
+    assert job["stage"] == "completed_with_failures"
     assert job["message"] == "Generated 2 of 3 requested images; 1 failed"
+    assert job["completed_count"] == 3
+    assert job["success_count"] == 2
+    assert job["failure_count"] == 1
     assert "1 of 3 image generation requests failed" in job["error"]
     assert "one shard failed" in job["error"]
     assert len(job["images"]) == 2
@@ -213,6 +220,180 @@ def test_multi_image_job_succeeds_with_partial_upstream_failures(client, monkeyp
     gallery = client.get("/api/gallery")
     assert gallery.status_code == 200
     assert gallery.json()["total"] == 2
+
+
+def test_multi_image_job_publishes_and_persists_incremental_results(client, monkeypatch):
+    calls_lock = threading.Lock()
+    both_started = threading.Event()
+    release_units = [threading.Event(), threading.Event()]
+    finished_entries = {}
+    call_count = 0
+
+    async def ordered_generation_api(
+        api_url,
+        api_key,
+        api_path,
+        payload,
+        api_preset_name=None,
+        progress=None,
+        socks5_proxy=None,
+    ):
+        nonlocal call_count
+        with calls_lock:
+            call_index = call_count
+            call_count += 1
+            if call_count == 2:
+                both_started.set()
+        await asyncio.to_thread(release_units[call_index].wait)
+        entry = await _add_generated_gallery_entry(payload, api_path, api_preset_name)
+        finished_entries[call_index] = entry
+        return [entry]
+
+    monkeypatch.setattr(
+        backend_main.proxy,
+        "call_image_generation_api",
+        ordered_generation_api,
+    )
+
+    resp = client.post(
+        "/api/generate",
+        json={"prompt": "incremental batch", "model": "gpt-image-2", "n": 2},
+    )
+    assert resp.status_code == 202
+    job_id = resp.json()["job_id"]
+    event_queue = asyncio.Queue(maxsize=20)
+    subscribers = job_events.get_job_subscribers().setdefault(job_id, set())
+
+    try:
+        assert both_started.wait(2)
+        subscribers.add(event_queue)
+        release_units[1].set()
+
+        deadline = time.time() + 3
+        intermediate = None
+        while time.time() < deadline:
+            current = client.get(f"/api/generate/{job_id}")
+            assert current.status_code == 200
+            candidate = current.json()
+            if candidate.get("status") == "running" and candidate.get("completed_count") == 1:
+                intermediate = candidate
+                break
+            time.sleep(0.025)
+
+        assert intermediate is not None
+        assert intermediate["message"] == "Generating images (1/2 completed)"
+        assert intermediate["success_count"] == 1
+        assert intermediate["failure_count"] == 0
+        assert [image["image_id"] for image in intermediate["images"]] == [
+            finished_entries[1].id
+        ]
+
+        persisted = image_jobs_repo.get_generate_job(job_id)
+        assert persisted["completed_count"] == 1
+        assert persisted["success_count"] == 1
+        assert persisted["failure_count"] == 0
+        assert [image["image_id"] for image in persisted["images"]] == [
+            image["image_id"] for image in intermediate["images"]
+        ]
+
+        published = []
+        while not event_queue.empty():
+            published.append(event_queue.get_nowait())
+        incremental_events = [
+            event["data"]
+            for event in published
+            if event.get("event") == "job"
+            and event.get("data", {}).get("completed_count") == 1
+        ]
+        assert incremental_events
+        assert [image["image_id"] for image in incremental_events[-1]["images"]] == [
+            image["image_id"] for image in intermediate["images"]
+        ]
+    finally:
+        release_units[0].set()
+        release_units[1].set()
+        subscribers.discard(event_queue)
+        if not subscribers:
+            job_events.get_job_subscribers().pop(job_id, None)
+
+    job = _wait_for_job(client, job_id)
+    assert job["status"] == "success"
+    assert job["completed_count"] == 2
+    assert job["success_count"] == 2
+    assert job["failure_count"] == 0
+    aggregate = image_jobs_repo.aggregate_image_job_units(job_id)
+    expected_image_ids = [
+        image["image_id"]
+        for unit in aggregate["units"]
+        for image in (unit.get("result") or {}).get("images", [])
+    ]
+    assert [image["image_id"] for image in job["images"]] == expected_image_ids
+
+
+def test_failed_unit_advances_incremental_parent_progress(client, monkeypatch):
+    calls_lock = threading.Lock()
+    both_started = threading.Event()
+    release_success = threading.Event()
+    call_count = 0
+
+    async def partially_blocked_generation_api(
+        api_url,
+        api_key,
+        api_path,
+        payload,
+        api_preset_name=None,
+        progress=None,
+        socks5_proxy=None,
+    ):
+        nonlocal call_count
+        with calls_lock:
+            call_index = call_count
+            call_count += 1
+            if call_count == 2:
+                both_started.set()
+        if call_index == 1:
+            raise backend_main.proxy.UpstreamApiError("one unit failed early")
+        await asyncio.to_thread(release_success.wait)
+        return [await _add_generated_gallery_entry(payload, api_path, api_preset_name)]
+
+    monkeypatch.setattr(
+        backend_main.proxy,
+        "call_image_generation_api",
+        partially_blocked_generation_api,
+    )
+
+    resp = client.post(
+        "/api/generate",
+        json={"prompt": "failure progress", "model": "gpt-image-2", "n": 2},
+    )
+    assert resp.status_code == 202
+    job_id = resp.json()["job_id"]
+
+    try:
+        assert both_started.wait(2)
+        deadline = time.time() + 3
+        intermediate = None
+        while time.time() < deadline:
+            candidate = client.get(f"/api/generate/{job_id}").json()
+            if candidate.get("status") == "running" and candidate.get("failure_count") == 1:
+                intermediate = candidate
+                break
+            time.sleep(0.025)
+
+        assert intermediate is not None
+        assert intermediate["message"] == "Generating images (1/2 completed)"
+        assert intermediate["completed_count"] == 1
+        assert intermediate["success_count"] == 0
+        assert intermediate["failure_count"] == 1
+        assert intermediate["images"] == []
+    finally:
+        release_success.set()
+
+    job = _wait_for_job(client, job_id)
+    assert job["status"] == "partial_failure"
+    assert job["completed_count"] == 2
+    assert job["success_count"] == 1
+    assert job["failure_count"] == 1
 
 
 def test_multi_image_job_reports_upstream_error_when_all_children_fail(client, monkeypatch):
@@ -252,6 +433,9 @@ def test_multi_image_job_reports_upstream_error_when_all_children_fail(client, m
     job = _wait_for_job(client, resp.json()["job_id"])
     assert job["status"] == "upstream_error"
     assert job["stage"] == "generation_failed"
+    assert job["completed_count"] == 3
+    assert job["success_count"] == 0
+    assert job["failure_count"] == 3
     assert job["images"] == []
     assert "3 of 3 image generation requests failed" in job["error"]
     assert "quota exhausted" in job["error"]
@@ -866,6 +1050,40 @@ def test_generate_job_webhook_is_sqlite_backed_and_consumed_once(tmp_path):
     assert image_jobs_repo.pop_generate_job_webhook("webhook-job") == ""
 
 
+def test_partial_failure_webhook_payload_includes_results_counts_and_summary():
+    from backend.app.services import webhook_service
+
+    payload = webhook_service.build_webhook_payload(
+        {
+            "job_id": "partial-webhook-job",
+            "status": "partial_failure",
+            "stage": "completed_with_failures",
+            "operation": "generation",
+            "images": [
+                {
+                    "image_id": "image-1",
+                    "image_url": "/api/image/image-1.png",
+                    "filename": "image-1.png",
+                }
+            ],
+            "completed_count": 2,
+            "success_count": 1,
+            "failure_count": 1,
+            "error": "1 of 2 image generation requests failed: #2: quota exhausted",
+        }
+    )
+
+    assert payload["status"] == "partial_failure"
+    assert payload["stage"] == "completed_with_failures"
+    assert payload["completed_count"] == 2
+    assert payload["success_count"] == 1
+    assert payload["failure_count"] == 1
+    assert payload["images"][0]["image_id"] == "image-1"
+    assert "quota exhausted" in payload["error"]
+    assert payload["error_code"] == "job_failed"
+    assert payload["correlation_id"]
+
+
 def test_upstream_image_data_is_bounded_and_schema_checked():
     from backend.app.integrations.upstream.errors import UpstreamApiError, validate_upstream_image_data
 
@@ -1259,6 +1477,7 @@ def test_generate_jobs_history_supports_seek_pagination(client):
 def test_generate_jobs_history_failed_only_filters_error_statuses(client):
     for job_id, status in [
         ("history-success", "success"),
+        ("history-partial", "partial_failure"),
         ("history-cancelled", "cancelled"),
         ("history-error", "error"),
         ("history-upstream", "upstream_error"),
@@ -1273,14 +1492,18 @@ def test_generate_jobs_history_failed_only_filters_error_statuses(client):
                 "created_at": "2026-01-01T00:00:00+00:00",
                 "updated_at": "2026-01-01T00:00:00+00:00",
                 "completed_at": "2026-01-01T00:00:00+00:00",
-                "error": "failed" if status in {"error", "upstream_error"} else None,
+                "error": "failed" if status in {"partial_failure", "error", "upstream_error"} else None,
             }
         )
 
     resp = client.get("/api/generate/jobs?include_finished=true&failed_only=true")
 
     assert resp.status_code == 200
-    assert {job["job_id"] for job in resp.json()} == {"history-error", "history-upstream"}
+    assert {job["job_id"] for job in resp.json()} == {
+        "history-partial",
+        "history-error",
+        "history-upstream",
+    }
 
 
 def test_clear_generate_jobs_history_deletes_only_terminal_jobs(client):

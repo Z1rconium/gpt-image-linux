@@ -166,6 +166,7 @@
 
   function statusClass(job: GenerateJobStatus) {
     if (job.status === 'success') return 'text-emerald-300';
+    if (job.status === 'partial_failure') return 'text-amber-700 dark:text-amber-300';
     if (job.status === 'error' || job.status === 'upstream_error') return 'text-red-300';
     if (job.status === 'cancelled') return 'text-stone-500 dark:text-zinc-400';
     if (job.status === 'interrupted') return 'text-amber-300';
@@ -185,6 +186,18 @@
 
   function jobErrorMessage(job: GenerateJobStatus, fallback: string) {
     return jobFailureMessage(job, fallback);
+  }
+
+  function failurePanelClass(job: GenerateJobStatus) {
+    return job.status === 'partial_failure'
+      ? 'border-amber-400/40 bg-amber-50 text-amber-900 dark:border-amber-500/30 dark:bg-amber-950/25 dark:text-amber-200'
+      : 'border-red-400/40 bg-red-50 text-red-800 dark:border-red-500/25 dark:bg-red-950/30 dark:text-red-300';
+  }
+
+  function failureButtonClass(job: GenerateJobStatus) {
+    return job.status === 'partial_failure'
+      ? 'border-amber-500/40 text-amber-800 hover:bg-amber-500/10 dark:text-amber-200'
+      : 'border-red-500/35 text-red-700 hover:bg-red-500/10 dark:text-red-200';
   }
 
   function isErrorExpanded(jobId: string) {
@@ -234,7 +247,7 @@
             {#if jobErrorMessage(job, $t.messages.jobFailed)}
               <div
                 class:hidden={!isErrorExpanded(job.job_id)}
-                class="mt-2 rounded-lg border border-red-500/25 bg-red-950/30 px-3 py-2 text-xs leading-relaxed text-red-300"
+                class={`mt-2 rounded-lg border px-3 py-2 text-xs leading-relaxed ${failurePanelClass(job)}`}
                 aria-hidden={!isErrorExpanded(job.job_id)}
               >
                 {jobErrorMessage(job, $t.messages.jobFailed)}
@@ -253,7 +266,7 @@
               <div class="mt-3">
                 <button
                   type="button"
-                  class="control-focus rounded-lg border border-red-500/35 px-3 py-2 text-xs font-medium text-red-200 hover:bg-red-500/10"
+                  class={`control-focus rounded-lg border px-3 py-2 text-xs font-medium ${failureButtonClass(job)}`}
                   aria-expanded={isErrorExpanded(job.job_id)}
                   onclick={() => toggleError(job.job_id)}
                 >

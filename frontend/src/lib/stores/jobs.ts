@@ -83,6 +83,9 @@ function sameJob(left: GenerateJobStatus, right: GenerateJobStatus) {
     left.prompt === right.prompt &&
     left.size === right.size &&
     left.model === right.model &&
+    left.completed_count === right.completed_count &&
+    left.success_count === right.success_count &&
+    left.failure_count === right.failure_count &&
     left.duration === right.duration &&
     left.error === right.error &&
     sameJobImages(left.images, right.images) &&

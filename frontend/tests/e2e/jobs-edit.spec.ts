@@ -36,8 +36,8 @@ async function dispatchImagePaste(page: Page, targetSelector: string, fileNames:
 
 type EventSourceScenario = {
   globalJobs?: unknown[];
-  perJobModes?: Record<string, 'terminal' | 'disconnect' | 'hold' | 'delayed'>;
-  perJobEvents?: Record<string, unknown>;
+  perJobModes?: Record<string, 'terminal' | 'disconnect' | 'hold' | 'delayed' | 'sequence'>;
+  perJobEvents?: Record<string, unknown | unknown[]>;
 };
 
 async function installEventSourceScenario(page: Page, scenario: EventSourceScenario) {
@@ -82,13 +82,25 @@ async function installEventSourceScenario(page: Page, scenario: EventSourceScena
           return;
         }
         if (mode === 'hold') return;
+        if (mode === 'sequence') {
+          const configuredEvents = currentConfig.perJobEvents?.[jobId];
+          const events = Array.isArray(configuredEvents) ? configuredEvents : [configuredEvents];
+          events.forEach((payload, index) => {
+            setTimeout(() => {
+              if (this.readyState !== MockEventSource.CLOSED && payload) this.dispatchMessage('job', payload);
+            }, 120 + index * 700);
+          });
+          return;
+        }
         if (mode === 'delayed') {
           setTimeout(() => {
-            if (this.readyState !== MockEventSource.CLOSED) this.dispatchMessage('job', currentConfig.perJobEvents?.[jobId]);
+            const payload = currentConfig.perJobEvents?.[jobId];
+            if (this.readyState !== MockEventSource.CLOSED && !Array.isArray(payload)) this.dispatchMessage('job', payload);
           }, 300);
           return;
         }
-        this.dispatchMessage('job', currentConfig.perJobEvents?.[jobId]);
+        const payload = currentConfig.perJobEvents?.[jobId];
+        if (!Array.isArray(payload)) this.dispatchMessage('job', payload);
       }
 
       private dispatchMessage(eventName: string, payload: unknown) {
@@ -157,6 +169,102 @@ test('multi-image job results can be previewed individually', async ({ page }) =
 
   await preview.getByRole('button', { name: 'Select result 2' }).click();
   await expect(preview.getByRole('link', { name: 'Download' })).toHaveAttribute('href', '/api/download/multi-2.png');
+});
+
+test('incremental results stay selectable and partial completion remains visible', async ({ page }) => {
+  const prompt = 'browser incremental prompt';
+  const result = (index: number) => ({
+    image_id: `incremental-${index}`,
+    image_url: `/api/image/incremental-${index}.png`,
+    filename: `incremental-${index}.png`,
+    image_width: 1,
+    image_height: 1
+  });
+  const results = [result(1), result(2), result(3)];
+  const runningBase = {
+    ...job('job-generated', prompt, 'running'),
+    n: 4,
+    status: 'running',
+    stage: 'waiting_for_api',
+    success_count: 1,
+    failure_count: 0,
+    completed_at: null,
+    duration: null,
+    error: null
+  };
+  const events = [
+    {
+      ...runningBase,
+      message: 'Generating images (1/4 completed)',
+      completed_count: 1,
+      images: results.slice(0, 1),
+      image_id: results[0].image_id,
+      image_url: results[0].image_url
+    },
+    {
+      ...runningBase,
+      message: 'Generating images (2/4 completed)',
+      completed_count: 2,
+      success_count: 2,
+      images: results.slice(0, 2),
+      image_id: results[0].image_id,
+      image_url: results[0].image_url
+    },
+    {
+      ...runningBase,
+      message: 'Generating images (3/4 completed)',
+      completed_count: 3,
+      success_count: 3,
+      images: results,
+      image_id: results[0].image_id,
+      image_url: results[0].image_url
+    },
+    {
+      ...job('job-generated', prompt, 'partial_failure'),
+      n: 4,
+      stage: 'completed_with_failures',
+      message: 'Generated 3 of 4 requested images; 1 failed',
+      completed_count: 4,
+      success_count: 3,
+      failure_count: 1,
+      images: results,
+      image_id: results[0].image_id,
+      image_url: results[0].image_url,
+      error: '1 of 4 image generation requests failed: #4: quota exhausted'
+    }
+  ];
+  const galleryRefreshes: Array<Record<string, unknown>> = [];
+
+  await installEventSourceScenario(page, {
+    perJobModes: { 'job-generated': 'sequence' },
+    perJobEvents: { 'job-generated': events }
+  });
+  page.on('request', (request) => {
+    if (request.method() === 'POST' && new URL(request.url()).pathname === '/api/gallery/search') {
+      galleryRefreshes.push(request.postDataJSON() as Record<string, unknown>);
+    }
+  });
+  await loadApp(page, { generatedJob: events.at(-1) });
+  galleryRefreshes.length = 0;
+
+  await page.getByRole('textbox', { name: 'Prompt', exact: true }).fill(prompt);
+  await page.getByRole('button', { name: 'Generate', exact: true }).click();
+  const preview = page.locator('section').filter({ has: page.getByRole('heading', { name: 'Preview' }) });
+
+  await expect(preview.getByText('Waiting for upstream API response (1/4)', { exact: true })).toBeVisible();
+  await expect(preview.getByRole('img', { name: 'Generated preview' })).toBeVisible();
+  await expect(preview.getByRole('button', { name: 'Select result 1' })).toBeVisible();
+  await expect(preview.getByText('Waiting for upstream API response (2/4)', { exact: true })).toBeVisible();
+  await preview.getByRole('button', { name: 'Select result 2' }).click();
+  await expect(preview.getByRole('link', { name: 'Download' })).toHaveAttribute('href', '/api/download/incremental-2.png');
+
+  await expect(preview.getByRole('button', { name: 'Select result 3' })).toBeVisible();
+  await expect(preview.getByRole('link', { name: 'Download' })).toHaveAttribute('href', '/api/download/incremental-2.png');
+
+  const warning = preview.locator('.status-warning');
+  await expect(warning).toContainText('quota exhausted');
+  await expect(preview.getByText('partial failure', { exact: true })).toBeVisible();
+  await expect.poll(() => galleryRefreshes.length).toBe(1);
 });
 
 test('initial load resumes only the newest active job and shows its result', async ({ page }) => {
@@ -302,6 +410,10 @@ test('job history shows detailed terminal statuses', async ({ page }) => {
   const detailedUpstreamError = 'Upstream API error (400): Invalid model';
   await loadApp(page, {
     historyJobs: [
+      {
+        ...job('partial-job', 'partial prompt', 'partial_failure'),
+        error: '1 of 2 image generation requests failed: #2: quota exhausted'
+      },
       job('cancelled-job', 'cancelled prompt', 'cancelled'),
       job('interrupted-job', 'interrupted prompt', 'interrupted'),
       {
@@ -318,6 +430,7 @@ test('job history shows detailed terminal statuses', async ({ page }) => {
   await expect(jobsDrawer.getByText('cancelled', { exact: true })).toBeVisible();
   await expect(jobsDrawer.getByText('interrupted', { exact: true })).toBeVisible();
   await expect(jobsDrawer.getByText('upstream error', { exact: true })).toBeVisible();
+  await expect(jobsDrawer.getByText('partial failure', { exact: true })).toBeVisible();
 
   const upstreamJob = jobsDrawer.locator('article').filter({ hasText: 'upstream prompt' });
   await expect(upstreamJob.getByText('Generation failed', { exact: true })).toBeVisible();
@@ -330,6 +443,7 @@ test('job history shows detailed terminal statuses', async ({ page }) => {
 
   await jobsDrawer.getByLabel('Errors only').check();
   await expect(jobsDrawer.getByText('upstream prompt')).toBeVisible();
+  await expect(jobsDrawer.getByText('partial prompt')).toBeVisible();
   await expect(jobsDrawer.getByText('cancelled prompt')).toBeHidden();
   await expect(jobsDrawer.getByText('interrupted prompt')).toBeHidden();
 

@@ -109,6 +109,13 @@
     background: var(--danger-soft);
     color: var(--danger-text);
   }
+
+  .status-warning {
+    border: 1px solid var(--warning-border);
+    border-radius: 6px;
+    background: var(--warning-soft);
+    color: var(--warning-text);
+  }
 }
 
 :root {
@@ -131,6 +138,9 @@
   --danger-soft: #fef2f2;
   --danger-border: #fca5a5;
   --danger-text: #b91c1c;
+  --warning-soft: #fffbeb;
+  --warning-border: #fbbf24;
+  --warning-text: #92400e;
   --app-panel: #ffffff;
   --app-panel-strong: #f5f5f4;
   --app-panel-border: #d6d3d1;
@@ -168,6 +178,9 @@ html.dark {
   --danger-soft: rgba(127, 29, 29, 0.22);
   --danger-border: #991b1b;
   --danger-text: #fecaca;
+  --warning-soft: rgba(120, 53, 15, 0.24);
+  --warning-border: #b45309;
+  --warning-text: #fde68a;
   --app-panel: #18181b;
   --app-panel-strong: #09090b;
   --app-panel-border: #27272a;

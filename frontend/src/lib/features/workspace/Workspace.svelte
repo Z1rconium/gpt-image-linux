@@ -479,7 +479,7 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
       }
       if (jobsStore.shouldRefreshJobsAfterSubmit()) void jobsStore.loadJobs();
       jobsStore.markHistoryStale();
-      if (job.status === 'success') scheduleGalleryRefreshAfterSuccess();
+      if (job.status === 'success' || job.status === 'partial_failure') scheduleGalleryRefreshAfterSuccess();
     }
   }
 

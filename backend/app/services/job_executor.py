@@ -53,9 +53,15 @@ async def aggregate_parent_image_job(
     total = int(aggregate.get("total") or parent.get("n") or 1)
     completed = int(aggregate.get("completed") or 0)
     success_count = int(aggregate.get("success_count") or 0)
+    failure_count = int(aggregate.get("failure_count") or 0)
     running_count = int(aggregate.get("running_count") or 0)
     queued_count = int(aggregate.get("queued_count") or 0)
     operation = str(parent.get("operation") or "generation")
+    count_update = {
+        "completed_count": completed,
+        "success_count": success_count,
+        "failure_count": failure_count,
+    }
 
     if aggregate.get("all_terminal"):
         images = aggregate.get("images") or []
@@ -71,8 +77,8 @@ async def aggregate_parent_image_job(
             if failures:
                 message = f"Generated {len(images)} of {total} requested images; {len(failures)} failed"
             update = {
-                "status": "success",
-                "stage": "completed",
+                "status": "partial_failure" if failures else "success",
+                "stage": "completed_with_failures" if failures else "completed",
                 "message": message,
                 "operation": operation,
                 "image_id": first_image.get("image_id"),
@@ -92,6 +98,7 @@ async def aggregate_parent_image_job(
                 "api_preset_name": parent.get("api_preset_name"),
                 "stage_timings": aggregate.get("stage_timings") or {},
                 "completed_at": completed_at,
+                **count_update,
             }
             if failures:
                 update["error"] = summarize_unit_failures(failures, total, operation)
@@ -108,6 +115,7 @@ async def aggregate_parent_image_job(
                 "operation": operation,
                 "completed_at": completed_at,
                 "error": cancel_message,
+                **count_update,
             }
         else:
             failures = failures or aggregate.get("units") or []
@@ -125,6 +133,7 @@ async def aggregate_parent_image_job(
                 "completed_at": completed_at,
                 "error": error_message,
                 "stage_timings": aggregate.get("stage_timings") or {},
+                **count_update,
             }
         job = await store_generate_job_async(parent_job_id, update)
         await run_db_operation(
@@ -139,12 +148,14 @@ async def aggregate_parent_image_job(
             )
         return job
 
-    if running_count > 0 or success_count > 0:
+    if running_count > 0 or completed > 0:
         stage = "waiting_for_api"
+        images = aggregate.get("images") or []
+        first_image = images[0] if images else {}
         message = (
-            f"Editing images ({success_count}/{total} completed)"
+            f"Editing images ({completed}/{total} completed)"
             if operation == "edit"
-            else f"Generating images ({success_count}/{total} completed)"
+            else f"Generating images ({completed}/{total} completed)"
         )
         return await store_generate_job_async(
             parent_job_id,
@@ -154,6 +165,12 @@ async def aggregate_parent_image_job(
                 "message": message,
                 "operation": operation,
                 "started_at": parent.get("started_at") or utc_now(),
+                "image_id": first_image.get("image_id"),
+                "image_url": first_image.get("image_url"),
+                "images": images,
+                "image_width": first_image.get("image_width"),
+                "image_height": first_image.get("image_height"),
+                **count_update,
             },
             persist=force_publish,
         )
@@ -166,6 +183,7 @@ async def aggregate_parent_image_job(
                 "stage": "queued",
                 "message": parent.get("message") or "Queued image generation",
                 "operation": operation,
+                **count_update,
             },
             persist=force_publish,
         )

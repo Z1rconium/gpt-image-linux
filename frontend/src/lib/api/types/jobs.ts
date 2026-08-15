@@ -35,11 +35,13 @@ export type GenerateJobStatus = GenerateJobResponse & {
   output_compression?: number | null;
   response_format?: string | null;
   n?: number | null;
+  completed_count?: number | null;
+  success_count?: number | null;
+  failure_count?: number | null;
   api_path?: string | null;
   api_preset_name?: string | null;
   duration?: string | null;
   stage_timings?: Record<string, number>;
   error?: string | null;
 };
-
 

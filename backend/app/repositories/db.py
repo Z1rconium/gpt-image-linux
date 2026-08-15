@@ -131,6 +131,9 @@ GENERATE_JOB_COLUMNS = (
     "output_compression",
     "response_format",
     "n",
+    "completed_count",
+    "success_count",
+    "failure_count",
     "api_path",
     "api_preset_name",
     "duration",
@@ -211,6 +214,9 @@ PROMPT_SNIPPET_COLUMNS = (
 INTEGER_GENERATE_JOB_COLUMNS = {
     "output_compression",
     "n",
+    "completed_count",
+    "success_count",
+    "failure_count",
     "image_width",
     "image_height",
 }
@@ -1181,6 +1187,9 @@ def _ensure_database():
                     output_compression INTEGER,
                     response_format TEXT,
                     n INTEGER,
+                    completed_count INTEGER,
+                    success_count INTEGER,
+                    failure_count INTEGER,
                     api_path TEXT,
                     api_preset_name TEXT,
                     duration TEXT,
@@ -1842,6 +1851,13 @@ def _migration_generate_jobs_schema(conn: sqlite3.Connection):
         conn.execute("ALTER TABLE generate_jobs ADD COLUMN webhook_url TEXT")
 
 
+def _migration_generate_job_counts(conn: sqlite3.Connection):
+    columns = _table_columns(conn, "generate_jobs")
+    for column in ("completed_count", "success_count", "failure_count"):
+        if column not in columns:
+            conn.execute(f"ALTER TABLE generate_jobs ADD COLUMN {column} INTEGER")
+
+
 def _migration_gallery_jobs_schema(conn: sqlite3.Connection):
     columns = _table_columns(conn, "gallery_jobs")
     if "pending_upload_count" not in columns:
@@ -1904,6 +1920,7 @@ SCHEMA_MIGRATIONS = (
     (12, "r2_sync_state_schema", _migration_r2_sync_state_schema),
     (13, "prompt_snippets_schema", _migration_prompt_snippets_schema),
     (14, "gallery_ai_metadata_schema", _migration_gallery_ai_metadata_schema),
+    (15, "generate_job_counts", _migration_generate_job_counts),
 )
 
 

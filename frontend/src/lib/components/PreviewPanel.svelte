@@ -83,18 +83,26 @@ import type { GenerateJobImage, GenerateJobStatus } from '$lib/api/types/jobs';
   </div>
 
   {#if error}
-    <div class="status-error px-4 py-3 text-sm">{error}</div>
+    <div
+      class={`${job?.status === 'partial_failure' ? 'status-warning' : 'status-error'} px-4 py-3 text-sm break-words`}
+      role={job?.status === 'partial_failure' ? 'status' : 'alert'}
+    >
+      {error}
+    </div>
   {/if}
 
   <div class={`mt-4 flex min-h-[360px] items-center justify-center overflow-hidden rounded-xl border border-stone-200 dark:border-zinc-800 ${selectedImageUrl ? 'bg-stone-100 dark:bg-zinc-950' : 'preview-empty'}`}>
-    {#if loading}
-      <div class="flex max-w-sm flex-col items-center px-6 text-center" role="status" aria-live="polite" aria-atomic="true">
-        <span class="spinner"></span>
-        <p class="mt-4 text-sm font-semibold text-stone-900 dark:text-zinc-100">{stageLabel(job, $t.stages) || $t.preview.working}</p>
-        <p class="mt-2 text-xs text-stone-500 dark:text-zinc-400">{statusLabel(job?.status, $t.statuses) || $t.preview.queued}</p>
-      </div>
-    {:else if selectedImageUrl}
+    {#if selectedImageUrl}
       <div class="flex h-full w-full flex-col">
+        {#if loading}
+          <div class="flex min-w-0 items-center gap-3 border-b border-stone-200 bg-white/80 px-4 py-3 dark:border-zinc-800 dark:bg-zinc-900/80" role="status" aria-live="polite" aria-atomic="true">
+            <span class="spinner shrink-0"></span>
+            <div class="min-w-0 flex-1">
+              <p class="truncate text-sm font-semibold text-stone-900 dark:text-zinc-100">{stageLabel(job, $t.stages) || $t.preview.working}</p>
+              <p class="mt-0.5 text-xs text-stone-500 dark:text-zinc-400">{statusLabel(job?.status, $t.statuses) || $t.preview.queued}</p>
+            </div>
+          </div>
+        {/if}
         <div class="flex min-h-[320px] flex-1 items-center justify-center p-3">
           <img
             src={selectedImageUrl}
@@ -107,7 +115,7 @@ import type { GenerateJobImage, GenerateJobStatus } from '$lib/api/types/jobs';
             height={previewHeight}
           />
         </div>
-        {#if resultImages.length > 1}
+        {#if resultImages.length > 1 || (loading && resultImages.length > 0)}
           <div class="border-t border-stone-200 p-3 dark:border-zinc-800">
             <div class="mb-2 flex items-center justify-between text-xs text-stone-500 dark:text-zinc-500">
               <span>{$t.preview.resultCount(resultImages.length)}</span>
@@ -122,12 +130,18 @@ import type { GenerateJobImage, GenerateJobStatus } from '$lib/api/types/jobs';
                   on:click={() => (selectedImageId = result.image_id)}
                 >
                   <img src={result.image_url} alt={$t.preview.resultThumbAlt(index + 1)} class="h-full w-full object-cover" loading="lazy" decoding="async" />
-                  <span class="absolute left-1.5 top-1.5 rounded bg-white/90 px-1.5 py-0.5 text-[10px] font-semibold text-stone-700 dark:bg-zinc-950/80 dark:text-zinc-200">{index + 1}</span>
+                  <span class="absolute left-1.5 top-1.5 rounded bg-white/90 px-1.5 py-0.5 text-xs font-semibold text-stone-700 dark:bg-zinc-950/80 dark:text-zinc-200">{index + 1}</span>
                 </button>
               {/each}
             </div>
           </div>
         {/if}
+      </div>
+    {:else if loading}
+      <div class="flex max-w-sm flex-col items-center px-6 text-center" role="status" aria-live="polite" aria-atomic="true">
+        <span class="spinner"></span>
+        <p class="mt-4 text-sm font-semibold text-stone-900 dark:text-zinc-100">{stageLabel(job, $t.stages) || $t.preview.working}</p>
+        <p class="mt-2 text-xs text-stone-500 dark:text-zinc-400">{statusLabel(job?.status, $t.statuses) || $t.preview.queued}</p>
       </div>
     {:else}
       <div class="px-6 text-center">

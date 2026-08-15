@@ -261,7 +261,7 @@ def test_schema_migrations_are_recorded_and_idempotent(tmp_path):
         anchor_table = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE name = 'gallery_page_anchors'"
         ).fetchone()
-    assert [row["version"] for row in versions] == list(range(1, 15))
+    assert [row["version"] for row in versions] == list(range(1, 16))
     assert gallery_version["value"] == 0
     assert anchor_table is not None
 
@@ -303,6 +303,42 @@ def test_gallery_and_access_migrations_own_only_their_schema():
         assert "access_failures" in tables_after_access
         assert "gallery_meta" not in tables_after_access
         assert "gallery_page_anchors" not in tables_after_access
+
+
+def test_generate_job_count_migration_preserves_legacy_rows_as_null():
+    with sqlite3.connect(":memory:") as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            """
+            CREATE TABLE generate_jobs (
+                job_id TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO generate_jobs (job_id, status, created_at, updated_at)
+            VALUES ('legacy-job', 'success', '2026-01-01T00:00:00Z', '2026-01-01T00:00:01Z')
+            """
+        )
+
+        db_repo._migration_generate_job_counts(conn)
+        columns = db_repo._table_columns(conn, "generate_jobs")
+        row = conn.execute(
+            """
+            SELECT completed_count, success_count, failure_count
+            FROM generate_jobs
+            WHERE job_id = 'legacy-job'
+            """
+        ).fetchone()
+
+    assert {"completed_count", "success_count", "failure_count"}.issubset(columns)
+    assert row["completed_count"] is None
+    assert row["success_count"] is None
+    assert row["failure_count"] is None
 
 
 def test_schema_migrations_upgrade_legacy_gallery_schema(tmp_path):
@@ -354,7 +390,7 @@ def test_schema_migrations_upgrade_legacy_gallery_schema(tmp_path):
             "SELECT favorite, sort_seq, bytes, thumbnail_filename, completed_at, sha256 FROM gallery_entries WHERE id = 'legacy-1'"
         ).fetchone()
 
-    assert versions == list(range(1, 15))
+    assert versions == list(range(1, 16))
     assert {"favorite", "sort_seq", "bytes", "thumbnail_filename", "completed_at", "sha256"}.issubset(gallery_columns)
     assert {"default_model", "default_response_format"}.issubset(preset_columns)
     assert row["favorite"] == 0

@@ -372,12 +372,14 @@ function galleryResponse(
   };
 }
 
-type JobStatus = 'queued' | 'running' | 'success' | 'error' | 'cancelled' | 'interrupted' | 'upstream_error';
+type JobStatus = 'queued' | 'running' | 'success' | 'partial_failure' | 'error' | 'cancelled' | 'interrupted' | 'upstream_error';
 
 function job(jobId: string, prompt: string, status: JobStatus = 'success') {
   const stage =
     status === 'success'
       ? 'completed'
+      : status === 'partial_failure'
+        ? 'completed_with_failures'
       : status === 'running' || status === 'queued'
         ? 'waiting_for_api'
         : status === 'upstream_error'
@@ -386,6 +388,8 @@ function job(jobId: string, prompt: string, status: JobStatus = 'success') {
   const message =
     status === 'success'
       ? 'Image generation completed'
+      : status === 'partial_failure'
+        ? 'Generated 1 of 2 requested images; 1 failed'
       : status === 'running' || status === 'queued'
         ? 'Waiting for upstream API response'
         : status === 'upstream_error'
@@ -421,6 +425,10 @@ function job(jobId: string, prompt: string, status: JobStatus = 'success') {
     image_height: 1,
     model: 'gpt-image-2',
     duration: terminal ? '1.00s' : null,
+    n: status === 'partial_failure' ? 2 : 1,
+    completed_count: terminal ? (status === 'partial_failure' ? 2 : 1) : 0,
+    success_count: status === 'success' || status === 'partial_failure' ? 1 : 0,
+    failure_count: status === 'partial_failure' || status === 'error' || status === 'upstream_error' ? 1 : 0,
     error: status === 'success' || status === 'running' || status === 'queued' ? null : message,
     stage_timings: {
       upstream_wait: 1.2,
@@ -439,7 +447,7 @@ function manyJobs(count: number) {
 function isErrorJob(candidate: unknown) {
   if (!candidate || typeof candidate !== 'object') return false;
   const status = (candidate as { status?: unknown }).status;
-  return status === 'error' || status === 'upstream_error';
+  return status === 'partial_failure' || status === 'error' || status === 'upstream_error';
 }
 
 function cloneSettings(settings: Record<string, unknown>) {

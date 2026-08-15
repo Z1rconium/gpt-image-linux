@@ -41,6 +41,7 @@ def build_webhook_payload(job: dict[str, Any]) -> dict[str, Any]:
         "id",
         "image_id",
         "image_url",
+        "images",
         "size",
         "created_at",
         "started_at",
@@ -54,14 +55,18 @@ def build_webhook_payload(job: dict[str, Any]) -> dict[str, Any]:
         "output_compression",
         "response_format",
         "n",
+        "completed_count",
+        "success_count",
+        "failure_count",
         "api_path",
         "api_preset_name",
         "duration",
+        "error",
     }
     payload = {key: job[key] for key in allowed_fields if key in job and job[key] is not None}
     payload["event"] = "image.job.finished"
     payload["delivered_at"] = utc_now()
-    if str(job.get("status") or "") == "error":
+    if str(job.get("status") or "") in {"partial_failure", "error", "upstream_error"}:
         payload["error_code"] = str(job.get("error_code") or "job_failed")
         payload["correlation_id"] = str(job.get("correlation_id") or uuid.uuid4().hex)
     return payload

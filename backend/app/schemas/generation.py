@@ -103,11 +103,11 @@ class GenerateJobStatus(GenerateJobResponse):
     output_compression: Optional[int] = None
     response_format: Optional[str] = None
     n: Optional[int] = None
+    completed_count: Optional[int] = Field(default=None, ge=0)
+    success_count: Optional[int] = Field(default=None, ge=0)
+    failure_count: Optional[int] = Field(default=None, ge=0)
     api_path: Optional[str] = None
     api_preset_name: Optional[str] = None
     duration: Optional[str] = None
     stage_timings: dict[str, float] = Field(default_factory=dict)
     error: Optional[str] = None
-
-
-

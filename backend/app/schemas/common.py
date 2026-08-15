@@ -14,6 +14,7 @@ GenerateJobStatusValue = Literal[
     "queued",
     "running",
     "success",
+    "partial_failure",
     "error",
     "cancelled",
     "interrupted",

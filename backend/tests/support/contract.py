@@ -243,6 +243,7 @@ def _wait_for_job(client: TestClient, job_id: str, timeout: float = 5.0):
         last = resp.json()
         if last["status"] in {
             "success",
+            "partial_failure",
             "error",
             "cancelled",
             "interrupted",
