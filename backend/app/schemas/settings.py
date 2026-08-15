@@ -416,6 +416,7 @@ class NodeImageSettingsResponse(BaseModel):
     enabled: bool = False
     api_key_masked: str = "***"
     has_api_key: bool = False
+    api_key_resolvable: bool = False
     api_key_source: ApiKeySource = "empty"
     api_key_env_var: Optional[str] = None
     api_key_secret_id: Optional[str] = None

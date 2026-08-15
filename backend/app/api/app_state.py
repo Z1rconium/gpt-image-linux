@@ -239,7 +239,14 @@ async def lifespan(app: FastAPI):
         job_scheduler.run_image_unit_dispatcher(app.state.worker_id)
     )
     app.state.gallery_export_lock = asyncio.Lock()
-    app.state.gallery_job_subscribers = {"export": {}, "export_direct": {}, "sync": {}, "import": {}, "ai_analyze": {}}
+    app.state.gallery_job_subscribers = {
+        "export": {},
+        "export_direct": {},
+        "sync": {},
+        "import": {},
+        "ai_analyze": {},
+        "nodeimage_upload": {},
+    }
     app.state.gallery_job_sse_poller_tasks = {}
     from ..services import gallery_jobs, gallery_maintenance
     from ..services import assistant_batch
@@ -255,6 +262,9 @@ async def lifespan(app: FastAPI):
     )
     app.state.gallery_import_dispatcher_task = asyncio.create_task(
         gallery_jobs.run_gallery_import_dispatcher(app.state.worker_id)
+    )
+    app.state.gallery_nodeimage_upload_dispatcher_task = asyncio.create_task(
+        gallery_jobs.run_gallery_nodeimage_upload_dispatcher(app.state.worker_id)
     )
     app.state.gallery_export_gc_task = asyncio.create_task(
         gallery_maintenance.gc_gallery_export_jobs(app.state.worker_id)
@@ -311,6 +321,13 @@ async def lifespan(app: FastAPI):
         gallery_import_dispatcher_task = getattr(app.state, "gallery_import_dispatcher_task", None)
         if gallery_import_dispatcher_task and not gallery_import_dispatcher_task.done():
             gallery_import_dispatcher_task.cancel()
+        gallery_nodeimage_upload_dispatcher_task = getattr(
+            app.state,
+            "gallery_nodeimage_upload_dispatcher_task",
+            None,
+        )
+        if gallery_nodeimage_upload_dispatcher_task and not gallery_nodeimage_upload_dispatcher_task.done():
+            gallery_nodeimage_upload_dispatcher_task.cancel()
         thumbnail_dispatcher_task = getattr(app.state, "thumbnail_dispatcher_task", None)
         if thumbnail_dispatcher_task and not thumbnail_dispatcher_task.done():
             thumbnail_dispatcher_task.cancel()
@@ -363,6 +380,7 @@ async def lifespan(app: FastAPI):
                 gallery_export_dispatcher_task,
                 gallery_sync_dispatcher_task,
                 gallery_import_dispatcher_task,
+                gallery_nodeimage_upload_dispatcher_task,
                 gc_task,
                 file_gc_task,
                 scheduled_sync_task,

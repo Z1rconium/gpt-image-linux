@@ -18,6 +18,10 @@ from ..core.validators import (
     normalize_webhook_url,
     resolve_env_var_ref,
 )
+from ..integrations.nodeimage.client import (
+    NodeImageConfigurationError,
+    resolve_nodeimage_settings,
+)
 from ..repositories.settings import (
     load_ai_assistant_settings,
     load_prompt_optimizer_settings,
@@ -83,13 +87,21 @@ def api_key_response_fields(api_key: str) -> dict:
             "api_key_env_var": env_var,
             "api_key_secret_id": None,
         }
-    if value:
+    if value in secrets.configured_secret_ids():
         return {
             "api_key_masked": value,
             "has_api_key": True,
             "api_key_source": "registry",
             "api_key_env_var": None,
             "api_key_secret_id": value,
+        }
+    if value:
+        return {
+            "api_key_masked": mask_key(value),
+            "has_api_key": True,
+            "api_key_source": "stored",
+            "api_key_env_var": None,
+            "api_key_secret_id": None,
         }
     return {
         "api_key_masked": "***",
@@ -98,19 +110,6 @@ def api_key_response_fields(api_key: str) -> dict:
         "api_key_env_var": None,
         "api_key_secret_id": None,
     }
-
-
-def nodeimage_api_key_response_fields(api_key: str) -> dict:
-    value = str(api_key or "").strip()
-    if value and not get_api_key_env_var(value) and value not in secrets.configured_secret_ids():
-        return {
-            "api_key_masked": mask_key(value),
-            "has_api_key": True,
-            "api_key_source": "stored",
-            "api_key_env_var": None,
-            "api_key_secret_id": None,
-        }
-    return api_key_response_fields(value)
 
 
 def secret_response_fields(value: str, prefix: str) -> dict:
@@ -519,9 +518,15 @@ def build_r2_backup_settings_response(raw: dict | None) -> R2BackupSettingsRespo
 
 def build_nodeimage_settings_response(raw: dict | None) -> NodeImageSettingsResponse:
     settings = load_nodeimage_settings() if raw is None else raw
+    try:
+        resolve_nodeimage_settings(settings, require_enabled=False)
+        api_key_resolvable = True
+    except NodeImageConfigurationError:
+        api_key_resolvable = False
     return NodeImageSettingsResponse(
         enabled=bool(settings.get("enabled", False)),
-        **nodeimage_api_key_response_fields(str(settings.get("api_key") or "")),
+        api_key_resolvable=api_key_resolvable,
+        **api_key_response_fields(str(settings.get("api_key") or "")),
     )
 
 

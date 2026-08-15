@@ -124,6 +124,7 @@ OVERALL_CONFIG_REGISTRY: tuple[OverallConfigSpec, ...] = (
     _spec("WEBHOOK_TIMEOUT_SECONDS", "float", "5", "Webhooks", "Webhook timeout per attempt.", min_value=0.1),
     _spec("WEBHOOK_MAX_ATTEMPTS", "int", "3", "Webhooks", "Webhook delivery attempts.", min_value=1),
     _spec("MAX_FILE_SIZE_MB", "int", "50", "Limits", "Max uploaded/downloaded image size.", min_value=1),
+    _spec("NODEIMAGE_UPLOAD_CONCURRENCY", "int", "4", "NodeImage", "Concurrent NodeImage uploads per worker process.", min_value=1),
     _spec("MAX_JSON_BODY_MB", "int", "1", "Limits", "Max JSON request body size.", min_value=1),
     _spec("MAX_UPSTREAM_JSON_MB", "int", "128", "Limits", "Max upstream JSON/SSE response size.", min_value=1),
     _spec("MAX_IMAGE_PIXELS", "int", "100000000", "Limits", "Max decoded image pixels.", min_value=1),

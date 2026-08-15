@@ -10,12 +10,7 @@ from typing import Any, Callable, Iterable
 from ...core import secrets
 from ...core import settings as config
 from ...core.utils import utc_now
-from ...core.validators import (
-    get_env_var_ref_name,
-    normalize_r2_endpoint_url,
-    validate_r2_endpoint_url,
-    resolve_env_var_ref,
-)
+from ...core.validators import normalize_r2_endpoint_url, validate_r2_endpoint_url
 from ...repositories.image_files import safe_image_path
 
 
@@ -150,28 +145,16 @@ def _resolve_secret(
     purpose: secrets.SecretPurpose,
     endpoint_url: str,
 ) -> str:
-    raw = str(value or "").strip()
-    if not raw:
-        return ""
-    env_var = get_env_var_ref_name(raw)
-    if env_var:
-        resolved = resolve_env_var_ref(raw)
-        if resolved:
-            return resolved
-        raise R2ConfigurationError(
-            f"{field_name} environment variable {env_var} is not set or empty."
-        )
-    if raw not in secrets.configured_secret_ids():
-        return raw
     try:
-        return secrets.resolve_secret(
-            raw,
+        return secrets.resolve_secret_reference(
+            value,
             purpose=purpose,
             target_url=endpoint_url,
             host_allowlist=config.R2_ENDPOINT_HOST_ALLOWLIST,
+            field_name=field_name,
         )
     except secrets.SecretRegistryError as exc:
-        raise R2ConfigurationError(f"{field_name}: {exc}") from exc
+        raise R2ConfigurationError(str(exc)) from exc
 
 
 def resolve_r2_backup_settings(

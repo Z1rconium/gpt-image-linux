@@ -245,6 +245,7 @@ ALLOW_UNAUTHENTICATED=true .venv/bin/granian --interface asgi backend.app.main:a
 | `PROMPT_OPTIMIZER_*` | 選用的伺服器端提示詞最佳化器設定。 |
 | `AI_ASSISTANT_*` | AI Assistant 預設啟用；可設 `AI_ASSISTANT_ENABLED=false` 關閉。API URL、密鑰、文字模型、逾時、路徑與 Host 允許清單沿用 `PROMPT_OPTIMIZER_*`。`AI_ASSISTANT_MAX_CONCURRENCY` 限制同時進行的上游 Assistant 呼叫，`AI_ASSISTANT_BATCH_MAX_IMAGES` 限制單次 Gallery AI 批次處理的圖片數。 |
 | `R2_*` | 選用的 Cloudflare R2 Gallery 備份設定；自訂 Endpoint Host 須設定 `R2_ENDPOINT_HOST_ALLOWLIST`。 |
+| `NODEIMAGE_API_KEY` | 選用的 NodeImage API key，用於從伺服器上傳 Gallery 圖片；也可在 Web Settings 中設定 env ref。 |
 | `PUBLIC_ORIGIN` / `ALLOWED_HOSTS` | Reverse Proxy Host/CSRF 強化。 |
 | `ENABLE_NGINX_ACCEL_REDIRECT` / `PUBLIC_IMAGE_BASE_URL` / `PUBLIC_THUMBNAIL_BASE_URL` | 選用的 nginx/CDN 圖片位元組傳送行為。 |
 | `GRANIAN_*` | 正式環境程序、執行緒與靜態資源調校。 |
@@ -262,10 +263,10 @@ Overall Config 會將 Override 持久化至 SQLite。部分設定可熱更新；
 3. 開啟 Settings。
 4. 建立或選取 API 預設。
 5. 設定 API base URL、API path、模型、response format 與 API key/env ref。
-6. 視需要設定 SOCKS5 Proxy、webhook、提示詞最佳化器、AI Assistant、R2 備份或 Overall Config Override。
+6. 視需要設定 SOCKS5 Proxy、webhook、提示詞最佳化器、AI Assistant、R2 備份、NodeImage 上傳或 Overall Config Override。
 7. 儲存預設，必要時執行健康檢查。
 8. 輸入 Prompt 生成圖片，或上傳/選取來源圖片進行編輯。
-9. 在 Gallery 中沿用參數、篩選、收藏、批次操作、匯入/匯出，或執行 R2 同步。
+9. 在 Gallery 中沿用參數、篩選、收藏、批次操作、匯入/匯出、執行 R2 同步，或上傳至 NodeImage。
 
 ## 支援的上游路徑
 

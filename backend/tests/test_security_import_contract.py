@@ -2,15 +2,15 @@ from backend.tests.support.contract import *  # noqa: F403
 
 def test_import_archive(client):
     resp = _post_import_archive(client, _import_archive_bytes())
-    assert resp.status_code == 200
-    assert resp.json()["status"] == "success"
-    assert resp.json()["imported"] == 1
+    assert resp.status_code == 202
+    finished = _wait_for_gallery_import_job(client, resp.json()["job_id"])
+    assert finished["status"] == "success"
+    assert finished["imported_count"] == 1
 
     imported = gallery_queries.get_gallery_entry("import-1")
     assert imported is not None
     assert imported.bytes == len(PNG_BYTES)
-    assert imported.thumbnail_filename is None
-    assert imported.thumbnail_url == "/api/thumb/import-1.png"
+    assert imported.thumbnail_url.startswith("/api/thumb/")
 
 
 def test_import_archive_truncates_long_image_filename(client):
@@ -22,7 +22,9 @@ def test_import_archive_truncates_long_image_filename(client):
         _import_archive_bytes(image_name=long_name),
     )
 
-    assert resp.status_code == 200
+    assert resp.status_code == 202
+    finished = _wait_for_gallery_import_job(client, resp.json()["job_id"])
+    assert finished["status"] == "success"
     imported = gallery_queries.get_gallery_entry("import-1")
     assert imported is not None
     assert imported.filename.endswith(".png")
@@ -283,8 +285,10 @@ def test_import_archive_skips_mismatched_png_content(client):
         _import_archive_bytes(image_name="images/fake.png", image_bytes=b"<svg></svg>"),
     )
 
-    assert resp.status_code == 400
-    assert resp.json()["detail"] == "No importable images found"
+    assert resp.status_code == 202
+    finished = _wait_for_gallery_import_job(client, resp.json()["job_id"])
+    assert finished["status"] == "error"
+    assert finished["error"] == "No importable images found"
 
 
 def test_safe_image_paths_reject_traversal(client):

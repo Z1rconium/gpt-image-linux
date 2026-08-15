@@ -1,5 +1,4 @@
 import asyncio
-import mimetypes
 import os
 import tempfile
 from pathlib import Path
@@ -15,14 +14,17 @@ from ...services.job_queue import (
     queue_edit_job,
 )
 from ..uploads import (
-    IMAGE_UPLOAD_CONTENT_TYPES,
     is_image_upload,
     resolve_upload_content_type,
     validate_upload_image_bytes,
 )
 from ...core import settings as config
 from ...repositories.gallery.queries import get_gallery_entry
-from ...repositories.image_files import safe_image_path, validate_image_file
+from ...repositories.image_files import (
+    image_content_type_for_filename,
+    safe_image_path,
+    validate_image_file,
+)
 from ...schemas.generation import EditRequest, GenerateJobResponse
 from ...services.blocking import run_db_operation, run_image_operation
 
@@ -251,10 +253,7 @@ async def read_gallery_edit_source(image_id: str) -> EditImageSource:
     if not path or not path.exists():
         raise HTTPException(status_code=404, detail="Gallery image file not found")
 
-    image_content_type = (
-        mimetypes.guess_type(path.name)[0]
-        or IMAGE_UPLOAD_CONTENT_TYPES.get(path.suffix.lower(), "application/octet-stream")
-    )
+    image_content_type = image_content_type_for_filename(path.name)
 
     return await run_image_operation(
         copy_edit_source_file_to_temp,

@@ -396,7 +396,11 @@ def _default_secret_reference(secret_id: str, value: str | None) -> str:
     return ""
 
 
-def _default_r2_secret_reference(secret_id: str, env_var: str, value: str | None) -> str:
+def _default_env_backed_secret_reference(
+    secret_id: str,
+    env_var: str,
+    value: str | None,
+) -> str:
     if secret_id in configured_secret_ids():
         return secret_id
     normalized = str(value or "").strip()
@@ -650,12 +654,12 @@ def _default_r2_backup_settings() -> dict:
         "bucket_name": config.R2_BUCKET_NAME,
         "region": config.R2_REGION or "auto",
         "key_prefix": _normalize_r2_key_prefix(config.R2_KEY_PREFIX),
-        "access_key_id": _default_r2_secret_reference(
+        "access_key_id": _default_env_backed_secret_reference(
             "builtin-r2-access-key-id",
             "R2_ACCESS_KEY_ID",
             config.R2_ACCESS_KEY_ID,
         ),
-        "secret_access_key": _default_r2_secret_reference(
+        "secret_access_key": _default_env_backed_secret_reference(
             "builtin-r2-secret-access-key",
             "R2_SECRET_ACCESS_KEY",
             config.R2_SECRET_ACCESS_KEY,
@@ -667,7 +671,7 @@ def _default_r2_backup_settings() -> dict:
 def _default_nodeimage_settings() -> dict:
     return {
         "enabled": False,
-        "api_key": _default_r2_secret_reference(
+        "api_key": _default_env_backed_secret_reference(
             "builtin-nodeimage-api-key",
             "NODEIMAGE_API_KEY",
             config.NODEIMAGE_API_KEY,

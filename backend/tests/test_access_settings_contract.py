@@ -1497,19 +1497,20 @@ def test_r2_health_uses_draft_settings_and_preserves_masked_credentials(client, 
         "/api/settings/r2/health",
         json={
             "enabled": True,
-            "endpoint_url": "https://draft.r2.cloudflarestorage.com",
+            "endpoint_url": "https://account.r2.cloudflarestorage.com",
             "bucket_name": "draft-backups",
             "region": "auto",
             "key_prefix": "draft/",
             "access_key_id": "********",
             "secret_access_key": "********",
+            "use_credentials": True,
         },
     )
 
     assert health.status_code == 200
     assert health.json()["status"] == "ok"
     assert health.json()["checks"][0]["name"] == "configuration"
-    assert seen["draft"]["endpoint_url"] == "https://draft.r2.cloudflarestorage.com"
+    assert seen["draft"]["endpoint_url"] == "https://account.r2.cloudflarestorage.com"
     assert seen["draft"]["bucket_name"] == "draft-backups"
     assert seen["draft"]["access_key_id"] == "${TEST_R2_ACCESS_KEY_ID}"
     assert seen["draft"]["secret_access_key"] == "${TEST_R2_SECRET_ACCESS_KEY}"
@@ -1808,7 +1809,10 @@ def test_prompt_snippets_crud_search_and_validation(client):
         first_body["id"],
     ]
 
-    searched = client.get("/api/prompt-snippets", params={"query": "portrait"})
+    searched = client.post(
+        "/api/prompt-snippets/search",
+        json={"query": "portrait"},
+    )
     assert searched.status_code == 200
     assert [snippet["id"] for snippet in searched.json()["snippets"]] == [
         first_body["id"],
@@ -2049,7 +2053,10 @@ def test_preset_health_and_env_api_key_resolution(client, monkeypatch):
     assert updated_body["api_key_masked"] == "${OPENAI_API_KEY}"
     assert "env-secret" not in json.dumps(updated_body)
 
-    health = client.post(f"/api/settings/presets/{active_preset_id}/health")
+    health = client.post(
+        f"/api/settings/presets/{active_preset_id}/health",
+        json={"use_credentials": True},
+    )
     assert health.status_code == 200
     assert health.json()["status"] == "ok"
     assert seen["probe_key"] == "env-secret"
@@ -2101,32 +2108,23 @@ def test_overall_config_syncs_env_and_hot_override(client, monkeypatch):
     assert item["value"] is False
 
 
-def test_overall_config_secret_mask_and_preserve(client):
+def test_overall_config_startup_secret_cannot_be_overridden(client):
     response = client.put(
         "/api/settings/overall-config",
         json={"updates": [{"name": "WEBHOOK_SIGNING_SECRET", "value": "super-secret"}]},
     )
     assert response.status_code == 422
-    assert "ALLOW_PLAINTEXT_SECRETS" in response.text
+    assert "process startup" in response.text
 
     config.ALLOW_PLAINTEXT_SECRETS = True
     response = client.put(
         "/api/settings/overall-config",
         json={"updates": [{"name": "WEBHOOK_SIGNING_SECRET", "value": "super-secret"}]},
     )
-    assert response.status_code == 200
-    item = next(i for i in response.json()["items"] if i["name"] == "WEBHOOK_SIGNING_SECRET")
-    assert item["value"] == "********"
-    assert item["value_masked"] == "********"
-    assert "super-secret" not in response.text
-
-    response = client.put(
-        "/api/settings/overall-config",
-        json={"updates": [{"name": "WEBHOOK_SIGNING_SECRET", "value": "********"}]},
-    )
-    assert response.status_code == 200
+    assert response.status_code == 422
+    assert "process startup" in response.text
     rows = settings_repo.list_overall_config_values()
-    assert rows["WEBHOOK_SIGNING_SECRET"]["override_value"] == "super-secret"
+    assert rows["WEBHOOK_SIGNING_SECRET"]["override_value"] is None
 
 
 def test_overall_config_secret_env_value_is_not_persisted(client, monkeypatch):
@@ -2165,12 +2163,18 @@ def test_overall_config_validation_errors(client):
 
 
 def test_overall_config_restart_and_build_only_badges(client):
+    startup_only = client.put(
+        "/api/settings/overall-config",
+        json={"updates": [{"name": "IP_ALLOWLIST", "value": "192.0.2.1"}]},
+    )
+    assert startup_only.status_code == 422
+    assert "process startup" in startup_only.text
+
     response = client.put(
         "/api/settings/overall-config",
         json={
             "updates": [
                 {"name": "ACCESS_KEY_COOKIE_NAME", "value": "custom_access"},
-                {"name": "IP_ALLOWLIST", "value": "192.0.2.1"},
                 {"name": "PYTHON_BASE_IMAGE", "value": "python:3.12-slim"},
             ]
         },
@@ -2179,12 +2183,12 @@ def test_overall_config_restart_and_build_only_badges(client):
     body = response.json()
     assert set(body["restart_required_names"]) == {
         "ACCESS_KEY_COOKIE_NAME",
-        "IP_ALLOWLIST",
         "PYTHON_BASE_IMAGE",
     }
     items = {item["name"]: item for item in body["items"]}
     assert items["ACCESS_KEY_COOKIE_NAME"]["restart_required"] is True
     assert items["IP_ALLOWLIST"]["restart_required"] is True
+    assert items["IP_ALLOWLIST"]["startup_only"] is True
     assert items["PYTHON_BASE_IMAGE"]["build_only"] is True
 
 
@@ -2251,18 +2255,16 @@ def test_missing_env_api_key_is_reported(client, monkeypatch):
     )
     assert updated.status_code == 200
 
-    health = client.post(f"/api/settings/presets/{active_preset_id}/health")
-    assert health.status_code == 200
-    body = health.json()
-    assert body["status"] == "error"
-    assert any(
-        check["name"] == "api_key" and check["status"] == "error"
-        for check in body["checks"]
+    health = client.post(
+        f"/api/settings/presets/{active_preset_id}/health",
+        json={"use_credentials": True},
     )
+    assert health.status_code == 422
+    assert "MISSING_IMAGE_KEY" in health.json()["detail"]
 
     resp = client.post(
         "/api/generate",
         json={"prompt": "missing env", "model": "gpt-image-2"},
     )
-    assert resp.status_code == 400
+    assert resp.status_code == 422
     assert "MISSING_IMAGE_KEY" in resp.json()["detail"]

@@ -152,7 +152,9 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
       r2BackupSettings.has_secret_access_key
   );
   $: nodeImageSettings = $settingsStore.settings?.nodeimage || null;
-  $: nodeImageAvailable = Boolean(nodeImageSettings?.enabled && nodeImageSettings.has_api_key);
+  $: nodeImageAvailable = Boolean(
+    nodeImageSettings?.enabled && nodeImageSettings.api_key_resolvable
+  );
   $: syncFormDefaultsToActivePreset($settingsStore.settings);
   $: if (optimizerAssistantEnabled) void ensurePanel('optimizer', false);
 

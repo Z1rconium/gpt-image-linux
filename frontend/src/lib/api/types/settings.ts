@@ -131,6 +131,7 @@ export type NodeImageSettings = {
   enabled: boolean;
   api_key_masked: string;
   has_api_key: boolean;
+  api_key_resolvable: boolean;
   api_key_source: ApiKeySource;
   api_key_env_var?: string | null;
   api_key_secret_id?: string | null;

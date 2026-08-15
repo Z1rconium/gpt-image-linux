@@ -16,7 +16,9 @@ from ..presets import (
     get_active_preset,
     get_api_key_env_var,
     get_api_presets,
+    get_effective_preset_api_key,
     get_exception_message,
+    get_nodeimage_settings,
     get_preset_by_id,
     get_upstream_socks5_proxy,
     get_webhook_url,
@@ -339,8 +341,6 @@ async def update_settings(req: SettingsRequest):
         _validate_r2_secret_bindings(updated_r2)
         await asyncio.to_thread(save_r2_backup_settings, updated_r2)
     if req.nodeimage is not None:
-        from ..presets import get_nodeimage_settings
-
         current_nodeimage = get_nodeimage_settings()
         updated_nodeimage = apply_nodeimage_settings(
             current_nodeimage,

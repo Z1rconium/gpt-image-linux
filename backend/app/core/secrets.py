@@ -296,6 +296,58 @@ def resolve_secret(
     return value
 
 
+def resolve_secret_reference(
+    value: object,
+    *,
+    purpose: SecretPurpose,
+    target_url: str,
+    host_allowlist: str,
+    field_name: str,
+) -> str:
+    """Resolve a settings secret reference without exposing its source details.
+
+    Settings may contain an empty value, an explicit environment reference, a
+    predeclared registry ID, or (when plaintext storage is enabled at the
+    settings boundary) a literal value. Registry IDs are always validated for
+    purpose, origin, and the startup host allowlist before resolution.
+    """
+
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+
+    # Keep the parser local to avoid making the validators module import the
+    # secrets registry during application startup.
+    from .validators import get_env_var_ref_name, resolve_env_var_ref
+
+    env_var = get_env_var_ref_name(raw)
+    if env_var:
+        resolved = resolve_env_var_ref(raw)
+        if resolved:
+            return resolved
+        raise SecretRegistryError(
+            f"{field_name} environment variable {env_var} is not set or empty."
+        )
+
+    if "${" in raw or "}" in raw:
+        raise SecretRegistryError(
+            f"{field_name} env ref must be formatted as ${{ENV_VAR_NAME}}."
+        )
+
+    if raw in configured_secret_ids():
+        try:
+            return resolve_secret(
+                raw,
+                purpose=purpose,
+                target_url=target_url,
+                host_allowlist=host_allowlist,
+            )
+        except SecretRegistryError as exc:
+            raise SecretRegistryError(f"{field_name}: {exc}") from exc
+
+    return raw
+
+
 def active_secret_values() -> tuple[str, ...]:
     global _active_secret_values_cache
 

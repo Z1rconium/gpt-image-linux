@@ -70,6 +70,9 @@ test('gallery uploads single and selected images to NodeImage and copies result 
   await loadApp(page);
 
   const firstCard = page.locator('.gallery-card').filter({ hasText: 'First gallery image' });
+  const actionGrid = firstCard.locator('.gallery-card-actions');
+  await expect(actionGrid.locator('button, a')).toHaveCount(7);
+  expect(await actionGrid.evaluate((element) => getComputedStyle(element).gridTemplateColumns.split(' ').length)).toBe(4);
   const singleRequest = page.waitForRequest((request) => {
     const url = new URL(request.url());
     return request.method() === 'POST' && url.pathname === '/api/gallery/img-1/nodeimage-upload';
@@ -91,13 +94,153 @@ test('gallery uploads single and selected images to NodeImage and copies result 
     if (request.method() !== 'POST' || url.pathname !== '/api/gallery/batch/nodeimage-upload') return false;
     return (request.postDataJSON() as { ids?: string[] }).ids?.length === 2;
   });
+  const batchCreateResponse = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return response.request().method() === 'POST' && url.pathname === '/api/gallery/batch/nodeimage-upload';
+  });
+  const batchEventsRequest = page.waitForRequest((request) => {
+    const url = new URL(request.url());
+    return request.method() === 'GET' && /^\/api\/gallery\/nodeimage-upload-jobs\/[^/]+\/events$/.test(url.pathname);
+  });
   await page.getByRole('button', { name: 'Upload selected to NodeImage', exact: true }).click();
   await batchRequest;
+  await expect.poll(async () => (await batchCreateResponse).status()).toBe(202);
+  await batchEventsRequest;
 
   resultDialog = page.getByRole('dialog', { name: 'NodeImage upload results' });
   await expect(resultDialog).toBeVisible();
   await expect(resultDialog).toContainText('2 uploaded');
-  await expect(resultDialog.getByText('Direct link')).toHaveCount(2);
+  await expect(resultDialog.getByText('Direct link', { exact: true })).toHaveCount(2);
+});
+
+test('NodeImage batch upload shows queued progress while waiting for job events', async ({ page }) => {
+  await loadApp(page, { nodeImageBatchDelayMs: 500 });
+
+  await page.getByRole('button', { name: 'Select' }).click();
+  await page.getByRole('button', { name: 'Select page' }).click();
+  const createResponse = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return response.request().method() === 'POST' && url.pathname === '/api/gallery/batch/nodeimage-upload';
+  });
+  const eventsRequest = page.waitForRequest((request) => {
+    const url = new URL(request.url());
+    return request.method() === 'GET' && /^\/api\/gallery\/nodeimage-upload-jobs\/[^/]+\/events$/.test(url.pathname);
+  });
+
+  await page.getByRole('button', { name: 'Upload selected to NodeImage', exact: true }).click();
+  await expect.poll(async () => (await createResponse).status()).toBe(202);
+  await expect(page.getByRole('status').filter({ hasText: 'Uploading to NodeImage' })).toContainText('Uploaded 0 / 2');
+  await expect(page.getByRole('status').filter({ hasText: 'Uploading to NodeImage' })).toContainText('0%');
+  await eventsRequest;
+
+  const resultDialog = page.getByRole('dialog', { name: 'NodeImage upload results' });
+  await expect(resultDialog).toBeVisible();
+  await expect(resultDialog).toContainText('2 uploaded');
+});
+
+test('NodeImage batch upload displays partial failure results from the job payload', async ({ page }) => {
+  await loadApp(page, { nodeImageBatchFailureIds: ['img-2'] });
+
+  await page.getByRole('button', { name: 'Select' }).click();
+  await page.getByRole('button', { name: 'Select page' }).click();
+  await page.getByRole('button', { name: 'Upload selected to NodeImage', exact: true }).click();
+
+  const resultDialog = page.getByRole('dialog', { name: 'NodeImage upload results' });
+  await expect(resultDialog).toBeVisible();
+  await expect(resultDialog).toContainText('1 uploaded, 1 failed');
+  await expect(resultDialog.getByRole('heading', { name: 'img-1.png' })).toBeVisible();
+  await expect(resultDialog.getByRole('heading', { name: 'img-2.png' })).toBeVisible();
+  await expect(resultDialog).toContainText('NodeImage upload failed in fixture');
+});
+
+test('NodeImage batch upload cancellation calls the job cancel endpoint and keeps completed results', async ({ page }) => {
+  await loadApp(page, { nodeImageBatchDelayMs: 1000 });
+
+  await page.getByRole('button', { name: 'Select' }).click();
+  await page.getByRole('button', { name: 'Select page' }).click();
+  const createResponse = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return response.request().method() === 'POST' && url.pathname === '/api/gallery/batch/nodeimage-upload';
+  });
+  const cancelRequest = page.waitForRequest((request) => {
+    const url = new URL(request.url());
+    return request.method() === 'POST' && /^\/api\/gallery\/nodeimage-upload-jobs\/[^/]+\/cancel$/.test(url.pathname);
+  });
+  const terminalStatusRequest = page.waitForRequest((request) => {
+    const url = new URL(request.url());
+    return request.method() === 'GET' && /^\/api\/gallery\/nodeimage-upload-jobs\/[^/]+$/.test(url.pathname);
+  });
+
+  await page.getByRole('button', { name: 'Upload selected to NodeImage', exact: true }).click();
+  await expect.poll(async () => (await createResponse).status()).toBe(202);
+  const operationStatus = page.getByRole('status').filter({ hasText: 'Uploading to NodeImage' });
+  await expect(operationStatus).toContainText('Uploaded 0 / 2');
+  await operationStatus.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await cancelRequest;
+  await terminalStatusRequest;
+
+  const resultDialog = page.getByRole('dialog', { name: 'NodeImage upload results' });
+  await expect(resultDialog).toBeVisible();
+  await expect(resultDialog).toContainText('1 uploaded, 1 cancelled');
+  await expect(resultDialog.getByText('Uploaded', { exact: true })).toHaveCount(1);
+  await expect(resultDialog.getByText('Not uploaded', { exact: true })).toHaveCount(1);
+});
+
+test('NodeImage batch upload keeps tracking the job when the cancellation request fails', async ({ page }) => {
+  await loadApp(page, { nodeImageBatchDelayMs: 750, nodeImageCancelFailure: true });
+
+  await page.getByRole('button', { name: 'Select' }).click();
+  await page.getByRole('button', { name: 'Select page' }).click();
+  await page.getByRole('button', { name: 'Upload selected to NodeImage', exact: true }).click();
+
+  const operationStatus = page.getByRole('status').filter({ hasText: 'Uploading to NodeImage' });
+  await expect(operationStatus).toContainText('Uploaded 0 / 2');
+  await operationStatus.getByRole('button', { name: 'Cancel', exact: true }).click();
+
+  await expect(page.getByRole('alert').filter({ hasText: 'Temporary cancellation failure' })).toBeVisible();
+  await expect(operationStatus.getByRole('button', { name: 'Cancel', exact: true })).toBeEnabled();
+
+  const resultDialog = page.getByRole('dialog', { name: 'NodeImage upload results' });
+  await expect(resultDialog).toBeVisible();
+  await expect(resultDialog).toContainText('2 uploaded');
+  await expect(page.getByRole('status').filter({ hasText: 'NodeImage upload complete: 2 succeeded, 0 failed' })).toBeVisible();
+});
+
+test('NodeImage batch upload keeps tracking after cancellation status polling fails', async ({ page }) => {
+  await loadApp(page, { nodeImageBatchDelayMs: 1000, nodeImageCancelStatusFailure: true });
+
+  await page.getByRole('button', { name: 'Select' }).click();
+  await page.getByRole('button', { name: 'Select page' }).click();
+  await page.getByRole('button', { name: 'Upload selected to NodeImage', exact: true }).click();
+
+  const operationStatus = page.getByRole('status').filter({ hasText: 'Uploading to NodeImage' });
+  await expect(operationStatus).toContainText('Uploaded 0 / 2');
+  await operationStatus.getByRole('button', { name: 'Cancel', exact: true }).click();
+
+  await expect(page.getByRole('alert').filter({ hasText: 'Temporary cancellation status failure' })).toBeVisible();
+  await expect(operationStatus.getByRole('button', { name: 'Cancel', exact: true })).toBeEnabled();
+
+  const resultDialog = page.getByRole('dialog', { name: 'NodeImage upload results' });
+  await expect(resultDialog).toBeVisible();
+  await expect(resultDialog).toContainText('1 uploaded, 1 cancelled');
+});
+
+test('NodeImage cancellation reports a completed job as complete', async ({ page }) => {
+  await loadApp(page, { nodeImageBatchDelayMs: 1000, nodeImageCancelReturnsCompleted: true });
+
+  await page.getByRole('button', { name: 'Select' }).click();
+  await page.getByRole('button', { name: 'Select page' }).click();
+  await page.getByRole('button', { name: 'Upload selected to NodeImage', exact: true }).click();
+
+  const operationStatus = page.getByRole('status').filter({ hasText: 'Uploading to NodeImage' });
+  await expect(operationStatus).toContainText('Uploaded 0 / 2');
+  await operationStatus.getByRole('button', { name: 'Cancel', exact: true }).click();
+
+  const resultDialog = page.getByRole('dialog', { name: 'NodeImage upload results' });
+  await expect(resultDialog).toBeVisible();
+  await expect(resultDialog).toContainText('2 uploaded');
+  await expect(page.getByRole('status').filter({ hasText: 'NodeImage upload complete: 2 succeeded, 0 failed' })).toBeVisible();
+  await expect(page.getByText('NodeImage upload cancelled: 2 succeeded, 0 failed')).toHaveCount(0);
 });
 
 test('NodeImage batch results use response filenames for cross-page selection', async ({ page }) => {
@@ -150,15 +293,65 @@ test('NodeImage batch results fall back for legacy responses without filenames',
   await expect(resultDialog.getByRole('heading', { name: 'missing-legacy-id' })).toBeVisible();
 });
 
+test('NodeImage results group failures first, progressively reveal successes, and copy complete ordered lists', async ({ page, context }) => {
+  await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+  await loadApp(page, {
+    galleryImages: manyGalleryImages(25),
+    nodeImageBatchFailureIds: ['paged-img-25']
+  });
+
+  await page.getByLabel('Filter prompt').fill('Paged gallery image');
+  await expect(page.getByRole('img', { name: 'Paged gallery image 1', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Select' }).click();
+  await page.getByRole('button', { name: 'Select filtered' }).click();
+  await page.getByRole('button', { name: 'Upload selected to NodeImage', exact: true }).click();
+
+  const resultDialog = page.getByRole('dialog', { name: 'NodeImage upload results' });
+  await expect(resultDialog).toBeVisible();
+  await expect(resultDialog.locator('h3')).toHaveText(['Failed (1)', 'Uploaded (24)']);
+  await expect(resultDialog.getByRole('heading', { name: 'paged-img-25.png' })).toBeVisible();
+  await expect(resultDialog.getByRole('heading', { name: 'paged-img-20.png' })).toBeVisible();
+  await expect(resultDialog.getByRole('heading', { name: 'paged-img-21.png' })).toBeHidden();
+  await expect(resultDialog.getByRole('button', { name: 'Show more (4 remaining)' })).toBeVisible();
+  await expect(resultDialog.getByText('Direct link', { exact: true })).toHaveCount(20);
+
+  await resultDialog.getByRole('button', { name: 'Copy all direct links' }).click();
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(
+    Array.from({ length: 24 }, (_, index) => `https://cdn.nodeimage.com/paged-img-${index + 1}.png`).join('\n')
+  );
+  await resultDialog.getByRole('button', { name: 'Copy all Markdown links' }).click();
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(
+    Array.from({ length: 24 }, (_, index) => `![Paged gallery image ${index + 1}](https://cdn.nodeimage.com/paged-img-${index + 1}.png)`).join('\n')
+  );
+
+  await resultDialog.getByRole('button', { name: 'Show more (4 remaining)' }).click();
+  await expect(resultDialog.getByRole('heading', { name: 'paged-img-24.png' })).toBeVisible();
+  await expect(resultDialog.getByText('Direct link', { exact: true })).toHaveCount(24);
+  await expect(resultDialog.getByRole('button', { name: /Show more/ })).toHaveCount(0);
+
+  const desktopBounds = await resultDialog.boundingBox();
+  expect(desktopBounds).not.toBeNull();
+  expect(desktopBounds!.x).toBeGreaterThanOrEqual(0);
+  expect(desktopBounds!.x + desktopBounds!.width).toBeLessThanOrEqual(1280);
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  const mobileBounds = await resultDialog.boundingBox();
+  expect(mobileBounds).not.toBeNull();
+  expect(mobileBounds!.x).toBeGreaterThanOrEqual(0);
+  expect(mobileBounds!.x + mobileBounds!.width).toBeLessThanOrEqual(390);
+  expect(await resultDialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+});
+
 test('gallery hides NodeImage upload actions when the integration is unavailable', async ({ page }) => {
   await loadApp(page, {
     settings: {
       ...settingsResponse,
       nodeimage: {
         ...settingsResponse.nodeimage,
-        enabled: false,
-        has_api_key: false,
-        api_key_source: 'empty'
+        enabled: true,
+        has_api_key: true,
+        api_key_resolvable: false,
+        api_key_source: 'env'
       }
     }
   });
@@ -167,6 +360,9 @@ test('gallery hides NodeImage upload actions when the integration is unavailable
   await page.getByRole('button', { name: 'Select' }).click();
   await page.getByRole('button', { name: 'Select page' }).click();
   await expect(page.getByRole('button', { name: 'Upload selected to NodeImage', exact: true })).toHaveCount(0);
+  const actionGrid = page.locator('.gallery-card').first().locator('.gallery-card-actions');
+  await expect(actionGrid.locator('button, a')).toHaveCount(6);
+  expect(await actionGrid.evaluate((element) => getComputedStyle(element).gridTemplateColumns.split(' ').length)).toBe(4);
 });
 
 test('lightbox shows a ready thumbnail until the original image loads', async ({ page }) => {

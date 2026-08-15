@@ -1,4 +1,5 @@
 import io
+import mimetypes
 import struct
 import tempfile
 import uuid
@@ -83,6 +84,16 @@ PILLOW_FORMATS = {
     "TIFF": "tiff",
     "WEBP": "webp",
 }
+
+
+def image_content_type_for_filename(filename: str | Path) -> str:
+    """Return the repository's stable image MIME type for a filename."""
+
+    name = str(filename or "")
+    image_format = IMAGE_EXTENSION_FORMATS.get(Path(name).suffix.lower())
+    if image_format:
+        return IMAGE_FORMAT_CONTENT_TYPES[image_format]
+    return mimetypes.guess_type(name)[0] or "application/octet-stream"
 
 
 def configure_pillow_image_limits() -> None:

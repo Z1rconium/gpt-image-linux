@@ -1,11 +1,109 @@
+import json
+
+import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
+from backend.app.api import presets
 from backend.app.api.middleware import register_exception_handlers
 from backend.app.core import secrets
 from backend.app.core import settings as config
 from backend.app.integrations.r2 import config as r2_config
 from backend.app.repositories import db as db_repo
+
+
+def test_resolve_secret_reference_supports_all_setting_sources(monkeypatch):
+    target_url = "https://api.nodeimage.com"
+    options = {
+        "purpose": "nodeimage_api_key",
+        "target_url": target_url,
+        "host_allowlist": "api.nodeimage.com",
+        "field_name": "NodeImage API key",
+    }
+
+    assert secrets.resolve_secret_reference("", **options) == ""
+    assert secrets.resolve_secret_reference("literal-key", **options) == "literal-key"
+
+    monkeypatch.setenv("NODEIMAGE_REFERENCE_KEY", "env-key")
+    assert (
+        secrets.resolve_secret_reference("${NODEIMAGE_REFERENCE_KEY}", **options)
+        == "env-key"
+    )
+    monkeypatch.delenv("NODEIMAGE_REFERENCE_KEY")
+    with pytest.raises(
+        secrets.SecretRegistryError,
+        match="NodeImage API key environment variable NODEIMAGE_REFERENCE_KEY",
+    ):
+        secrets.resolve_secret_reference("${NODEIMAGE_REFERENCE_KEY}", **options)
+
+    monkeypatch.setenv("NODEIMAGE_REGISTRY_KEY", "registry-key")
+    secrets.configure_registry(
+        json.dumps(
+            {
+                "nodeimage-registry-key": {
+                    "purpose": "nodeimage_api_key",
+                    "origin": target_url,
+                    "env": "NODEIMAGE_REGISTRY_KEY",
+                }
+            }
+        )
+    )
+    assert (
+        secrets.resolve_secret_reference("nodeimage-registry-key", **options)
+        == "registry-key"
+    )
+
+    with pytest.raises(secrets.SecretRegistryError, match="not permitted"):
+        secrets.resolve_secret_reference(
+            "nodeimage-registry-key",
+            **{**options, "purpose": "upstream_api"},
+        )
+
+
+def test_api_key_response_fields_masks_plaintext_for_all_consumers(monkeypatch):
+    monkeypatch.setenv("RESPONSE_REGISTRY_KEY", "registry-value")
+    secrets.configure_registry(
+        json.dumps(
+            {
+                "response-registry-key": {
+                    "purpose": "upstream_api",
+                    "origin": "https://api.example.com",
+                    "env": "RESPONSE_REGISTRY_KEY",
+                }
+            }
+        )
+    )
+
+    fields = presets.api_key_response_fields("plain-secret-value")
+    assert fields == {
+        "api_key_masked": "plai***alue",
+        "has_api_key": True,
+        "api_key_source": "stored",
+        "api_key_env_var": None,
+        "api_key_secret_id": None,
+    }
+    assert "plain-secret-value" not in str(fields)
+
+    assert presets.api_key_response_fields("${RESPONSE_ENV_KEY}")["api_key_source"] == "env"
+    registry_fields = presets.api_key_response_fields("response-registry-key")
+    assert registry_fields["api_key_source"] == "registry"
+    assert registry_fields["api_key_secret_id"] == "response-registry-key"
+
+    r2 = presets.build_r2_backup_settings_response(
+        {
+            "enabled": True,
+            "endpoint_url": "https://account.r2.cloudflarestorage.com",
+            "bucket_name": "images",
+            "access_key_id": "plain-access-key",
+            "secret_access_key": "plain-secret-key",
+        }
+    ).model_dump()
+    assert r2["access_key_id_source"] == "stored"
+    assert r2["access_key_id_secret_id"] is None
+    assert r2["secret_access_key_source"] == "stored"
+    assert r2["secret_access_key_secret_id"] is None
+    assert "plain-access-key" not in str(r2)
+    assert "plain-secret-key" not in str(r2)
 
 
 def test_default_settings_do_not_emit_missing_builtin_secret_ids(monkeypatch):

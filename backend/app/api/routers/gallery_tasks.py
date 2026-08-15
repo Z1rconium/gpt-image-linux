@@ -2,7 +2,6 @@ import asyncio
 import hashlib
 import inspect
 import logging
-import mimetypes
 import os
 import uuid
 from collections.abc import Iterable, Iterator
@@ -45,6 +44,7 @@ from ...repositories.coordination import (
     get_gallery_job,
     get_gallery_jobs_updated_at_edges,
     list_gallery_job_ids_with_files,
+    request_gallery_job_cancellation,
     release_background_lease,
     release_import_upload_reservation,
     reserve_gallery_job_capacity,
@@ -109,6 +109,7 @@ from ...schemas.gallery import (
     GallerySyncRequest,
     GallerySyncJobStatus,
 )
+from ...schemas.nodeimage import NodeImageUploadJobStatus
 from ...services.gallery_common import *
 from ...services.gallery_jobs import *
 from ...services.gallery_maintenance import (
@@ -347,6 +348,49 @@ async def stream_gallery_import_job(job_id: str, request: Request):
         payload_builder=_gallery_import_payload,
         not_found_detail="Gallery import job not found",
     )
+
+
+@router.get("/api/gallery/nodeimage-upload-jobs/{job_id}", response_model=NodeImageUploadJobStatus)
+async def get_gallery_nodeimage_upload_job(job_id: str):
+    job = await asyncio.to_thread(get_gallery_job, NODEIMAGE_UPLOAD_JOB_KIND, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="NodeImage upload job not found")
+    return NodeImageUploadJobStatus(**_nodeimage_upload_payload(job))
+
+
+@router.get("/api/gallery/nodeimage-upload-jobs/{job_id}/events")
+async def stream_gallery_nodeimage_upload_job(job_id: str, request: Request):
+    return await stream_gallery_job(
+        kind=NODEIMAGE_UPLOAD_JOB_KIND,
+        job_id=job_id,
+        request=request,
+        event_name="nodeimage_upload",
+        terminal_statuses=NODEIMAGE_UPLOAD_TERMINAL_STATUSES,
+        payload_builder=_nodeimage_upload_payload,
+        not_found_detail="NodeImage upload job not found",
+    )
+
+
+async def _cancel_gallery_nodeimage_upload_job(job_id: str):
+    job = await asyncio.to_thread(
+        request_gallery_job_cancellation,
+        NODEIMAGE_UPLOAD_JOB_KIND,
+        job_id,
+    )
+    if not job:
+        raise HTTPException(status_code=404, detail="NodeImage upload job not found")
+    _publish_gallery_job_sse(job)
+    return NodeImageUploadJobStatus(**_nodeimage_upload_payload(job))
+
+
+@router.delete("/api/gallery/nodeimage-upload-jobs/{job_id}", response_model=NodeImageUploadJobStatus)
+async def cancel_gallery_nodeimage_upload_job(job_id: str):
+    return await _cancel_gallery_nodeimage_upload_job(job_id)
+
+
+@router.post("/api/gallery/nodeimage-upload-jobs/{job_id}/cancel", response_model=NodeImageUploadJobStatus)
+async def request_gallery_nodeimage_upload_cancellation(job_id: str):
+    return await _cancel_gallery_nodeimage_upload_job(job_id)
 
 
 @router.get("/api/download-all")

@@ -4,27 +4,30 @@ from __future__ import annotations
 
 import asyncio
 import json
-import mimetypes
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 import aiohttp
 
 from ...core import secrets
 from ...core.redaction import redact_sensitive_text
-from ...core.validators import get_env_var_ref_name, resolve_env_var_ref
+from ...repositories.image_files import image_content_type_for_filename
 from ..session_pool import TIMEOUT_NODEIMAGE, get_pool
 
 NODEIMAGE_API_URL = "https://api.nodeimage.com"
 NODEIMAGE_UPLOAD_URL = f"{NODEIMAGE_API_URL}/api/upload"
 NODEIMAGE_HOST_ALLOWLIST = "api.nodeimage.com"
 MAX_NODEIMAGE_RESPONSE_BYTES = 2 * 1024 * 1024
+NODEIMAGE_MAX_ATTEMPTS = 2
+NODEIMAGE_RETRY_BACKOFF_SECONDS = 0.2
 RETRYABLE_CONNECT_ERRORS = (
     aiohttp.ClientConnectorError,
     aiohttp.ClientProxyConnectionError,
 )
+NodeImageFileSource = Path | str | Callable[[], Any]
 
 
 class NodeImageConfigurationError(ValueError):
@@ -36,6 +39,14 @@ class NodeImageAuthError(RuntimeError):
 
 
 class NodeImageUploadError(RuntimeError):
+    pass
+
+
+class NodeImageTransientError(NodeImageUploadError):
+    """An upload failure that is safe to retry before a response is complete."""
+
+
+class _NodeImageResponseReadError(NodeImageUploadError):
     pass
 
 
@@ -52,28 +63,16 @@ class NodeImageUploadResult:
 
 
 def _resolve_secret(value: Any) -> str:
-    raw = str(value or "").strip()
-    if not raw:
-        return ""
-    env_var = get_env_var_ref_name(raw)
-    if env_var:
-        resolved = resolve_env_var_ref(raw)
-        if resolved:
-            return resolved
-        raise NodeImageConfigurationError(
-            f"NodeImage API key environment variable {env_var} is not set or empty."
-        )
-    if raw not in secrets.configured_secret_ids():
-        return raw
     try:
-        return secrets.resolve_secret(
-            raw,
+        return secrets.resolve_secret_reference(
+            value,
             purpose="nodeimage_api_key",
             target_url=NODEIMAGE_API_URL,
             host_allowlist=NODEIMAGE_HOST_ALLOWLIST,
+            field_name="NodeImage API key",
         )
     except secrets.SecretRegistryError as exc:
-        raise NodeImageConfigurationError(f"NodeImage API key: {exc}") from exc
+        raise NodeImageConfigurationError(str(exc)) from exc
 
 
 def resolve_nodeimage_settings(
@@ -107,14 +106,18 @@ async def _read_response_json(response: aiohttp.ClientResponse) -> dict[str, Any
             chunks.append(chunk)
     except NodeImageUploadError:
         raise
-    except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-        raise NodeImageUploadError("NodeImage returned an unreadable response.") from exc
+    except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
+        raise _NodeImageResponseReadError(
+            "NodeImage returned an unreadable response."
+        ) from exc
     try:
         parsed = json.loads(b"".join(chunks).decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise NodeImageUploadError("NodeImage returned an invalid JSON response.") from exc
+        raise _NodeImageResponseReadError(
+            "NodeImage returned an invalid JSON response."
+        ) from exc
     if not isinstance(parsed, dict):
-        raise NodeImageUploadError("NodeImage returned an invalid response.")
+        raise _NodeImageResponseReadError("NodeImage returned an invalid response.")
     return parsed
 
 
@@ -143,79 +146,146 @@ def _validate_direct_url(value: Any) -> str:
     return direct
 
 
-async def upload_image_bytes(
-    image_bytes: bytes,
+def _markdown_escape_alt(value: str) -> str:
+    # Preserve ordinary filename punctuation while escaping inline constructs.
+    escaped = str(value or "image.png").replace("\\", "\\\\")
+    for character in "`*_[]()<>":
+        escaped = escaped.replace(character, f"\\{character}")
+    return escaped
+
+
+def _markdown_for_direct_url(direct: str, filename: str) -> str:
+    safe_filename = Path(str(filename or "image.png")).name or "image.png"
+    alt = _markdown_escape_alt(safe_filename)
+    encoded_url = quote(direct, safe=":/?#[]@!$&'*+,;=%-._~")
+    return f"![{alt}]({encoded_url})"
+
+
+def _open_file_source(source: NodeImageFileSource):
+    if isinstance(source, (str, Path)):
+        return Path(source).open("rb")
+    handle = source()
+    if not hasattr(handle, "read") or not hasattr(handle, "close"):
+        raise NodeImageUploadError("NodeImage file source was not readable.")
+    return handle
+
+
+async def _upload_image_source_once(
+    image_source: bytes | NodeImageFileSource,
+    safe_filename: str,
+    effective: NodeImageEffectiveSettings,
+) -> NodeImageUploadResult:
+    file_handle = None
+    if not isinstance(image_source, bytes):
+        try:
+            file_handle = _open_file_source(image_source)
+        except OSError:
+            raise
+        except NodeImageUploadError:
+            raise
+        except Exception as exc:
+            raise NodeImageUploadError("Image file could not be read") from exc
+
+    try:
+        form_source = image_source if isinstance(image_source, bytes) else file_handle
+        form = aiohttp.FormData()
+        form.add_field(
+            "image",
+            form_source,
+            filename=safe_filename,
+            content_type=image_content_type_for_filename(safe_filename),
+        )
+        session = get_pool().get(timeout_kind=TIMEOUT_NODEIMAGE)
+        async with session.post(
+            NODEIMAGE_UPLOAD_URL,
+            data=form,
+            headers={"X-API-Key": effective.api_key},
+            allow_redirects=False,
+        ) as response:
+            if response.status in {401, 403}:
+                raise NodeImageAuthError("NodeImage API key was rejected.")
+            try:
+                payload = await _read_response_json(response)
+            except _NodeImageResponseReadError as exc:
+                if response.status >= 500:
+                    raise NodeImageTransientError(str(exc)) from exc
+                raise
+
+            message = _error_text(payload, response.status, effective.api_key)
+            if response.status >= 500:
+                raise NodeImageTransientError(message)
+            if _is_auth_error(message):
+                raise NodeImageAuthError("NodeImage API key was rejected.")
+            if response.status >= 400 or payload.get("success") is False:
+                raise NodeImageUploadError(message)
+
+            links = payload.get("links")
+            if not isinstance(links, dict):
+                raise NodeImageUploadError(
+                    "NodeImage response did not include upload links."
+                )
+            direct = _validate_direct_url(links.get("direct"))
+            return NodeImageUploadResult(
+                url=direct,
+                markdown=_markdown_for_direct_url(direct, safe_filename),
+            )
+    except NodeImageAuthError:
+        raise
+    except NodeImageTransientError:
+        raise
+    except NodeImageUploadError:
+        raise
+    except RETRYABLE_CONNECT_ERRORS as exc:
+        raise NodeImageTransientError("NodeImage upload request failed.") from exc
+    except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
+        raise NodeImageUploadError("NodeImage upload request failed.") from exc
+    finally:
+        if file_handle is not None:
+            file_handle.close()
+
+
+async def upload_image_source(
+    image_source: bytes | NodeImageFileSource,
     filename: str,
     effective: NodeImageEffectiveSettings,
 ) -> NodeImageUploadResult:
     if not effective.enabled:
         raise NodeImageConfigurationError("NodeImage upload is disabled.")
-    if not image_bytes:
+    if isinstance(image_source, bytes) and not image_source:
+        raise NodeImageUploadError("Image file is empty.")
+    if (
+        isinstance(image_source, (str, Path))
+        and Path(image_source).stat().st_size <= 0
+    ):
         raise NodeImageUploadError("Image file is empty.")
 
     safe_filename = Path(str(filename or "image.png")).name or "image.png"
-    content_type = mimetypes.guess_type(safe_filename)[0] or "application/octet-stream"
-    headers = {"X-API-Key": effective.api_key}
-
-    for attempt in range(2):
-        form = aiohttp.FormData()
-        form.add_field(
-            "image",
-            image_bytes,
-            filename=safe_filename,
-            content_type=content_type,
-        )
+    attempt = 1
+    while True:
         try:
-            session = get_pool().get(timeout_kind=TIMEOUT_NODEIMAGE)
-            async with session.post(
-                NODEIMAGE_UPLOAD_URL,
-                data=form,
-                headers=headers,
-                allow_redirects=False,
-            ) as response:
-                if response.status in {401, 403}:
-                    raise NodeImageAuthError("NodeImage API key was rejected.")
-                try:
-                    payload = await _read_response_json(response)
-                except NodeImageUploadError as exc:
-                    if response.status >= 500 and attempt == 0:
-                        await asyncio.sleep(0.2)
-                        continue
-                    raise
+            return await _upload_image_source_once(
+                image_source,
+                safe_filename,
+                effective,
+            )
+        except NodeImageTransientError:
+            if attempt >= NODEIMAGE_MAX_ATTEMPTS:
+                raise
+            attempt += 1
+            await asyncio.sleep(NODEIMAGE_RETRY_BACKOFF_SECONDS)
 
-                message = _error_text(payload, response.status, effective.api_key)
-                if response.status >= 500:
-                    if attempt == 0:
-                        await asyncio.sleep(0.2)
-                        continue
-                    raise NodeImageUploadError(message)
-                if _is_auth_error(message):
-                    raise NodeImageAuthError("NodeImage API key was rejected.")
-                if response.status >= 400 or payload.get("success") is False:
-                    raise NodeImageUploadError(message)
 
-                links = payload.get("links")
-                if not isinstance(links, dict):
-                    raise NodeImageUploadError(
-                        "NodeImage response did not include upload links."
-                    )
-                direct = _validate_direct_url(links.get("direct"))
-                markdown = str(links.get("markdown") or "").strip()
-                if not markdown:
-                    raise NodeImageUploadError(
-                        "NodeImage response did not include upload links."
-                    )
-                return NodeImageUploadResult(url=direct, markdown=markdown)
-        except NodeImageAuthError:
-            raise
-        except NodeImageUploadError:
-            raise
-        except RETRYABLE_CONNECT_ERRORS as exc:
-            if attempt == 0:
-                await asyncio.sleep(0.2)
-                continue
-            raise NodeImageUploadError("NodeImage upload request failed.") from exc
-        except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
-            raise NodeImageUploadError("NodeImage upload request failed.") from exc
+async def upload_image_file(
+    path: Path | str,
+    filename: str,
+    effective: NodeImageEffectiveSettings,
+) -> NodeImageUploadResult:
+    return await upload_image_source(path, filename, effective)
 
-    raise NodeImageUploadError("NodeImage upload request failed.")
+
+async def upload_image_bytes(
+    image_bytes: bytes,
+    filename: str,
+    effective: NodeImageEffectiveSettings,
+) -> NodeImageUploadResult:
+    return await upload_image_source(image_bytes, filename, effective)

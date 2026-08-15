@@ -3,7 +3,7 @@ import { writable } from 'svelte/store';
 export type NodeImageResultItem = {
   imageId: string;
   label: string;
-  status: 'ok' | 'error';
+  status: 'ok' | 'error' | 'cancelled';
   url: string;
   markdown: string;
   error: string;
@@ -13,6 +13,7 @@ export type NodeImageResultState = {
   items: NodeImageResultItem[];
   uploadedCount: number;
   failedCount: number;
+  cancelledCount: number;
 };
 
 function createNodeImageResultStore() {

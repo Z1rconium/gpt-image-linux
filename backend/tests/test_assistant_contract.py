@@ -932,7 +932,7 @@ def test_ai_assistant_gallery_batch_analysis_validates_runtime_before_queueing(c
         json={"ids": ["assistant-batch-config-error"]},
     )
 
-    assert submitted.status_code == 400
+    assert submitted.status_code == 422
     assert "MISSING_ASSISTANT_API_KEY is not set or empty" in submitted.json()["detail"]
     assert coordination_repo.count_active_gallery_jobs("ai_analyze") == 0
 

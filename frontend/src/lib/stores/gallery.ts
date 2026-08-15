@@ -35,6 +35,8 @@ export type GalleryOperationStatus = {
   label: string;
   detail: string;
   progress: number | null;
+  cancel?: () => void | Promise<void>;
+  cancelPending?: boolean;
 };
 
 export type GalleryNavigation = 'next' | 'prev' | 'jump';

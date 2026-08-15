@@ -268,6 +268,27 @@ def update_gallery_job(
     with _connect() as conn:
         with _transaction(conn):
             if lease_owner:
+                if "payload_json" in normalized:
+                    current_payload_row = conn.execute(
+                        "SELECT payload_json FROM gallery_jobs WHERE job_id = ? AND lease_owner = ?",
+                        (job_id, lease_owner),
+                    ).fetchone()
+                    current_payload = _json_loads_dict(
+                        current_payload_row["payload_json"]
+                    ) if current_payload_row else {}
+                    next_payload = _json_loads_dict(normalized["payload_json"])
+                    if current_payload.get("cancel_requested"):
+                        next_payload["cancel_requested"] = True
+                        if current_payload.get("cancel_requested_at"):
+                            next_payload.setdefault(
+                                "cancel_requested_at",
+                                current_payload["cancel_requested_at"],
+                            )
+                        normalized["payload_json"] = json.dumps(
+                            next_payload,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        )
                 cursor = conn.execute(
                     f"""
                     UPDATE gallery_jobs
@@ -335,6 +356,119 @@ def update_gallery_job_progress(
                     (*normalized.values(), job_id),
                 )
     return cursor.rowcount > 0
+
+
+def request_gallery_job_cancellation(kind: str, job_id: str) -> dict[str, Any] | None:
+    """Request cooperative cancellation while preserving completed item results."""
+    _ensure_database()
+    normalized_kind = str(kind or "").strip()
+    normalized_job_id = str(job_id or "").strip()
+    if not normalized_kind or not normalized_job_id:
+        return None
+    now = utc_now()
+    with _connect() as conn:
+        with _transaction(conn):
+            row = conn.execute(
+                f"""
+                SELECT {', '.join(GALLERY_JOB_COLUMNS)}
+                FROM gallery_jobs
+                WHERE kind = ? AND job_id = ?
+                """,
+                (normalized_kind, normalized_job_id),
+            ).fetchone()
+            if not row:
+                return None
+
+            status = str(row["status"] or "")
+            payload = _json_loads_dict(row["payload_json"])
+            if status == "queued":
+                ids = [str(value) for value in payload.get("ids") or [] if str(value)]
+                existing_results = [
+                    value
+                    for value in payload.get("results") or []
+                    if isinstance(value, dict) and str(value.get("image_id") or "")
+                ]
+                existing_ids = {str(value["image_id"]) for value in existing_results}
+                results = list(existing_results)
+                for image_id in ids:
+                    if image_id in existing_ids:
+                        continue
+                    results.append(
+                        {
+                            "image_id": image_id,
+                            "filename": None,
+                            "status": "cancelled",
+                            "url": None,
+                            "markdown": None,
+                            "error": "Cancelled before upload",
+                        }
+                    )
+                payload["results"] = results
+                requested_count = max(
+                    int(row["requested_count"] or 0),
+                    len(ids),
+                )
+                uploaded_count = sum(value.get("status") == "ok" for value in results)
+                failed_count = sum(value.get("status") == "error" for value in results)
+                conn.execute(
+                    """
+                    UPDATE gallery_jobs
+                    SET status = 'cancelled',
+                        stage = 'cancelled',
+                        message = 'NodeImage upload cancelled',
+                        progress = 100,
+                        requested_count = ?,
+                        processed_count = ?,
+                        uploaded_count = ?,
+                        failed_count = ?,
+                        completed_at = ?,
+                        updated_at = ?,
+                        error = NULL,
+                        lease_owner = NULL,
+                        lease_expires_at = NULL,
+                        payload_json = ?
+                    WHERE kind = ? AND job_id = ? AND status = 'queued'
+                    """,
+                    (
+                        requested_count,
+                        requested_count,
+                        uploaded_count,
+                        failed_count,
+                        now,
+                        now,
+                        json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                        normalized_kind,
+                        normalized_job_id,
+                    ),
+                )
+            elif status == "running":
+                payload["cancel_requested"] = True
+                payload["cancel_requested_at"] = now
+                conn.execute(
+                    """
+                    UPDATE gallery_jobs
+                    SET stage = 'cancelling',
+                        message = 'Cancelling NodeImage upload',
+                        updated_at = ?,
+                        payload_json = ?
+                    WHERE kind = ? AND job_id = ? AND status = 'running'
+                    """,
+                    (
+                        now,
+                        json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                        normalized_kind,
+                        normalized_job_id,
+                    ),
+                )
+            row = conn.execute(
+                f"""
+                SELECT {', '.join(GALLERY_JOB_COLUMNS)}
+                FROM gallery_jobs
+                WHERE kind = ? AND job_id = ?
+                """,
+                (normalized_kind, normalized_job_id),
+            ).fetchone()
+    return _gallery_job_from_row(row) if row else None
 
 
 def renew_gallery_job_lease(
@@ -656,22 +790,30 @@ def cleanup_expired_gallery_jobs(kind: str) -> list[dict[str, Any]]:
     return [_gallery_job_from_row(row) for row in rows]
 
 
-def cleanup_stale_gallery_jobs(kind: str, ttl_seconds: int) -> list[dict[str, Any]]:
+def cleanup_stale_gallery_jobs(
+    kind: str,
+    ttl_seconds: int,
+    terminal_statuses: Sequence[str] = ("success", "error"),
+) -> list[dict[str, Any]]:
     _ensure_database()
     cutoff = datetime.fromtimestamp(
         time.time() - max(0, int(ttl_seconds or 0)),
         tz=timezone.utc,
     ).isoformat()
+    statuses = [str(status) for status in terminal_statuses if str(status)]
+    if not statuses:
+        return []
+    placeholders = ", ".join("?" for _ in statuses)
     with _connect() as conn:
         with _transaction(conn):
             rows = conn.execute(
                 f"""
                 SELECT {", ".join(GALLERY_JOB_COLUMNS)}
                 FROM gallery_jobs
-                WHERE kind = ? AND status IN ('success', 'error')
+                WHERE kind = ? AND status IN ({placeholders})
                     AND updated_at <= ?
                 """,
-                (kind, cutoff),
+                (kind, *statuses, cutoff),
             ).fetchall()
             if rows:
                 conn.executemany(

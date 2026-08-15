@@ -1,5 +1,4 @@
 import logging
-import mimetypes
 import uuid
 from contextlib import nullcontext
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -16,7 +15,7 @@ from ...core.validators import (
     normalize_r2_endpoint_url,
     resolve_env_var_ref,
 )
-from ...repositories.image_files import safe_image_path
+from ...repositories.image_files import image_content_type_for_filename, safe_image_path
 
 
 HealthStatus = str
@@ -230,7 +229,7 @@ def _local_sync_candidates_for_batch(
 
 
 def _content_type_for(path: Path) -> str:
-    return mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    return image_content_type_for_filename(path.name)
 
 
 def _metadata_for_entry(entry: Any, byte_size: int) -> dict[str, str]:

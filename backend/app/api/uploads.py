@@ -1,4 +1,3 @@
-import mimetypes
 from pathlib import Path
 
 from fastapi import HTTPException, UploadFile
@@ -8,6 +7,7 @@ from ..repositories.image_files import (
     IMAGE_EXTENSION_FORMATS,
     IMAGE_FILE_EXTENSIONS,
     IMAGE_FORMAT_CONTENT_TYPES,
+    image_content_type_for_filename,
     validate_image_header_bytes,
 )
 
@@ -23,14 +23,7 @@ def resolve_upload_content_type(upload: UploadFile) -> str:
     if upload.content_type and upload.content_type.startswith("image/"):
         return upload.content_type
 
-    guessed_type = mimetypes.guess_type(upload.filename or "")[0]
-    if guessed_type and guessed_type.startswith("image/"):
-        return guessed_type
-
-    return IMAGE_UPLOAD_CONTENT_TYPES.get(
-        Path(upload.filename or "").suffix.lower(),
-        "application/octet-stream",
-    )
+    return image_content_type_for_filename(upload.filename or "")
 
 
 def is_image_upload(upload: UploadFile) -> bool:

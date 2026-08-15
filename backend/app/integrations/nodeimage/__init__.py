@@ -5,10 +5,13 @@ from .client import (
     NodeImageAuthError,
     NodeImageConfigurationError,
     NodeImageEffectiveSettings,
+    NodeImageTransientError,
     NodeImageUploadError,
     NodeImageUploadResult,
     resolve_nodeimage_settings,
     upload_image_bytes,
+    upload_image_file,
+    upload_image_source,
 )
 
 __all__ = [
@@ -16,8 +19,11 @@ __all__ = [
     "NodeImageAuthError",
     "NodeImageConfigurationError",
     "NodeImageEffectiveSettings",
+    "NodeImageTransientError",
     "NodeImageUploadError",
     "NodeImageUploadResult",
     "resolve_nodeimage_settings",
     "upload_image_bytes",
+    "upload_image_file",
+    "upload_image_source",
 ]

@@ -202,7 +202,20 @@
           <p class="text-xs font-semibold text-emerald-950 dark:text-emerald-100">{operationStatus.label}</p>
           <p class="mt-1 text-xs text-emerald-800 dark:text-emerald-200/80">{operationStatus.detail}</p>
         </div>
-        <div class="text-xs text-emerald-800 dark:text-emerald-200">{operationStatus.progress === null ? $t.gallery.notInterruptible : `${operationStatus.progress}%`}</div>
+        <div class="flex shrink-0 items-center gap-2">
+          <div class="text-xs text-emerald-800 dark:text-emerald-200">{operationStatus.progress === null ? $t.gallery.notInterruptible : `${operationStatus.progress}%`}</div>
+          {#if operationStatus.cancel}
+            <button
+              type="button"
+              class="control-focus inline-flex min-h-9 items-center gap-1.5 rounded-md border border-emerald-700/40 px-2.5 py-1.5 text-xs font-medium text-emerald-900 hover:bg-emerald-500/10 disabled:cursor-wait disabled:opacity-50 dark:border-emerald-300/40 dark:text-emerald-100 dark:hover:bg-emerald-300/10"
+              disabled={operationStatus.cancelPending}
+              on:click={() => void operationStatus.cancel?.()}
+            >
+              <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" /></svg>
+              {$t.gallery.cancelOperation}
+            </button>
+          {/if}
+        </div>
       </div>
       <div class="mt-3 h-1.5 overflow-hidden rounded-full bg-emerald-950/20 dark:bg-emerald-950/70">
         {#if operationStatus.progress === null}
@@ -279,9 +292,9 @@
             <div class="space-y-2 p-2.5">
               <div class="min-w-0">
                 <p class="line-clamp-2 text-xs leading-5 text-stone-800 dark:text-zinc-200">{image.prompt}</p>
-                <p class="mt-1 truncate text-[11px] leading-4 text-stone-500 dark:text-zinc-500">{displayImageSize(image)} / {image.model || '-'}</p>
+                <p class="mt-1 truncate text-xs leading-4 text-stone-500 dark:text-zinc-500">{displayImageSize(image)} / {image.model || '-'}</p>
               </div>
-              <div class={`grid gap-1 ${canNodeImageUpload ? 'grid-cols-4' : 'grid-cols-6'}`}>
+              <div class="gallery-card-actions grid grid-cols-4 gap-1">
                 <button
                   type="button"
                   class="gallery-icon-action control-focus border-emerald-500/40 text-emerald-700 hover:bg-emerald-500/10 dark:text-emerald-200"

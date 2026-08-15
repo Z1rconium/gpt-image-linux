@@ -2,7 +2,6 @@ import asyncio
 import hashlib
 import inspect
 import logging
-import mimetypes
 import os
 import time
 import uuid
@@ -81,11 +80,11 @@ from ...repositories.gallery.sync_state import (
 )
 from ...repositories.image_files import (
     THUMBNAIL_CONTENT_TYPE,
+    image_content_type_for_filename,
     safe_image_path,
     safe_thumbnail_path,
 )
-from ...repositories.settings import load_r2_backup_settings
-from ...repositories.settings import load_nodeimage_settings
+from ...repositories.settings import load_nodeimage_settings, load_r2_backup_settings
 from ...repositories.thumbnail_jobs import (
     THUMBNAIL_JOB_LEASE_SECONDS,
     claim_next_thumbnail_job,
@@ -119,7 +118,7 @@ from ...integrations.nodeimage.client import (
     NodeImageConfigurationError,
     NodeImageUploadError,
     resolve_nodeimage_settings,
-    upload_image_bytes,
+    upload_image_file,
 )
 from ...services.gallery_common import *
 from ...services.gallery_maintenance import kick_thumbnail_dispatcher
@@ -303,22 +302,23 @@ async def upload_gallery_item_to_nodeimage(image_id: str):
     if not entry:
         raise HTTPException(status_code=404, detail="Gallery entry not found")
 
-    path = await asyncio.to_thread(_resolve_gallery_image_path, entry.filename)
-    if not path:
+    path = safe_image_path(entry.filename)
+    if not path or not path.exists():
         raise HTTPException(status_code=404, detail="Image file not found")
 
     try:
         effective = resolve_nodeimage_settings(
             await asyncio.to_thread(load_nodeimage_settings)
         )
-        image_bytes = await asyncio.to_thread(path.read_bytes)
-        result = await upload_image_bytes(image_bytes, path.name, effective)
+        result = await upload_image_file(path, path.name, effective)
     except NodeImageConfigurationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except NodeImageAuthError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     except NodeImageUploadError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Image file not found") from exc
     except OSError as exc:
         raise HTTPException(status_code=404, detail="Image file could not be read") from exc
 
@@ -338,7 +338,7 @@ async def _image_file_response(filename: str, *, download: bool = False):
     if not path:
         raise HTTPException(status_code=404, detail="Image not found")
 
-    media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    media_type = image_content_type_for_filename(path.name)
     if config.ENABLE_NGINX_ACCEL_REDIRECT:
         return _x_accel_response(
             path,

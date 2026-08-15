@@ -13,6 +13,7 @@ import type {
   GalleryResponse,
   GallerySyncJobStatus,
   NodeImageBatchUploadResponse,
+  NodeImageUploadJobStatus,
   NodeImageUploadResponse
 } from '$lib/api/types/gallery';
 import type { GalleryLoadOptions, GalleryNavigation, GalleryOperationStatus, GalleryState } from '$lib/stores/gallery';
@@ -20,6 +21,8 @@ import { nodeImageResult, type NodeImageResultItem } from '$lib/stores/nodeImage
 
 const STREAMING_ZIP_DOWNLOAD_BYTES_THRESHOLD = 64 * 1024 * 1024;
 const GALLERY_JOB_EVENT_NETWORK_TIMEOUT_MS = 30_000;
+const NODE_IMAGE_CANCEL_POLL_INTERVAL_MS = 250;
+const NODE_IMAGE_UPLOAD_TERMINAL_STATUSES = ['success', 'partial_failure', 'cancelled', 'error'];
 
 export type GalleryActionDeps = {
   getState: () => GalleryState;
@@ -40,6 +43,8 @@ export type GalleryWaitOptions = {
   eventsUrl: string;
   eventNames: string[];
   signal?: AbortSignal;
+  terminalStatuses?: string[];
+  resolveErrorStatuses?: boolean;
 };
 
 function downloadBlob(blob: Blob, filename: string) {
@@ -196,6 +201,24 @@ function abortError() {
   return new DOMException('Gallery operation cancelled', 'AbortError');
 }
 
+function waitForAbortableDelay(delayMs: number, signal?: AbortSignal) {
+  return new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(abortError());
+      return;
+    }
+    const handleAbort = () => {
+      clearTimeout(timer);
+      reject(abortError());
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', handleAbort);
+      resolve();
+    }, delayMs);
+    signal?.addEventListener('abort', handleAbort, { once: true });
+  });
+}
+
 function isAbortError(error: unknown) {
   return error instanceof Error && error.name === 'AbortError';
 }
@@ -209,6 +232,7 @@ export function waitForGalleryJob<T extends { status: string; error?: string | n
   onJob: (job: T) => void
 ): Promise<T> {
   return new Promise((resolve, reject) => {
+    const terminalStatuses = new Set(options.terminalStatuses || ['success', 'error']);
     let settled = false;
     let source: EventSource | null = null;
     let networkTimer: ReturnType<typeof setTimeout> | null = null;
@@ -243,7 +267,7 @@ export function waitForGalleryJob<T extends { status: string; error?: string | n
         onEvent: ({ data }) => {
           clearNetworkTimer();
           onJob(data);
-          if (data.status === 'success') {
+          if (terminalStatuses.has(data.status) && (data.status !== 'error' || options.resolveErrorStatuses)) {
             settle(() => resolve(data));
           } else if (data.status === 'error') {
             settle(() => reject(new Error(data.error || data.message || get(t).messages.requestFailed)));
@@ -309,6 +333,58 @@ function waitForGalleryImportJob(
       signal: options.signal
     },
     onJob
+  );
+}
+
+function waitForNodeImageUploadJob(
+  jobId: string,
+  onJob: (job: NodeImageUploadJobStatus) => void,
+  options: { eventsUrl?: string; signal?: AbortSignal } = {}
+): Promise<NodeImageUploadJobStatus> {
+  return waitForGalleryJob<NodeImageUploadJobStatus>(
+    {
+      eventsUrl: options.eventsUrl || `/api/gallery/nodeimage-upload-jobs/${encodeURIComponent(jobId)}/events`,
+      eventNames: ['nodeimage_upload'],
+      terminalStatuses: NODE_IMAGE_UPLOAD_TERMINAL_STATUSES,
+      resolveErrorStatuses: true,
+      signal: options.signal
+    },
+    onJob
+  );
+}
+
+function isNodeImageUploadTerminal(job: NodeImageUploadJobStatus) {
+  return NODE_IMAGE_UPLOAD_TERMINAL_STATUSES.includes(job.status);
+}
+
+async function waitForNodeImageUploadTerminal(
+  initialJob: NodeImageUploadJobStatus,
+  statusUrl: string,
+  signal?: AbortSignal
+) {
+  let job = initialJob;
+  while (!isNodeImageUploadTerminal(job)) {
+    await waitForAbortableDelay(NODE_IMAGE_CANCEL_POLL_INTERVAL_MS, signal);
+    job = await apiFetch<NodeImageUploadJobStatus>(
+      statusUrl,
+      { signal },
+      'checking NodeImage upload cancellation'
+    );
+  }
+  return job;
+}
+
+function nodeImageJobDetail(job: NodeImageUploadJobStatus, fallbackCount: number) {
+  const labels = get(t).gallery;
+  const total = job.requested_count || fallbackCount;
+  if (job.status === 'cancelled') return labels.nodeImageUploadCancelled(job.uploaded_count, job.failed_count);
+  if (job.stage === 'cancelling') return labels.nodeImageUploadCancelling;
+  if (job.status === 'success') return labels.nodeImageUploadProgress(total, total, job.uploaded_count, job.failed_count);
+  return labels.nodeImageUploadProgress(
+    Math.min(job.processed_count, total),
+    total,
+    job.uploaded_count,
+    job.failed_count
   );
 }
 
@@ -467,7 +543,8 @@ export function createDeferredGalleryActions(deps: GalleryActionDeps) {
           }
         ],
         uploadedCount: 1,
-        failedCount: 0
+        failedCount: 0,
+        cancelledCount: 0
       });
       showToast(get(t).messages.nodeImageUploadComplete);
     } catch (error) {
@@ -490,26 +567,19 @@ export function createDeferredGalleryActions(deps: GalleryActionDeps) {
     nodeImageUploadInProgress = true;
     const controller = new AbortController();
     const unregister = deps.registerAbortController(controller);
+    let jobId: string | null = null;
+    let cancelRequested = false;
+    let cancelUrl: string | null = null;
+    let statusUrl: string | null = null;
+    let cancellationPromise: Promise<void> | null = null;
+    let latestJob: NodeImageUploadJobStatus | null = null;
+    let terminalHandled = false;
     const entryLabels = new Map(
       (state.gallery?.images || []).map((image) => [image.id, image.filename])
     );
-    deps.setOperationStatus({
-      kind: 'nodeimage_upload',
-      label: get(t).gallery.uploadingToNodeImage,
-      detail: get(t).gallery.nodeImageUploadPreparing(count),
-      progress: null
-    });
-    try {
-      const result = await apiFetch<NodeImageBatchUploadResponse>(
-        '/api/gallery/batch/nodeimage-upload',
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(batchRequestBody(state)),
-          signal: controller.signal
-        },
-        'uploading selected images to NodeImage'
-      );
+
+    const showResult = (result: NodeImageUploadJobStatus | NodeImageBatchUploadResponse) => {
+      const jobResult = 'job_id' in result ? result : null;
       const items: NodeImageResultItem[] = result.results.map((item) => ({
         imageId: item.image_id,
         label: item.filename || entryLabels.get(item.image_id) || item.image_id,
@@ -521,18 +591,155 @@ export function createDeferredGalleryActions(deps: GalleryActionDeps) {
       nodeImageResult.show({
         items,
         uploadedCount: result.uploaded_count,
-        failedCount: result.failed_count
+        failedCount: result.failed_count,
+        cancelledCount: jobResult?.cancelled_count || 0
       });
+    };
+
+    const showTerminalResult = (job: NodeImageUploadJobStatus) => {
+      if (terminalHandled) return;
+      terminalHandled = true;
+      showResult(job);
       deps.clearSelection();
+      if (job.status === 'error') {
+        showToast(
+          get(t).messages.nodeImageUploadFailed(job.error || job.message || get(t).gallery.nodeImageUnknownError),
+          'error'
+        );
+        return;
+      }
       showToast(
-        get(t).messages.nodeImageBatchComplete(result.uploaded_count, result.failed_count),
-        result.failed_count ? 'error' : 'status'
+        job.status === 'cancelled'
+          ? get(t).messages.nodeImageBatchCancelled(job.uploaded_count, job.failed_count)
+          : get(t).messages.nodeImageBatchComplete(job.uploaded_count, job.failed_count),
+        job.failed_count || job.status === 'cancelled' ? 'error' : 'status'
       );
+    };
+
+    const cancelUpload = () => {
+      if (cancellationPromise) return cancellationPromise;
+      cancellationPromise = (async () => {
+        cancelRequested = true;
+        deps.setOperationStatus({
+          kind: 'nodeimage_upload',
+          label: get(t).gallery.uploadingToNodeImage,
+          detail: get(t).gallery.nodeImageUploadCancelling,
+          progress: latestJob?.progress ?? null,
+          cancel: cancelUpload,
+          cancelPending: true
+        });
+        if (!jobId) {
+          controller.abort();
+          return;
+        }
+
+        const cancellationController = new AbortController();
+        const unregisterCancellation = deps.registerAbortController(cancellationController);
+        try {
+          const fallbackStatusUrl = `/api/gallery/nodeimage-upload-jobs/${encodeURIComponent(jobId)}`;
+          const cancellationRequestUrl = cancelUrl || fallbackStatusUrl;
+          const requested = await apiFetch<NodeImageUploadJobStatus>(
+            cancellationRequestUrl,
+            {
+              method: cancelUrl ? 'POST' : 'DELETE',
+              signal: cancellationController.signal
+            },
+            'cancelling NodeImage upload'
+          );
+          const cancelled = await waitForNodeImageUploadTerminal(
+            requested,
+            statusUrl || requested.status_url || fallbackStatusUrl,
+            cancellationController.signal
+          );
+          latestJob = cancelled;
+          showTerminalResult(cancelled);
+          controller.abort();
+        } catch (error) {
+          if (isAbortError(error)) return;
+          cancelRequested = false;
+          cancellationPromise = null;
+          if (latestJob && !isNodeImageUploadTerminal(latestJob)) {
+            deps.setOperationStatus({
+              kind: 'nodeimage_upload',
+              label: get(t).gallery.uploadingToNodeImage,
+              detail: nodeImageJobDetail(latestJob, count),
+              progress: Math.round((Math.min(latestJob.processed_count, latestJob.requested_count || count) / Math.max(1, latestJob.requested_count || count)) * 100),
+              cancel: cancelUpload,
+              cancelPending: false
+            });
+          }
+          const reason = error instanceof Error ? error.message : get(t).messages.requestFailed;
+          showToast(get(t).messages.nodeImageUploadFailed(reason), 'error');
+        } finally {
+          unregisterCancellation();
+        }
+      })();
+      return cancellationPromise;
+    };
+
+    deps.setOperationStatus({
+      kind: 'nodeimage_upload',
+      label: get(t).gallery.uploadingToNodeImage,
+      detail: get(t).gallery.nodeImageUploadPreparing(count),
+      progress: 0
+    });
+    try {
+      const result = await apiFetch<NodeImageUploadJobStatus | NodeImageBatchUploadResponse>(
+        '/api/gallery/batch/nodeimage-upload',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(batchRequestBody(state)),
+          signal: controller.signal
+        },
+        'uploading selected images to NodeImage'
+      );
+      if (!('job_id' in result)) {
+        showResult(result);
+        deps.clearSelection();
+        showToast(
+          get(t).messages.nodeImageBatchComplete(result.uploaded_count, result.failed_count),
+          result.failed_count ? 'error' : 'status'
+        );
+        return;
+      }
+
+      jobId = result.job_id;
+      cancelUrl = result.cancel_url || null;
+      statusUrl = result.status_url || null;
+      latestJob = result;
+      deps.setOperationStatus({
+        kind: 'nodeimage_upload',
+        label: get(t).gallery.uploadingToNodeImage,
+        detail: nodeImageJobDetail(result, count),
+        progress: Math.round((Math.min(result.processed_count, count) / Math.max(1, count)) * 100),
+        cancel: cancelUpload
+      });
+      const completedJob = await waitForNodeImageUploadJob(
+        result.job_id,
+        (nextJob) => {
+          latestJob = nextJob;
+          deps.setOperationStatus({
+            kind: 'nodeimage_upload',
+            label: get(t).gallery.uploadingToNodeImage,
+            detail: nodeImageJobDetail(nextJob, count),
+            progress: Math.round((Math.min(nextJob.processed_count, nextJob.requested_count || count) / Math.max(1, nextJob.requested_count || count)) * 100),
+            cancel: cancelUpload,
+            cancelPending: cancelRequested
+          });
+        },
+        { eventsUrl: result.events_url || undefined, signal: controller.signal }
+      );
+      if (cancelRequested && cancellationPromise) await cancellationPromise;
+      showTerminalResult(completedJob);
     } catch (error) {
       if (isAbortError(error)) return;
+      if (cancelRequested && cancellationPromise) await cancellationPromise;
+      if (terminalHandled) return;
       const reason = error instanceof Error ? error.message : get(t).messages.requestFailed;
       showToast(get(t).messages.nodeImageUploadFailed(reason), 'error');
     } finally {
+      if (cancellationPromise) await cancellationPromise;
       unregister();
       deps.setOperationStatus(null);
       nodeImageUploadInProgress = false;

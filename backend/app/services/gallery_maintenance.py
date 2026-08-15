@@ -40,6 +40,9 @@ from .gallery_common import (
     GALLERY_FILE_GC_INTERVAL_SECONDS,
     IMPORT_JOB_TTL_SECONDS,
     MAX_ACTIVE_SYNC_JOBS,
+    NODEIMAGE_UPLOAD_JOB_KIND,
+    NODEIMAGE_UPLOAD_JOB_TTL_SECONDS,
+    NODEIMAGE_UPLOAD_TERMINAL_STATUSES,
     SCHEDULED_R2_SYNC_DISABLED_POLL_SECONDS,
     SYNC_JOB_TTL_SECONDS,
     THUMBNAIL_DISPATCH_INTERVAL_SECONDS,
@@ -53,6 +56,7 @@ from .gallery_jobs import (
     _sleep_while_renewing_background_lease,
     run_gallery_export_dispatcher,
     run_gallery_import_dispatcher,
+    run_gallery_nodeimage_upload_dispatcher,
     run_gallery_sync_dispatcher,
 )
 
@@ -168,6 +172,7 @@ def kick_gallery_job_dispatchers() -> None:
         ("gallery_export_dispatcher_task", run_gallery_export_dispatcher),
         ("gallery_sync_dispatcher_task", run_gallery_sync_dispatcher),
         ("gallery_import_dispatcher_task", run_gallery_import_dispatcher),
+        ("gallery_nodeimage_upload_dispatcher_task", run_gallery_nodeimage_upload_dispatcher),
     ):
         task = getattr(app.state, name, None)
         if task and not task.done():
@@ -372,6 +377,12 @@ async def gc_gallery_export_jobs(worker_id: str) -> None:
                     AI_ANALYZE_JOB_KIND,
                     AI_ANALYZE_JOB_TTL_SECONDS,
                 )
+                stale_nodeimage_upload_jobs = await asyncio.to_thread(
+                    cleanup_stale_gallery_jobs,
+                    NODEIMAGE_UPLOAD_JOB_KIND,
+                    NODEIMAGE_UPLOAD_JOB_TTL_SECONDS,
+                    NODEIMAGE_UPLOAD_TERMINAL_STATUSES,
+                )
                 expired_direct_slots = await asyncio.to_thread(
                     cleanup_expired_gallery_jobs,
                     "export_direct",
@@ -398,15 +409,17 @@ async def gc_gallery_export_jobs(worker_id: str) -> None:
                     or stale_imports
                     or stale_direct_exports
                     or stale_ai_analyze_jobs
+                    or stale_nodeimage_upload_jobs
                     or expired_direct_slots
                 ):
                     logger.info(
-                        "GC cleaned up %d gallery export job(s), %d sync job(s), %d import job(s), %d completed direct export job(s), %d AI analyze job(s), and %d direct export slot(s)",
+                        "GC cleaned up %d gallery export job(s), %d sync job(s), %d import job(s), %d completed direct export job(s), %d AI analyze job(s), %d NodeImage upload job(s), and %d direct export slot(s)",
                         len(stale_exports),
                         len(stale_syncs),
                         len(stale_imports),
                         len(stale_direct_exports),
                         len(stale_ai_analyze_jobs),
+                        len(stale_nodeimage_upload_jobs),
                         len(expired_direct_slots),
                     )
                 exports_dir = Path(config.DATA_DIR) / "exports"

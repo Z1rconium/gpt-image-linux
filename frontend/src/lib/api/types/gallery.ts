@@ -1,4 +1,9 @@
-import type { GalleryExportJobStatusValue, GalleryImportJobStatusValue, GallerySyncJobStatusValue } from './common';
+import type {
+  GalleryExportJobStatusValue,
+  GalleryImportJobStatusValue,
+  GallerySyncJobStatusValue,
+  NodeImageUploadJobStatusValue
+} from './common';
 
 export type GalleryEntry = {
   id: string;
@@ -72,7 +77,7 @@ export type NodeImageUploadResponse = {
 export type NodeImageBatchUploadItem = {
   image_id: string;
   filename?: string | null;
-  status: 'ok' | 'error';
+  status: 'ok' | 'error' | 'cancelled';
   url?: string | null;
   markdown?: string | null;
   error?: string | null;
@@ -84,6 +89,31 @@ export type NodeImageBatchUploadResponse = {
   failed_count: number;
   results: NodeImageBatchUploadItem[];
 };
+
+export type NodeImageUploadJobStatus = {
+  job_id: string;
+  status: NodeImageUploadJobStatusValue;
+  stage?: string | null;
+  message?: string | null;
+  progress: number;
+  requested_count: number;
+  processed_count: number;
+  uploaded_count: number;
+  failed_count: number;
+  cancelled_count: number;
+  results: NodeImageBatchUploadItem[];
+  created_at?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  updated_at?: string | null;
+  error?: string | null;
+  status_url?: string | null;
+  events_url?: string | null;
+  cancel_url?: string | null;
+};
+
+export type NodeImageBatchUploadJobStatus = NodeImageUploadJobStatus;
+export type NodeImageBatchUploadCreateResponse = NodeImageUploadJobStatus;
 
 export type GallerySelectionTokenResponse = {
   selection_token: string;

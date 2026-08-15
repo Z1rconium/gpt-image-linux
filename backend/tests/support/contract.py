@@ -214,6 +214,7 @@ def _configure_runtime(tmp_path: Path, *, access_key: str = "", allow_unauthenti
     config.R2_SECRET_ACCESS_KEY = ""
     config.R2_SYNC_INTERVAL_HOURS = 0
     config.NODEIMAGE_API_KEY = ""
+    config.NODEIMAGE_UPLOAD_CONCURRENCY = 4
     config.MAX_SSE_SUBSCRIBERS_GLOBAL = 200
     config.MAX_SSE_SUBSCRIBERS_PER_IP = 10
     config.SSE_CONNECTION_TTL_SECONDS = 3600

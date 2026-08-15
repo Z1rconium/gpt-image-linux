@@ -40,6 +40,42 @@ type PromptSnippetFixture = {
   updated_at: string;
 };
 
+type NodeImageResultStatus = 'ok' | 'error' | 'cancelled';
+type NodeImageJobStatus = 'queued' | 'running' | 'success' | 'partial_failure' | 'cancelled' | 'error';
+
+type NodeImageResultFixture = {
+  image_id: string;
+  filename: string | null;
+  status: NodeImageResultStatus;
+  url: string | null;
+  markdown: string | null;
+  error: string | null;
+};
+
+type NodeImageJobFixture = {
+  job_id: string;
+  status: NodeImageJobStatus;
+  stage: string;
+  message: string;
+  progress: number;
+  requested_count: number;
+  processed_count: number;
+  uploaded_count: number;
+  failed_count: number;
+  cancelled_count: number;
+  results: NodeImageResultFixture[];
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  updated_at: string;
+  error: string | null;
+  status_url: string;
+  events_url: string;
+  cancel_url: string;
+  cancel_requested: boolean;
+  ids: string[];
+};
+
 type MockOptions = {
   authenticated?: boolean;
   editUploadFailure?: boolean;
@@ -55,6 +91,11 @@ type MockOptions = {
   optimizedPrompts?: string[];
   optimizeFailureAt?: number;
   optimizeDelayMs?: number;
+  nodeImageBatchDelayMs?: number;
+  nodeImageBatchFailureIds?: string[];
+  nodeImageCancelFailure?: boolean;
+  nodeImageCancelStatusFailure?: boolean;
+  nodeImageCancelReturnsCompleted?: boolean;
 };
 
 const baseGalleryImages: GalleryImageFixture[] = [
@@ -159,6 +200,7 @@ const settingsResponse = {
     enabled: true,
     api_key_masked: '${TEST_NODEIMAGE_API_KEY}',
     has_api_key: true,
+    api_key_resolvable: true,
     api_key_source: 'env',
     api_key_env_var: 'TEST_NODEIMAGE_API_KEY',
     api_key_secret_id: null
@@ -440,8 +482,13 @@ async function mockApi(page: Page, options: MockOptions = {}) {
   let mockedOverallConfig: any = structuredClone(overallConfigResponse);
   let optimizerSystemPrompt = 'Default optimizer system prompt';
   let selectionTokenSeq = 0;
+  let nodeImageJobSeq = 0;
   let imagePromptOptimizeCount = 0;
+  let nodeImageCancelStatusFailurePending = Boolean(options.nodeImageCancelStatusFailure);
   const selectionTokens = new Map<string, { prompt: string; favorite?: boolean | null }>();
+  const nodeImageJobs = new Map<string, NodeImageJobFixture>();
+  const nodeImageCancellationTerminals = new Map<string, NodeImageJobFixture>();
+  const nodeImageFailureIds = new Set(options.nodeImageBatchFailureIds || []);
   const runningJobs = options.runningJobs ?? [];
   const generatedJobs = options.generatedJobs?.length
     ? options.generatedJobs
@@ -464,6 +511,178 @@ async function mockApi(page: Page, options: MockOptions = {}) {
       return galleryImages.filter((image) => matchesGalleryFilters(image, filters)).map((image) => image.id);
     }
     return body.ids || [];
+  }
+
+  function nodeImageResult(
+    imageId: string,
+    status: NodeImageResultStatus,
+    error: string | null = null
+  ): NodeImageResultFixture {
+    const image = galleryImages.find((entry) => entry.id === imageId);
+    const filename = image?.filename || null;
+    if (status === 'ok' && image) {
+      const direct = `https://cdn.nodeimage.com/${encodeURIComponent(image.filename)}`;
+      return {
+        image_id: imageId,
+        filename,
+        status,
+        url: direct,
+        markdown: `![${image.prompt}](${direct})`,
+        error: null
+      };
+    }
+    return {
+      image_id: imageId,
+      filename,
+      status,
+      url: null,
+      markdown: null,
+      error
+    };
+  }
+
+  function nodeImageResultsById(results: NodeImageResultFixture[]) {
+    return new Map(results.map((item) => [item.image_id, item]));
+  }
+
+  function orderedNodeImageResults(job: NodeImageJobFixture, results: NodeImageResultFixture[]) {
+    const resultsById = nodeImageResultsById(results);
+    return job.ids.flatMap((imageId) => {
+      const item = resultsById.get(imageId);
+      return item ? [item] : [];
+    });
+  }
+
+  function nodeImageSnapshot(
+    job: NodeImageJobFixture,
+    status: NodeImageJobStatus,
+    stage: string,
+    message: string,
+    results: NodeImageResultFixture[],
+    cancelRequested = job.cancel_requested
+  ): NodeImageJobFixture {
+    const uploadedCount = results.filter((item) => item.status === 'ok').length;
+    const failedCount = results.filter((item) => item.status === 'error').length;
+    const cancelledCount = results.filter((item) => item.status === 'cancelled').length;
+    const processedCount = results.length;
+    const terminal = status === 'success' || status === 'partial_failure' || status === 'cancelled' || status === 'error';
+    return {
+      ...job,
+      status,
+      stage,
+      message,
+      progress: terminal ? 100 : Math.round((processedCount / Math.max(1, job.requested_count)) * 100),
+      processed_count: processedCount,
+      uploaded_count: uploadedCount,
+      failed_count: failedCount,
+      cancelled_count: cancelledCount,
+      results,
+      started_at: status === 'queued' ? null : job.started_at || '2026-05-18T12:00:01Z',
+      completed_at: terminal ? '2026-05-18T12:00:02Z' : null,
+      updated_at: '2026-05-18T12:00:01Z',
+      error: status === 'error' ? message : null,
+      cancel_requested: cancelRequested
+    };
+  }
+
+  function publicNodeImageJob(job: NodeImageJobFixture) {
+    const { cancel_requested: _cancelRequested, ids: _ids, ...publicJob } = job;
+    return publicJob;
+  }
+
+  function createNodeImageJob(ids: string[]) {
+    const jobId = `nodeimage-job-${++nodeImageJobSeq}`;
+    const initialResults = ids.flatMap((imageId) =>
+      galleryImages.some((image) => image.id === imageId)
+        ? []
+        : [nodeImageResult(imageId, 'error', 'Gallery entry not found')]
+    );
+    const baseJob: NodeImageJobFixture = {
+      job_id: jobId,
+      status: 'queued',
+      stage: 'queued',
+      message: 'Queued NodeImage upload',
+      progress: 0,
+      requested_count: ids.length,
+      processed_count: initialResults.length,
+      uploaded_count: 0,
+      failed_count: initialResults.length,
+      cancelled_count: 0,
+      results: initialResults,
+      created_at: '2026-05-18T12:00:00Z',
+      started_at: null,
+      completed_at: null,
+      updated_at: '2026-05-18T12:00:00Z',
+      error: null,
+      status_url: `/api/gallery/nodeimage-upload-jobs/${encodeURIComponent(jobId)}`,
+      events_url: `/api/gallery/nodeimage-upload-jobs/${encodeURIComponent(jobId)}/events`,
+      cancel_url: `/api/gallery/nodeimage-upload-jobs/${encodeURIComponent(jobId)}/cancel`,
+      cancel_requested: false,
+      ids
+    };
+    return baseJob;
+  }
+
+  function buildNodeImageEvents(job: NodeImageJobFixture) {
+    const events: NodeImageJobFixture[] = [];
+    let results = [...job.results];
+    let current = nodeImageSnapshot(job, 'running', 'uploading', 'Uploading images to NodeImage', results);
+    events.push(current);
+
+    for (const imageId of job.ids) {
+      if (results.some((item) => item.image_id === imageId)) continue;
+      const status: NodeImageResultStatus = nodeImageFailureIds.has(imageId) ? 'error' : 'ok';
+      const item = status === 'error'
+        ? nodeImageResult(imageId, status, 'NodeImage upload failed in fixture')
+        : nodeImageResult(imageId, status);
+      results = [...results, item];
+      current = nodeImageSnapshot(job, 'running', 'uploading', 'Uploading images to NodeImage', results);
+      events.push(current);
+    }
+
+    const terminalStatus: NodeImageJobStatus = current.failed_count ? 'partial_failure' : 'success';
+    events.push(
+      nodeImageSnapshot(
+        current,
+        terminalStatus,
+        'completed',
+        terminalStatus === 'success' ? 'NodeImage upload complete' : 'NodeImage upload completed with failures',
+        results
+      )
+    );
+    return events;
+  }
+
+  function buildCancelledNodeImageJob(job: NodeImageJobFixture) {
+    const resultsById = nodeImageResultsById(job.results);
+    let completedAnUpload = job.results.some((item) => item.status === 'ok');
+    for (const imageId of job.ids) {
+      if (resultsById.has(imageId)) continue;
+      const image = galleryImages.find((entry) => entry.id === imageId);
+      if (!image) {
+        resultsById.set(imageId, nodeImageResult(imageId, 'error', 'Gallery entry not found'));
+      } else if (!completedAnUpload) {
+        resultsById.set(imageId, nodeImageResult(imageId, 'ok'));
+        completedAnUpload = true;
+      } else {
+        resultsById.set(imageId, nodeImageResult(imageId, 'cancelled', 'Cancelled before upload'));
+      }
+    }
+    const results = orderedNodeImageResults(job, [...resultsById.values()]);
+    return nodeImageSnapshot(
+      job,
+      'cancelled',
+      'cancelled',
+      'NodeImage upload cancelled',
+      results,
+      true
+    );
+  }
+
+  function sseBody(events: NodeImageJobFixture[]) {
+    return events
+      .map((event) => `event: nodeimage_upload\ndata: ${JSON.stringify(publicNodeImageJob(event))}\n\n`)
+      .join('');
   }
 
   await page.addInitScript((languageValue: 'en' | 'zh-CN' | null) => {
@@ -842,6 +1061,98 @@ async function mockApi(page: Page, options: MockOptions = {}) {
       );
       return;
     }
+    const nodeImageJobMatch = url.pathname.match(/^\/api\/gallery\/nodeimage-upload-jobs\/([^/]+)$/);
+    if (nodeImageJobMatch && request.method() === 'GET') {
+      const jobId = decodeURIComponent(nodeImageJobMatch[1]);
+      const cancelledTerminal = nodeImageCancellationTerminals.get(jobId);
+      if (cancelledTerminal && nodeImageCancelStatusFailurePending) {
+        nodeImageCancelStatusFailurePending = false;
+        await route.fulfill(json({ detail: 'Temporary cancellation status failure' }, 503));
+        return;
+      }
+      if (cancelledTerminal) {
+        nodeImageCancellationTerminals.delete(jobId);
+        nodeImageJobs.set(jobId, cancelledTerminal);
+      }
+      const nodeImageJob = cancelledTerminal || nodeImageJobs.get(jobId);
+      await route.fulfill(
+        nodeImageJob
+          ? json(publicNodeImageJob(nodeImageJob))
+          : json({ detail: 'NodeImage upload job not found' }, 404)
+      );
+      return;
+    }
+    const nodeImageEventsMatch = url.pathname.match(/^\/api\/gallery\/nodeimage-upload-jobs\/([^/]+)\/events$/);
+    if (nodeImageEventsMatch && request.method() === 'GET') {
+      const jobId = decodeURIComponent(nodeImageEventsMatch[1]);
+      const nodeImageJob = nodeImageJobs.get(jobId);
+      if (!nodeImageJob) {
+        await route.fulfill(json({ detail: 'NodeImage upload job not found' }, 404));
+        return;
+      }
+
+      const events = buildNodeImageEvents(nodeImageJob);
+      const delayMs = Math.max(0, options.nodeImageBatchDelayMs || 0);
+      if (delayMs > 0) {
+        const firstProgress = events[1] || events[0] || nodeImageJob;
+        nodeImageJobs.set(jobId, firstProgress);
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+
+      const latestJob = nodeImageJobs.get(jobId) || nodeImageJob;
+      if (latestJob.cancel_requested || latestJob.status === 'cancelled') {
+        const cancelledJob = latestJob.status === 'cancelled' ? latestJob : buildCancelledNodeImageJob(latestJob);
+        nodeImageJobs.set(jobId, cancelledJob);
+        await route.fulfill({ status: 200, contentType: 'text/event-stream', body: sseBody([cancelledJob]) });
+      } else {
+        const terminalJob = events[events.length - 1] || nodeImageJob;
+        nodeImageJobs.set(jobId, terminalJob);
+        await route.fulfill({ status: 200, contentType: 'text/event-stream', body: sseBody(events) });
+      }
+      return;
+    }
+    const nodeImageCancelMatch = url.pathname.match(/^\/api\/gallery\/nodeimage-upload-jobs\/([^/]+)(?:\/cancel)?$/);
+    if (
+      nodeImageCancelMatch &&
+      (request.method() === 'DELETE' || (request.method() === 'POST' && url.pathname.endsWith('/cancel')))
+    ) {
+      const jobId = decodeURIComponent(nodeImageCancelMatch[1]);
+      const nodeImageJob = nodeImageJobs.get(jobId);
+      if (!nodeImageJob) {
+        await route.fulfill(json({ detail: 'NodeImage upload job not found' }, 404));
+        return;
+      }
+      if (options.nodeImageCancelFailure) {
+        await route.fulfill(json({ detail: 'Temporary cancellation failure' }, 503));
+        return;
+      }
+      if (options.nodeImageCancelReturnsCompleted) {
+        const completedJob = buildNodeImageEvents(nodeImageJob).at(-1) || nodeImageJob;
+        nodeImageJobs.set(jobId, completedJob);
+        await route.fulfill(json(publicNodeImageJob(completedJob)));
+        return;
+      }
+      const cancelledJob = nodeImageJob.status === 'cancelled'
+        ? nodeImageJob
+        : buildCancelledNodeImageJob({ ...nodeImageJob, cancel_requested: true });
+      if (nodeImageJob.status === 'queued') {
+        nodeImageJobs.set(jobId, cancelledJob);
+        await route.fulfill(json(publicNodeImageJob(cancelledJob)));
+        return;
+      }
+      const cancellingJob = nodeImageSnapshot(
+        nodeImageJob,
+        'running',
+        'cancelling',
+        'Cancelling NodeImage upload',
+        nodeImageJob.results,
+        true
+      );
+      nodeImageJobs.set(jobId, cancellingJob);
+      nodeImageCancellationTerminals.set(jobId, cancelledJob);
+      await route.fulfill(json(publicNodeImageJob(cancellingJob)));
+      return;
+    }
     if (url.pathname.match(/^\/api\/gallery\/[^/]+$/) && request.method() === 'GET') {
       const id = decodeURIComponent(url.pathname.split('/').pop() || '');
       const image = galleryImages.find((entry) => entry.id === id);
@@ -885,21 +1196,15 @@ async function mockApi(page: Page, options: MockOptions = {}) {
       return;
     }
     if (url.pathname === '/api/gallery/batch/nodeimage-upload' && request.method() === 'POST') {
-      const body = JSON.parse(request.postData() || '{}');
+      const body = request.postDataJSON() as { ids?: string[]; selection_token?: string };
       const ids = resolveBatchIds(body);
-      const results = ids.map((id) => {
-        const image = galleryImages.find((entry) => entry.id === id);
-        if (!image) return { image_id: id, filename: null, status: 'error', url: null, markdown: null, error: 'Gallery entry not found' };
-        const direct = `https://cdn.nodeimage.com/${encodeURIComponent(image.filename)}`;
-        return { image_id: id, filename: image.filename, status: 'ok', url: direct, markdown: `![${image.prompt}](${direct})`, error: null };
-      });
-      const uploadedCount = results.filter((item) => item.status === 'ok').length;
-      await route.fulfill(json({
-        requested_count: ids.length,
-        uploaded_count: uploadedCount,
-        failed_count: ids.length - uploadedCount,
-        results
-      }));
+      if (!ids.length) {
+        await route.fulfill(json({ detail: 'Gallery entries not found' }, 404));
+        return;
+      }
+      const nodeImageJob = createNodeImageJob(ids);
+      nodeImageJobs.set(nodeImageJob.job_id, nodeImageJob);
+      await route.fulfill(json(publicNodeImageJob(nodeImageJob), 202));
       return;
     }
     if (url.pathname.match(/^\/api\/gallery\/[^/]+\/favorite$/)) {

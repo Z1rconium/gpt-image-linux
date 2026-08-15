@@ -9,4 +9,5 @@ export type GenerateJobStatusValue = 'queued' | 'running' | 'success' | 'error' 
 export type GalleryExportJobStatusValue = 'queued' | 'running' | 'success' | 'error';
 export type GallerySyncJobStatusValue = 'queued' | 'running' | 'success' | 'error';
 export type GalleryImportJobStatusValue = 'queued' | 'running' | 'success' | 'error';
+export type NodeImageUploadJobStatusValue = 'queued' | 'running' | 'success' | 'partial_failure' | 'cancelled' | 'error';
 export type AssistantGalleryBatchJobStatusValue = GalleryImportJobStatusValue;
