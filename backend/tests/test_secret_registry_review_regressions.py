@@ -21,14 +21,43 @@ def test_resolve_secret_reference_supports_all_setting_sources(monkeypatch):
         "field_name": "NodeImage API key",
     }
 
+    secrets.configure_registry("{}")
     assert secrets.resolve_secret_reference("", **options) == ""
+    # Legacy stored literals stay usable; the settings API no longer accepts them.
     assert secrets.resolve_secret_reference("literal-key", **options) == "literal-key"
 
+    # An undeclared ${ENV_VAR} reference must never be read from the process env.
     monkeypatch.setenv("NODEIMAGE_REFERENCE_KEY", "env-key")
+    with pytest.raises(
+        secrets.SecretRegistryError,
+        match="no Secret Registry entry declares",
+    ):
+        secrets.resolve_secret_reference("${NODEIMAGE_REFERENCE_KEY}", **options)
+
+    secrets.configure_registry(
+        json.dumps(
+            {
+                "nodeimage-declared-env": {
+                    "purpose": "nodeimage_api_key",
+                    "origin": target_url,
+                    "env": "NODEIMAGE_REFERENCE_KEY",
+                }
+            }
+        )
+    )
     assert (
         secrets.resolve_secret_reference("${NODEIMAGE_REFERENCE_KEY}", **options)
         == "env-key"
     )
+    # A declared entry bound to another origin does not unlock the reference.
+    with pytest.raises(
+        secrets.SecretRegistryError,
+        match="no Secret Registry entry declares",
+    ):
+        secrets.resolve_secret_reference(
+            "${NODEIMAGE_REFERENCE_KEY}",
+            **{**options, "target_url": "https://evil.example"},
+        )
     monkeypatch.delenv("NODEIMAGE_REFERENCE_KEY")
     with pytest.raises(
         secrets.SecretRegistryError,
@@ -106,23 +135,27 @@ def test_api_key_response_fields_masks_plaintext_for_all_consumers(monkeypatch):
     assert "plain-secret-key" not in str(r2)
 
 
-def test_default_settings_do_not_emit_missing_builtin_secret_ids(monkeypatch):
-    secrets.configure_registry("{}")
+def test_default_settings_bind_startup_env_refs_to_builtin_secret_ids(monkeypatch):
+    monkeypatch.setattr(config, "DEFAULT_API_URL", "https://api.example.com")
     monkeypatch.setattr(config, "DEFAULT_API_KEY", "${OPENAI_API_KEY}")
     monkeypatch.setattr(config, "DEFAULT_UPSTREAM_SOCKS5_PROXY", "${UPSTREAM_PROXY_URL}")
+    monkeypatch.setattr(config, "PROMPT_OPTIMIZER_API_URL", "")
     monkeypatch.setattr(config, "PROMPT_OPTIMIZER_API_KEY", "${PROMPT_OPTIMIZER_API_KEY}")
     monkeypatch.setattr(config, "R2_ENDPOINT_URL", "https://account.r2.cloudflarestorage.com")
     monkeypatch.setattr(config, "R2_ACCESS_KEY_ID", "${R2_ACCESS_KEY_ID}")
     monkeypatch.setattr(config, "R2_SECRET_ACCESS_KEY", "${R2_SECRET_ACCESS_KEY}")
+    secrets.configure_registry("{}")
 
     settings = db_repo._default_settings()
 
-    assert settings["presets"][0]["api_key"] == "${OPENAI_API_KEY}"
-    assert settings["upstream_socks5_proxy"] == "${UPSTREAM_PROXY_URL}"
+    # Startup values with a startup target URL become origin-bound builtin entries.
+    assert settings["presets"][0]["api_key"] == "builtin-default-api-key"
+    assert settings["r2_backup"]["access_key_id"] == "builtin-r2-access-key-id"
+    assert settings["r2_backup"]["secret_access_key"] == "builtin-r2-secret-access-key"
+    # Without a startup target URL there is nothing to bind, so the legacy
+    # reference is kept verbatim and fails with an actionable message at use time.
     assert settings["prompt_optimizer"]["api_key"] == "${PROMPT_OPTIMIZER_API_KEY}"
-    assert settings["r2_backup"]["access_key_id"] == "${R2_ACCESS_KEY_ID}"
-    assert settings["r2_backup"]["secret_access_key"] == "${R2_SECRET_ACCESS_KEY}"
-    assert settings["presets"][0]["api_key"] != "builtin-default-api-key"
+    assert settings["upstream_socks5_proxy"] == "${UPSTREAM_PROXY_URL}"
 
 
 def test_stored_legacy_secret_refs_are_preserved_on_load():
@@ -161,7 +194,7 @@ def test_stored_legacy_secret_refs_are_preserved_on_load():
     assert settings["r2_backup"]["secret_access_key"] == "${R2_SECRET_ACCESS_KEY}"
 
 
-def test_legacy_r2_secret_refs_fail_with_missing_env_hint(monkeypatch):
+def test_legacy_r2_secret_refs_require_registry_declaration(monkeypatch):
     secrets.configure_registry("{}")
     monkeypatch.delenv("R2_ACCESS_KEY_ID", raising=False)
     monkeypatch.delenv("R2_SECRET_ACCESS_KEY", raising=False)
@@ -185,7 +218,8 @@ def test_legacy_r2_secret_refs_fail_with_missing_env_hint(monkeypatch):
     else:
         raise AssertionError("legacy R2 env refs should be rejected at use time")
 
-    assert "R2 access key ID environment variable R2_ACCESS_KEY_ID is not set or empty" in message
+    assert "R2 access key ID references ${R2_ACCESS_KEY_ID}" in message
+    assert "SECRET_REGISTRY_JSON" in message
 
 
 def test_http_exception_envelope_preserves_safe_detail():

@@ -73,7 +73,9 @@ PUBLIC_THUMBNAIL_BASE_URL = os.getenv("PUBLIC_THUMBNAIL_BASE_URL", "").strip().r
 CDN_SIGNING_SECRET = os.getenv("CDN_SIGNING_SECRET", "").strip()
 CDN_URL_TTL_SECONDS = max(30, min(3600, int(os.getenv("CDN_URL_TTL_SECONDS", "300"))))
 ACCESS_KEY = os.getenv("ACCESS_KEY", "").strip()
-ADMIN_KEY = os.getenv("ADMIN_KEY", ACCESS_KEY).strip()
+# ADMIN_KEY never falls back to ACCESS_KEY: a shared access key must not be
+# enough to obtain a Settings management (admin) session.
+ADMIN_KEY = os.getenv("ADMIN_KEY", "").strip()
 ALLOW_UNAUTHENTICATED = env_flag("ALLOW_UNAUTHENTICATED")
 ACCESS_KEY_SESSION_MINUTES = 180
 ACCESS_KEY_COOKIE_NAME = os.getenv("ACCESS_KEY_COOKIE_NAME", "gpt_image_access")

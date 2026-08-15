@@ -137,12 +137,11 @@ import type { AIAssistantSettingsInput, ApiPreset, AssistantHealthResponse, Over
     presetName = activePreset.name || '';
     apiUrl = activePreset.api_url || settings.api_url || '';
     defaultModel = activePreset.default_model || settings.default_model || 'gpt-image-2';
-    apiKey =
-      activePreset.api_key_source === 'registry' && activePreset.api_key_secret_id
-        ? activePreset.api_key_secret_id
-        : activePreset.has_api_key || settings.has_api_key
-          ? MASKED_API_KEY_VALUE
-          : '';
+    apiKey = secretDraftValue(
+      activePreset.api_key_source,
+      activePreset.has_api_key || settings.has_api_key,
+      activePreset.api_key_secret_id
+    );
     apiPath = activePreset.api_path || settings.api_path || '/v1/images/generations';
     defaultResponseFormat = normalizeResponseFormat(activePreset.default_response_format ?? settings.default_response_format, 'url');
     upstreamSocks5Proxy = settings.has_upstream_socks5_proxy ? settings.upstream_socks5_proxy_masked : '';
@@ -151,12 +150,11 @@ import type { AIAssistantSettingsInput, ApiPreset, AssistantHealthResponse, Over
     promptOptimizerApiUrl = settings.prompt_optimizer?.api_url || '';
     promptOptimizerModel = settings.prompt_optimizer?.model || 'gpt-4o-mini';
     promptOptimizerTimeoutSeconds = settings.prompt_optimizer?.timeout_seconds || 60;
-    promptOptimizerApiKey =
-      settings.prompt_optimizer?.api_key_source === 'registry' && settings.prompt_optimizer.api_key_secret_id
-        ? settings.prompt_optimizer.api_key_secret_id
-        : settings.prompt_optimizer?.has_api_key
-          ? MASKED_API_KEY_VALUE
-          : '';
+    promptOptimizerApiKey = secretDraftValue(
+      settings.prompt_optimizer?.api_key_source,
+      settings.prompt_optimizer?.has_api_key,
+      settings.prompt_optimizer?.api_key_secret_id
+    );
     aiAssistantEnabled = Boolean(settings.ai_assistant?.enabled);
     aiAssistantVisionModel = settings.ai_assistant?.vision_model || settings.prompt_optimizer?.model || 'gpt-4o-mini';
     r2BackupEnabled = Boolean(settings.r2_backup?.enabled);
@@ -165,23 +163,20 @@ import type { AIAssistantSettingsInput, ApiPreset, AssistantHealthResponse, Over
     r2Region = settings.r2_backup?.region || 'auto';
     r2KeyPrefix = settings.r2_backup?.key_prefix || 'gallery/';
     r2SyncIntervalHours = settings.r2_backup?.sync_interval_hours ?? 0;
-    r2AccessKeyId =
-      settings.r2_backup?.access_key_id_source === 'registry' && settings.r2_backup.access_key_id_secret_id
-        ? settings.r2_backup.access_key_id_secret_id
-        : settings.r2_backup?.has_access_key_id
-          ? MASKED_API_KEY_VALUE
-          : '';
-    r2SecretAccessKey =
-      settings.r2_backup?.secret_access_key_source === 'registry' && settings.r2_backup.secret_access_key_secret_id
-        ? settings.r2_backup.secret_access_key_secret_id
-        : settings.r2_backup?.has_secret_access_key
-          ? MASKED_API_KEY_VALUE
-          : '';
+    r2AccessKeyId = secretDraftValue(
+      settings.r2_backup?.access_key_id_source,
+      settings.r2_backup?.has_access_key_id,
+      settings.r2_backup?.access_key_id_secret_id
+    );
+    r2SecretAccessKey = secretDraftValue(
+      settings.r2_backup?.secret_access_key_source,
+      settings.r2_backup?.has_secret_access_key,
+      settings.r2_backup?.secret_access_key_secret_id
+    );
     nodeImageEnabled = Boolean(settings.nodeimage?.enabled);
     nodeImageApiKey = secretDraftValue(
       settings.nodeimage?.api_key_source,
       settings.nodeimage?.has_api_key,
-      settings.nodeimage?.api_key_env_var,
       settings.nodeimage?.api_key_secret_id
     );
   }
@@ -281,13 +276,13 @@ import type { AIAssistantSettingsInput, ApiPreset, AssistantHealthResponse, Over
     };
   }
 
+  // Only Secret Registry IDs are editable; legacy env refs and stored literals
+  // stay masked so they can never be submitted back through Web Settings.
   function secretDraftValue(
     source: 'empty' | 'stored' | 'env' | 'registry' | undefined,
     hasSecret: boolean | undefined,
-    envVar: string | null | undefined,
     secretId: string | null | undefined
   ) {
-    if (source === 'env' && envVar) return `\${${envVar}}`;
     if (source === 'registry' && secretId) return secretId;
     return hasSecret ? MASKED_API_KEY_VALUE : '';
   }
@@ -324,11 +319,11 @@ import type { AIAssistantSettingsInput, ApiPreset, AssistantHealthResponse, Over
       draft.defaultModel !== (activePreset?.default_model || settings?.default_model || 'gpt-image-2') ||
       draft.defaultResponseFormat !== normalizeResponseFormat(activePreset?.default_response_format ?? settings?.default_response_format, 'url') ||
       draft.apiKey !==
-        (activePreset?.api_key_source === 'env' && activePreset.api_key_env_var
-          ? `\${${activePreset.api_key_env_var}}`
-          : activePreset?.has_api_key || settings?.has_api_key
-            ? MASKED_API_KEY_VALUE
-            : '') ||
+        secretDraftValue(
+          activePreset?.api_key_source,
+          activePreset?.has_api_key || settings?.has_api_key,
+          activePreset?.api_key_secret_id
+        ) ||
       draft.apiPath !== (activePreset?.api_path || settings?.api_path || '/v1/images/generations') ||
       proxyValue !== currentProxyMask ||
       webhookValue !== currentWebhookMask ||
@@ -337,11 +332,11 @@ import type { AIAssistantSettingsInput, ApiPreset, AssistantHealthResponse, Over
       draft.promptOptimizerModel !== (settings?.prompt_optimizer?.model || 'gpt-4o-mini') ||
       draft.promptOptimizerTimeoutSeconds !== (settings?.prompt_optimizer?.timeout_seconds || 60) ||
       draft.promptOptimizerApiKey !==
-        (settings?.prompt_optimizer?.api_key_source === 'env' && settings.prompt_optimizer.api_key_env_var
-          ? `\${${settings.prompt_optimizer.api_key_env_var}}`
-          : settings?.prompt_optimizer?.has_api_key
-            ? MASKED_API_KEY_VALUE
-            : '') ||
+        secretDraftValue(
+          settings?.prompt_optimizer?.api_key_source,
+          settings?.prompt_optimizer?.has_api_key,
+          settings?.prompt_optimizer?.api_key_secret_id
+        ) ||
       draft.aiAssistantEnabled !== Boolean(settings?.ai_assistant?.enabled) ||
       draft.aiAssistantVisionModel !==
         (settings?.ai_assistant?.vision_model || settings?.prompt_optimizer?.model || 'gpt-4o-mini') ||
@@ -352,23 +347,22 @@ import type { AIAssistantSettingsInput, ApiPreset, AssistantHealthResponse, Over
       draft.r2KeyPrefix !== (settings?.r2_backup?.key_prefix || 'gallery/') ||
       draft.r2SyncIntervalHours !== (settings?.r2_backup?.sync_interval_hours ?? 0) ||
       draft.r2AccessKeyId !==
-        (settings?.r2_backup?.access_key_id_source === 'env' && settings.r2_backup.access_key_id_env_var
-          ? `\${${settings.r2_backup.access_key_id_env_var}}`
-          : settings?.r2_backup?.has_access_key_id
-            ? MASKED_API_KEY_VALUE
-            : '') ||
+        secretDraftValue(
+          settings?.r2_backup?.access_key_id_source,
+          settings?.r2_backup?.has_access_key_id,
+          settings?.r2_backup?.access_key_id_secret_id
+        ) ||
       draft.r2SecretAccessKey !==
-        (settings?.r2_backup?.secret_access_key_source === 'env' && settings.r2_backup.secret_access_key_env_var
-          ? `\${${settings.r2_backup.secret_access_key_env_var}}`
-          : settings?.r2_backup?.has_secret_access_key
-            ? MASKED_API_KEY_VALUE
-            : '') ||
+        secretDraftValue(
+          settings?.r2_backup?.secret_access_key_source,
+          settings?.r2_backup?.has_secret_access_key,
+          settings?.r2_backup?.secret_access_key_secret_id
+        ) ||
       draft.nodeImageEnabled !== Boolean(settings?.nodeimage?.enabled) ||
       draft.nodeImageApiKey !==
         secretDraftValue(
           settings?.nodeimage?.api_key_source,
           settings?.nodeimage?.has_api_key,
-          settings?.nodeimage?.api_key_env_var,
           settings?.nodeimage?.api_key_secret_id
         )
     );

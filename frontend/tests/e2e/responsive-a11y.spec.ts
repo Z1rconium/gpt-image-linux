@@ -128,7 +128,7 @@ test('settings drawer traps focus and key form controls have accessible names', 
   await expect(page.getByLabel('Webhook URL')).toHaveValue('https://hooks.example.com/***');
   await expect(page.getByLabel('Sync interval hours')).toHaveValue('0');
   await expect(page.getByLabel('Timeout seconds')).toHaveValue('60');
-  await expect(drawer).toContainText('Literal keys are saved as plaintext.');
+  await expect(drawer).toContainText('Enter a secret_id declared in SECRET_REGISTRY_JSON at startup.');
   await expect(page.getByLabel('Filter prompt')).toBeVisible();
 
   for (let index = 0; index < 12; index += 1) {

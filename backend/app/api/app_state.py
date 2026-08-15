@@ -116,10 +116,10 @@ async def lifespan(app: FastAPI):
         and admin_key
         and hmac.compare_digest(admin_key, config.ACCESS_KEY)
     ):
-        logger.warning(
-            "ADMIN_KEY is equal to ACCESS_KEY; Settings management step-up is "
-            "not independent. Set a distinct ADMIN_KEY to enforce separate "
-            "admin verification."
+        raise RuntimeError(
+            "ADMIN_KEY must differ from ACCESS_KEY. Sharing one value lets every "
+            "access-key holder open a Settings management session; set a "
+            "distinct ADMIN_KEY."
         )
     if (config.PUBLIC_IMAGE_BASE_URL or config.PUBLIC_THUMBNAIL_BASE_URL) and len(
         config.CDN_SIGNING_SECRET.encode("utf-8")
@@ -208,7 +208,18 @@ async def lifespan(app: FastAPI):
         else None
     )
     presets.load_api_settings()
-    presets.validate_configured_secret_bindings()
+    try:
+        presets.validate_configured_secret_bindings()
+    except Exception as exc:
+        detail = getattr(exc, "detail", None) or str(exc)
+        raise RuntimeError(
+            f"Configured credentials are not usable: {detail}. Declare each "
+            "credential in SECRET_REGISTRY_JSON with its purpose and target "
+            "origin, and list the target host in the matching startup allowlist "
+            "(UPSTREAM_HOST_ALLOWLIST, PROMPT_OPTIMIZER_HOST_ALLOWLIST, "
+            "UPSTREAM_PROXY_HOST_ALLOWLIST, WEBHOOK_HOST_ALLOWLIST, "
+            "R2_ENDPOINT_HOST_ALLOWLIST)."
+        ) from exc
     app.state.generate_jobs = {}
     app.state.generate_job_tasks = {}
     app.state.upstream_request_semaphore = asyncio.Semaphore(config.MAX_ACTIVE_GENERATE_JOBS)

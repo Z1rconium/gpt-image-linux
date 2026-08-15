@@ -30,7 +30,7 @@ def _enable_nodeimage() -> None:
     settings_repo.save_nodeimage_settings(
         {
             "enabled": True,
-            "api_key": "${TEST_NODEIMAGE_API_KEY}",
+            "api_key": "test-nodeimage-api-key",
         }
     )
 
@@ -663,7 +663,7 @@ def test_nodeimage_settings_round_trip_and_secret_origin_binding(client):
         "default_model": current["default_model"],
         "nodeimage": {
             "enabled": True,
-            "api_key": "${TEST_NODEIMAGE_API_KEY}",
+            "api_key": "test-nodeimage-api-key",
         },
     }
     updated = client.post("/api/settings", json=payload)
@@ -671,14 +671,14 @@ def test_nodeimage_settings_round_trip_and_secret_origin_binding(client):
     nodeimage = updated.json()["nodeimage"]
     assert nodeimage == {
         "enabled": True,
-        "api_key_masked": "${TEST_NODEIMAGE_API_KEY}",
+        "api_key_masked": "test-nodeimage-api-key",
         "has_api_key": True,
         "api_key_resolvable": True,
-        "api_key_source": "env",
-        "api_key_env_var": "TEST_NODEIMAGE_API_KEY",
-        "api_key_secret_id": None,
+        "api_key_source": "registry",
+        "api_key_env_var": None,
+        "api_key_secret_id": "test-nodeimage-api-key",
     }
-    assert settings_repo.load_nodeimage_settings()["api_key"] == "${TEST_NODEIMAGE_API_KEY}"
+    assert settings_repo.load_nodeimage_settings()["api_key"] == "test-nodeimage-api-key"
 
     secrets.configure_registry(
         json.dumps(
@@ -722,12 +722,29 @@ def test_nodeimage_settings_reports_whether_saved_key_can_be_resolved(
         "api_key_secret_id": None,
     }
 
+    # A legacy ${ENV_VAR} reference stays unresolvable until the operator
+    # declares it in the Secret Registry.
     monkeypatch.setenv("UNSET_NODEIMAGE_API_KEY", "resolved-nodeimage-key")
     resolved = client.get("/api/settings")
     assert resolved.status_code == 200
-    assert resolved.json()["nodeimage"]["api_key_resolvable"] is True
+    assert resolved.json()["nodeimage"]["api_key_resolvable"] is False
 
     request.addfinalizer(lambda: secrets.configure_registry(""))
+    secrets.configure_registry(
+        json.dumps(
+            {
+                "nodeimage-declared-env": {
+                    "purpose": "nodeimage_api_key",
+                    "origin": "https://api.nodeimage.com",
+                    "env": "UNSET_NODEIMAGE_API_KEY",
+                }
+            }
+        )
+    )
+    declared = client.get("/api/settings")
+    assert declared.status_code == 200
+    assert declared.json()["nodeimage"]["api_key_resolvable"] is True
+
     secrets.configure_registry(
         json.dumps(
             {
@@ -753,7 +770,7 @@ def test_nodeimage_settings_reports_whether_saved_key_can_be_resolved(
     secrets.configure_registry("")
 
 
-def test_nodeimage_settings_plaintext_path_is_opt_in_and_masked(client):
+def test_nodeimage_settings_reject_web_managed_literals(client):
     current = client.get("/api/settings").json()
     payload = {
         "active_preset_id": current["active_preset_id"],
@@ -767,17 +784,24 @@ def test_nodeimage_settings_plaintext_path_is_opt_in_and_masked(client):
 
     rejected = client.post("/api/settings", json=payload)
     assert rejected.status_code == 422
-    assert "NodeImage API key must use ${ENV_VAR_NAME}" in rejected.text
+    assert "NodeImage API key must name a secret_id" in rejected.text
 
+    # ALLOW_PLAINTEXT_SECRETS no longer re-opens the Web Settings literal path.
     config.ALLOW_PLAINTEXT_SECRETS = True
-    accepted = client.post("/api/settings", json=payload)
-    assert accepted.status_code == 200
-    nodeimage = accepted.json()["nodeimage"]
-    assert nodeimage["has_api_key"] is True
-    assert nodeimage["api_key_source"] == "stored"
-    assert nodeimage["api_key_masked"] == "plai***-key"
-    assert nodeimage["api_key_secret_id"] is None
-    assert settings_repo.load_nodeimage_settings()["api_key"] == "plain-nodeimage-key"
+    still_rejected = client.post("/api/settings", json=payload)
+    assert still_rejected.status_code == 422
+    assert "literal secret values are not accepted from Web Settings" in still_rejected.text
+    assert settings_repo.load_nodeimage_settings()["api_key"] != "plain-nodeimage-key"
+
+    # Values already in storage stay readable (masked) so they can be migrated.
+    settings_repo.save_nodeimage_settings(
+        {"enabled": True, "api_key": "plain-nodeimage-key"}
+    )
+    stored = client.get("/api/settings").json()["nodeimage"]
+    assert stored["has_api_key"] is True
+    assert stored["api_key_source"] == "stored"
+    assert stored["api_key_masked"] == "plai***-key"
+    assert stored["api_key_secret_id"] is None
 
 
 class _ResponseContent:

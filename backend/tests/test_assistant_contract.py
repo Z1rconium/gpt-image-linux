@@ -27,7 +27,7 @@ def test_ai_assistant_health_reports_success_and_config_errors(client, monkeypat
                 "api_url": "https://example.com/v1/chat/completions",
                 "model": "shared-model",
                 "timeout_seconds": 45,
-                "api_key": "${TEST_PROMPT_OPTIMIZER_API_KEY}",
+                "api_key": "test-prompt-optimizer-key",
             },
         ),
     )
@@ -102,7 +102,8 @@ def test_ai_assistant_health_reports_success_and_config_errors(client, monkeypat
                 "api_url": "",
                 "model": "shared-model",
                 "timeout_seconds": 45,
-                "api_key": "${TEST_PROMPT_OPTIMIZER_API_KEY}",
+                # A registry credential cannot stay bound once the URL is cleared.
+                "api_key": "",
             },
         ),
     )
@@ -124,7 +125,7 @@ def test_ai_assistant_health_timeout_returns_structured_504(client, monkeypatch)
                 "api_url": "https://example.com/v1/chat/completions",
                 "model": "shared-model",
                 "timeout_seconds": 7,
-                "api_key": "${TEST_PROMPT_OPTIMIZER_API_KEY}",
+                "api_key": "test-prompt-optimizer-key",
             },
         ),
     )
@@ -926,13 +927,11 @@ def test_ai_assistant_gallery_batch_analysis_validates_runtime_before_queueing(c
     settings = client.get("/api/settings").json()
     configured = client.post(
         "/api/settings",
-        json=_assistant_runtime_payload(
-            settings,
-            optimizer_api_key="${MISSING_ASSISTANT_API_KEY}",
-        ),
+        json=_assistant_runtime_payload(settings),
     )
     assert configured.status_code == 200
-    monkeypatch.delenv("MISSING_ASSISTANT_API_KEY", raising=False)
+    # The registry entry stays configured, but its environment variable is gone.
+    monkeypatch.delenv("TEST_PROMPT_OPTIMIZER_API_KEY", raising=False)
 
     entry = _fake_gallery_entry("assistant-batch-config-error", "prompt", "1024x1024", "assistant-batch-config.png")
     assert entry is not None
@@ -943,7 +942,7 @@ def test_ai_assistant_gallery_batch_analysis_validates_runtime_before_queueing(c
     )
 
     assert submitted.status_code == 422
-    assert "MISSING_ASSISTANT_API_KEY is not set or empty" in submitted.json()["detail"]
+    assert "resolves to an empty value" in submitted.json()["detail"]
     assert coordination_repo.count_active_gallery_jobs("ai_analyze") == 0
 
 

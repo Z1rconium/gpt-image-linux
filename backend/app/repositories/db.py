@@ -28,8 +28,7 @@ from ..core.secrets import configured_secret_ids
 from ..core.utils import utc_now
 from ..core.validators import (
     get_env_var_ref_name,
-    is_malformed_env_var_ref,
-    normalize_secret_env_ref_or_plaintext,
+    normalize_stored_secret_reference,
     normalize_r2_endpoint_url,
     normalize_socks5_proxy_url,
     normalize_webhook_url,
@@ -331,66 +330,27 @@ def _iter_sqlite_in_chunks(
 
 
 def _normalize_stored_api_key(value: str | None) -> str:
-    normalized = str(value or "").strip()
-    if get_env_var_ref_name(normalized):
-        return normalized
-    try:
-        return normalize_secret_env_ref_or_plaintext(normalized, field_name="API key")
-    except ValueError:
-        return normalized
+    return normalize_stored_secret_reference(value)
 
 
 def _normalize_stored_socks5_proxy(value: str | None) -> str:
-    normalized = str(value or "").strip()
-    if get_env_var_ref_name(normalized):
-        return normalized
-    try:
-        return normalize_secret_env_ref_or_plaintext(normalized, field_name="SOCKS5 proxy URL")
-    except ValueError:
-        return normalized
+    return normalize_stored_secret_reference(value)
 
 
 def _normalize_stored_webhook_url(value: str | None) -> str:
-    normalized = str(value or "").strip()
-    if get_env_var_ref_name(normalized):
-        return normalized
-    try:
-        return normalize_secret_env_ref_or_plaintext(normalized, field_name="Webhook URL")
-    except ValueError:
-        return normalized
+    return normalize_stored_secret_reference(value)
 
 
 def _normalize_stored_r2_access_key_id(value: str | None) -> str:
-    normalized = str(value or "").strip()
-    if get_env_var_ref_name(normalized):
-        return normalized
-    try:
-        return normalize_secret_env_ref_or_plaintext(normalized, field_name="R2 access key ID")
-    except ValueError:
-        return normalized
+    return normalize_stored_secret_reference(value)
 
 
 def _normalize_stored_r2_secret_access_key(value: str | None) -> str:
-    normalized = str(value or "").strip()
-    if get_env_var_ref_name(normalized):
-        return normalized
-    try:
-        return normalize_secret_env_ref_or_plaintext(normalized, field_name="R2 secret access key")
-    except ValueError:
-        return normalized
+    return normalize_stored_secret_reference(value)
 
 
 def _normalize_stored_nodeimage_api_key(value: str | None) -> str:
-    normalized = str(value or "").strip()
-    if get_env_var_ref_name(normalized):
-        return normalized
-    try:
-        return normalize_secret_env_ref_or_plaintext(
-            normalized,
-            field_name="NodeImage API key",
-        )
-    except ValueError:
-        return normalized
+    return normalize_stored_secret_reference(value)
 
 
 def _default_secret_reference(secret_id: str, value: str | None) -> str:
@@ -2062,17 +2022,15 @@ def sync_overall_config_env_values(env_values: dict[str, tuple[str, bool]]) -> d
                     """,
                     (name, stored_env_value, 1 if is_env_set else 0, now),
                 )
-                if (
-                    spec
-                    and spec.secret
-                    and not config.ALLOW_PLAINTEXT_SECRETS
-                ):
+                if spec and spec.secret:
+                    # Secret values are startup-only; no stored override may
+                    # survive, whatever form it was written in.
                     row = conn.execute(
                         "SELECT override_value FROM overall_config_values WHERE name = ?",
                         (name,),
                     ).fetchone()
                     override = str(row["override_value"] or "") if row else ""
-                    if override and not get_env_var_ref_name(override):
+                    if override:
                         conn.execute(
                             """
                             UPDATE overall_config_values
@@ -2085,8 +2043,9 @@ def sync_overall_config_env_values(env_values: dict[str, tuple[str, bool]]) -> d
             rows = _overall_config_rows(conn)
     if scrubbed_plaintext_overrides:
         logger.warning(
-            "Removed legacy plaintext secret overrides from SQLite for %s; "
-            "rotate any affected credentials and replace them with environment references",
+            "Removed stored secret overrides from SQLite for %s; secrets are "
+            "startup-only, so rotate any affected credentials and configure them "
+            "in the process environment or SECRET_REGISTRY_JSON",
             ", ".join(sorted(scrubbed_plaintext_overrides)),
         )
     _secure_data_storage_permissions()
@@ -2110,25 +2069,9 @@ def save_overall_config_overrides(
         with _transaction(conn):
             for name, value in updates.items():
                 spec = OVERALL_CONFIG_BY_NAME.get(name)
-                if (
-                    spec
-                    and spec.secret
-                    and value
-                    and is_malformed_env_var_ref(value)
-                ):
+                if spec and spec.secret and value:
                     raise ValueError(
-                        f"{name} env ref must be formatted as ${{ENV_VAR_NAME}}"
-                    )
-                if (
-                    spec
-                    and spec.secret
-                    and value
-                    and not get_env_var_ref_name(value)
-                    and not config.ALLOW_PLAINTEXT_SECRETS
-                ):
-                    raise ValueError(
-                        f"{name} must use ${{ENV_VAR_NAME}} unless "
-                        "ALLOW_PLAINTEXT_SECRETS=true"
+                        f"{name} can only be configured at process startup"
                     )
                 conn.execute(
                     """

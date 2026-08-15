@@ -115,7 +115,67 @@ def _test_client(**kwargs):
         yield _CsrfTestClient(test_client)
 
 
-def _configure_runtime(tmp_path: Path, *, access_key: str = "", allow_unauthenticated: bool = True):
+TEST_SECRET_REGISTRY = {
+    "test-openai-api-key": {
+        "purpose": "upstream_api",
+        "origin": "https://api.example.com",
+        "env": "TEST_OPENAI_API_KEY",
+    },
+    "test-prompt-optimizer-key": {
+        "purpose": "prompt_optimizer",
+        "origin": "https://example.com",
+        "env": "TEST_PROMPT_OPTIMIZER_API_KEY",
+    },
+    "test-upstream-proxy": {
+        "purpose": "upstream_proxy",
+        "origin": "socks5://127.0.0.1:1080",
+        "env": "TEST_UPSTREAM_PROXY_URL",
+    },
+    "test-webhook-url": {
+        "purpose": "webhook_url",
+        "origin": "https://hooks.example.com",
+        "env": "TEST_WEBHOOK_URL",
+    },
+    "test-r2-access-key-id": {
+        "purpose": "r2_access_key_id",
+        "origin": "https://account.r2.cloudflarestorage.com",
+        "env": "TEST_R2_ACCESS_KEY_ID",
+    },
+    "test-r2-secret-access-key": {
+        "purpose": "r2_secret_access_key",
+        "origin": "https://account.r2.cloudflarestorage.com",
+        "env": "TEST_R2_SECRET_ACCESS_KEY",
+    },
+    "test-r2-storage-access-key-id": {
+        "purpose": "r2_access_key_id",
+        "origin": "https://storage.example.com",
+        "env": "TEST_R2_ACCESS_KEY_ID",
+    },
+    "test-r2-storage-secret-access-key": {
+        "purpose": "r2_secret_access_key",
+        "origin": "https://storage.example.com",
+        "env": "TEST_R2_SECRET_ACCESS_KEY",
+    },
+    "test-nodeimage-api-key": {
+        "purpose": "nodeimage_api_key",
+        "origin": "https://api.nodeimage.com",
+        "env": "TEST_NODEIMAGE_API_KEY",
+    },
+}
+
+
+def _configure_runtime(
+    tmp_path: Path,
+    *,
+    access_key: str = "",
+    allow_unauthenticated: bool = True,
+    admin_key: str | None = None,
+):
+    # ADMIN_KEY never falls back to ACCESS_KEY, so an access-gated app must
+    # start with a distinct admin key.
+    resolved_admin_key = (
+        admin_key if admin_key is not None else (f"admin-{access_key}" if access_key else "")
+    )
     images_dir = tmp_path / "images"
     data_dir = tmp_path / "data"
     images_dir.mkdir(parents=True, exist_ok=True)
@@ -134,7 +194,7 @@ def _configure_runtime(tmp_path: Path, *, access_key: str = "", allow_unauthenti
     os.environ["TEST_NODEIMAGE_API_KEY"] = "nodeimage-api-key"
     os.environ["ALLOW_UNAUTHENTICATED"] = "true" if allow_unauthenticated else "false"
     os.environ["ACCESS_KEY"] = access_key
-    os.environ["ADMIN_KEY"] = ""
+    os.environ["ADMIN_KEY"] = resolved_admin_key
     os.environ["ENABLE_METRICS"] = "false"
     os.environ["GITHUB_REPO"] = "Z1rconium/gpt-image-linux"
     os.environ["TRUSTED_PROXY_IPS"] = ""
@@ -151,7 +211,7 @@ def _configure_runtime(tmp_path: Path, *, access_key: str = "", allow_unauthenti
     config.AIOHTTP_CONNECTION_LIMIT_PER_HOST = 20
     config.ALLOW_PLAINTEXT_SECRETS = False
     config.ACCESS_KEY = access_key
-    config.ADMIN_KEY = ""
+    config.ADMIN_KEY = resolved_admin_key
     config.ALLOW_UNAUTHENTICATED = allow_unauthenticated
     config.ACCESS_KEY_COOKIE_NAME = "gpt_image_access"
     config.ACCESS_COOKIE_SECURE = False
@@ -168,8 +228,10 @@ def _configure_runtime(tmp_path: Path, *, access_key: str = "", allow_unauthenti
     config.PUBLIC_THUMBNAIL_BASE_URL = ""
     config.ALLOWED_HOSTS = ""
     config.CSRF_ORIGIN_CHECK_ENABLED = True
-    config.UPSTREAM_HOST_ALLOWLIST = ""
-    config.WEBHOOK_HOST_ALLOWLIST = ""
+    config.UPSTREAM_HOST_ALLOWLIST = "api.example.com,example.com"
+    config.UPSTREAM_PROXY_HOST_ALLOWLIST = "127.0.0.1"
+    config.WEBHOOK_HOST_ALLOWLIST = "hooks.example.com"
+    config.SECRET_REGISTRY_JSON = json.dumps(TEST_SECRET_REGISTRY)
     config.WEBHOOK_SIGNING_SECRET = "webhook-secret-for-tests-32-bytes!!"
     config.WEBHOOK_TIMEOUT_SECONDS = 1
     config.WEBHOOK_MAX_ATTEMPTS = 1
@@ -207,7 +269,7 @@ def _configure_runtime(tmp_path: Path, *, access_key: str = "", allow_unauthenti
     config.PROMPT_OPTIMIZER_TIMEOUT_SECONDS = 60
     config.PROMPT_OPTIMIZER_MAX_OUTPUT_CHARS = 4000
     config.PROMPT_OPTIMIZER_MAX_RESPONSE_MB = 8
-    config.PROMPT_OPTIMIZER_HOST_ALLOWLIST = ""
+    config.PROMPT_OPTIMIZER_HOST_ALLOWLIST = "example.com,api.example.com"
     config.AI_ASSISTANT_ENABLED = True
     config.AI_ASSISTANT_VISION_MODEL = "gpt-4o-mini"
     config.AI_ASSISTANT_MAX_RESPONSE_MB = 8
@@ -217,7 +279,7 @@ def _configure_runtime(tmp_path: Path, *, access_key: str = "", allow_unauthenti
     config.AI_ASSISTANT_IMAGE_MAX_BYTES = 1048576
     config.R2_BACKUP_ENABLED = False
     config.R2_ENDPOINT_URL = ""
-    config.R2_ENDPOINT_HOST_ALLOWLIST = ""
+    config.R2_ENDPOINT_HOST_ALLOWLIST = "account.r2.cloudflarestorage.com"
     config.R2_BUCKET_NAME = ""
     config.R2_REGION = "auto"
     config.R2_KEY_PREFIX = "gallery/"
@@ -672,7 +734,7 @@ def _assistant_runtime_payload(
     optimizer_api_url: str = "https://example.com/v1/chat/completions",
     optimizer_model: str = "assistant-model",
     optimizer_timeout_seconds: int = 45,
-    optimizer_api_key: str = "${TEST_PROMPT_OPTIMIZER_API_KEY}",
+    optimizer_api_key: str = "test-prompt-optimizer-key",
 ):
     return _settings_payload(
         settings,

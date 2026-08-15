@@ -1603,7 +1603,7 @@ def test_generate_uses_active_preset_default_model_when_model_is_omitted(client)
             "active_preset_id": settings["active_preset_id"],
             "preset_name": "Primary",
             "api_url": settings["api_url"],
-            "api_key": "${TEST_OPENAI_API_KEY}",
+            "api_key": "test-openai-api-key",
             "api_path": settings["api_path"],
             "default_model": "gpt-image-3",
         },

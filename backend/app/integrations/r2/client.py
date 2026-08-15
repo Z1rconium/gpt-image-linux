@@ -9,12 +9,7 @@ from typing import Any, Callable, Iterable
 
 from ...core import settings as config
 from ...core.utils import utc_now
-from ...core.validators import (
-    get_env_var_ref_name,
-    is_malformed_env_var_ref,
-    normalize_r2_endpoint_url,
-    resolve_env_var_ref,
-)
+from ...core.validators import normalize_r2_endpoint_url
 from ...repositories.image_files import safe_image_path
 
 

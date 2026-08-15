@@ -181,15 +181,54 @@ def test_allow_unauthenticated_startup_logs_warning(tmp_path, caplog):
     assert "without access-key authentication" in caplog.text
 
 
-def test_admin_key_fallback_to_access_key_logs_warning(tmp_path, caplog):
-    _configure_runtime(tmp_path, access_key="secret", allow_unauthenticated=False)
+def test_admin_key_equal_to_access_key_fails_startup(tmp_path):
+    _configure_runtime(
+        tmp_path,
+        access_key="secret",
+        allow_unauthenticated=False,
+        admin_key="secret",
+    )
 
-    caplog.set_level(logging.WARNING, logger="backend.app.api.app_state")
-    with _test_client():
-        pass
+    with pytest.raises(RuntimeError, match="ADMIN_KEY must differ from ACCESS_KEY"):
+        with _test_client():
+            pass
 
-    assert "ADMIN_KEY is equal to ACCESS_KEY" in caplog.text
-    assert "not independent" in caplog.text
+
+def test_missing_admin_key_fails_startup_when_access_key_is_set(tmp_path):
+    _configure_runtime(
+        tmp_path,
+        access_key="secret",
+        allow_unauthenticated=False,
+        admin_key="",
+    )
+
+    with pytest.raises(RuntimeError, match="ADMIN_KEY is required"):
+        with _test_client():
+            pass
+
+
+def test_access_key_cannot_unlock_admin_session(tmp_path):
+    _configure_runtime(
+        tmp_path,
+        access_key="secret",
+        allow_unauthenticated=False,
+        admin_key="separate-admin-secret",
+    )
+
+    with _test_client() as client:
+        assert client.post("/api/access", json={"access_key": "secret"}).status_code == 200
+
+        # The shared access key must not be accepted as an admin step-up key.
+        denied = client.post("/api/access/admin", json={"admin_key": "secret"})
+        assert denied.status_code == 403
+        assert client.get("/api/access/admin/status").json()["authenticated"] is False
+
+        granted = client.post(
+            "/api/access/admin",
+            json={"admin_key": "separate-admin-secret"},
+        )
+        assert granted.status_code == 200
+        assert granted.json()["authenticated"] is True
 
 
 def test_frontend_build_assets_are_available_before_access_unlock(tmp_path, monkeypatch):
@@ -416,7 +455,7 @@ def test_csrf_origin_check_allows_same_origin_state_changes(client):
             "active_preset_id": active_preset_id,
             "preset_name": "Same Origin",
             "api_url": "https://api.example.com",
-            "api_key": "${TEST_OPENAI_API_KEY}",
+            "api_key": "test-openai-api-key",
             "api_path": "/v1/images/generations",
         },
     )
@@ -442,7 +481,7 @@ def test_csrf_origin_check_allows_same_origin_state_changes(client):
                     "active_preset_id": "default",
                     "preset_name": "Bad Origin",
                     "api_url": "https://api.example.com",
-                    "api_key": "${TEST_OPENAI_API_KEY}",
+                    "api_key": "test-openai-api-key",
                     "api_path": "/v1/images/generations",
                 }
             },
@@ -628,7 +667,7 @@ def test_settings_rejects_upstream_url_userinfo_query_and_fragment(client):
                 "active_preset_id": active_preset_id,
                 "preset_name": "Bad URL",
                 "api_url": api_url,
-                "api_key": "${TEST_OPENAI_API_KEY}",
+                "api_key": "test-openai-api-key",
                 "api_path": "/v1/images/generations",
             },
         )
@@ -652,7 +691,7 @@ def test_settings_and_presets(client):
             "active_preset_id": body["active_preset_id"],
             "preset_name": "Primary",
             "api_url": "https://api.example.com",
-            "api_key": "${TEST_OPENAI_API_KEY}",
+            "api_key": "test-openai-api-key",
             "api_path": "/v1/responses",
             "default_model": "gpt-image-2-preview",
             "default_response_format": "b64_json",
@@ -669,7 +708,7 @@ def test_settings_and_presets(client):
             "active_preset_id": body["active_preset_id"],
             "preset_name": "Primary",
             "api_url": "https://api.example.com",
-            "api_key": "${TEST_OPENAI_API_KEY}",
+            "api_key": "test-openai-api-key",
             "api_path": "/v1/chat/completions",
         },
     )
@@ -731,16 +770,16 @@ def test_settings_global_socks5_proxy_save_mask_preserve_and_clear(client):
         "/api/settings",
         json={
             **base_payload,
-            "upstream_socks5_proxy": "${TEST_UPSTREAM_PROXY_URL}",
+            "upstream_socks5_proxy": "test-upstream-proxy",
         },
     )
 
     assert updated.status_code == 200
     updated_body = updated.json()
     assert updated_body["has_upstream_socks5_proxy"] is True
-    assert updated_body["upstream_socks5_proxy_masked"] == "${TEST_UPSTREAM_PROXY_URL}"
+    assert updated_body["upstream_socks5_proxy_masked"] == "test-upstream-proxy"
     assert "user:secret" not in json.dumps(updated_body)
-    assert settings_repo.load_settings()["upstream_socks5_proxy"] == "${TEST_UPSTREAM_PROXY_URL}"
+    assert settings_repo.load_settings()["upstream_socks5_proxy"] == "test-upstream-proxy"
 
     preserved = client.post(
         "/api/settings",
@@ -750,7 +789,7 @@ def test_settings_global_socks5_proxy_save_mask_preserve_and_clear(client):
         },
     )
     assert preserved.status_code == 200
-    assert settings_repo.load_settings()["upstream_socks5_proxy"] == "${TEST_UPSTREAM_PROXY_URL}"
+    assert settings_repo.load_settings()["upstream_socks5_proxy"] == "test-upstream-proxy"
 
     cleared = client.post(
         "/api/settings",
@@ -776,24 +815,24 @@ def test_settings_global_webhook_url_save_mask_preserve_clear_and_use(client, mo
         "/api/settings",
         json={
             **base_payload,
-            "webhook_url": "${TEST_WEBHOOK_URL}",
+            "webhook_url": "test-webhook-url",
         },
     )
 
     assert updated.status_code == 200
     updated_body = updated.json()
     assert updated_body["has_webhook_url"] is True
-    assert updated_body["webhook_url_masked"] == "${TEST_WEBHOOK_URL}"
+    assert updated_body["webhook_url_masked"] == "test-webhook-url"
     assert "top-secret" not in json.dumps(updated_body)
     assert "hidden" not in json.dumps(updated_body)
-    assert settings_repo.load_settings()["webhook_url"] == "${TEST_WEBHOOK_URL}"
+    assert settings_repo.load_settings()["webhook_url"] == "test-webhook-url"
 
     preserved = client.post(
         "/api/settings",
         json={**base_payload, "webhook_url": updated_body["webhook_url_masked"]},
     )
     assert preserved.status_code == 200
-    assert settings_repo.load_settings()["webhook_url"] == "${TEST_WEBHOOK_URL}"
+    assert settings_repo.load_settings()["webhook_url"] == "test-webhook-url"
 
     created = client.post("/api/settings/presets", json={"name": "Alt webhook preset"})
     assert created.status_code == 200
@@ -839,31 +878,31 @@ def test_settings_global_webhook_url_save_mask_preserve_clear_and_use(client, mo
                 "api_key": "plain-secret",
                 "api_path": "/v1/images/generations",
             },
-            "API key must use ${ENV_VAR_NAME} unless ALLOW_PLAINTEXT_SECRETS=true.",
+            "API key must name a secret_id declared in the startup SECRET_REGISTRY_JSON registry",
         ),
         (
             {
                 "preset_name": "Plain proxy",
                 "api_url": "https://api.example.com",
-                "api_key": "${TEST_OPENAI_API_KEY}",
+                "api_key": "test-openai-api-key",
                 "api_path": "/v1/images/generations",
                 "upstream_socks5_proxy": "socks5://user:secret@127.0.0.1:1080",
             },
-            "SOCKS5 proxy URL must use ${ENV_VAR_NAME} unless ALLOW_PLAINTEXT_SECRETS=true.",
+            "SOCKS5 proxy URL must name a secret_id declared in the startup SECRET_REGISTRY_JSON registry",
         ),
         (
             {
                 "preset_name": "Plain webhook",
                 "api_url": "https://api.example.com",
-                "api_key": "${TEST_OPENAI_API_KEY}",
+                "api_key": "test-openai-api-key",
                 "api_path": "/v1/images/generations",
                 "webhook_url": "https://hooks.example.com/services/top-secret?token=hidden",
             },
-            "Webhook URL must use ${ENV_VAR_NAME} unless ALLOW_PLAINTEXT_SECRETS=true.",
+            "Webhook URL must name a secret_id declared in the startup SECRET_REGISTRY_JSON registry",
         ),
     ],
 )
-def test_settings_rejects_plaintext_secrets_by_default(client, payload, detail):
+def test_settings_rejects_unregistered_secrets(client, payload, detail):
     settings = client.get("/api/settings").json()
     resp = client.post(
         "/api/settings",
@@ -877,27 +916,149 @@ def test_settings_rejects_plaintext_secrets_by_default(client, payload, detail):
     assert detail in resp.text
 
 
-def test_settings_can_opt_in_to_plaintext_secret_storage(client):
+@pytest.mark.parametrize(
+    ("payload", "detail"),
+    [
+        (
+            {
+                "preset_name": "Env ref API key",
+                "api_url": "https://api.example.com",
+                "api_key": "${ACCESS_KEY}",
+                "api_path": "/v1/images/generations",
+            },
+            "API key must name a secret_id",
+        ),
+        (
+            {
+                "preset_name": "Env ref proxy",
+                "api_url": "https://api.example.com",
+                "api_key": "test-openai-api-key",
+                "api_path": "/v1/images/generations",
+                "upstream_socks5_proxy": "${TEST_UPSTREAM_PROXY_URL}",
+            },
+            "SOCKS5 proxy URL must name a secret_id",
+        ),
+        (
+            {
+                "preset_name": "Env ref optimizer key",
+                "api_url": "https://api.example.com",
+                "api_key": "test-openai-api-key",
+                "api_path": "/v1/images/generations",
+                "prompt_optimizer": {
+                    "enabled": True,
+                    "api_url": "https://example.com/v1/chat/completions",
+                    "model": "gpt-4o-mini",
+                    "timeout_seconds": 30,
+                    "api_key": "${TEST_PROMPT_OPTIMIZER_API_KEY}",
+                },
+            },
+            "Prompt optimizer API key must name a secret_id",
+        ),
+    ],
+)
+def test_settings_rejects_environment_variable_references(client, payload, detail):
+    """Web Settings must not be able to point a credential at any process env var."""
+
+    settings = client.get("/api/settings").json()
+    resp = client.post(
+        "/api/settings",
+        json={
+            "active_preset_id": settings["active_preset_id"],
+            **payload,
+        },
+    )
+
+    assert resp.status_code == 422
+    assert detail in resp.text
+    assert "${ENV_VAR_NAME} references are not accepted" in resp.text
+    assert settings_repo.load_settings()["presets"][0]["api_key"] != "${ACCESS_KEY}"
+
+
+def test_registry_credential_cannot_be_repointed_at_another_origin(client):
+    """A Settings session must not be able to ship a credential to a new host."""
+
+    settings = client.get("/api/settings").json()
+    bound = client.post(
+        "/api/settings",
+        json={
+            "active_preset_id": settings["active_preset_id"],
+            "preset_name": "Bound preset",
+            "api_url": "https://api.example.com",
+            "api_key": "test-openai-api-key",
+            "api_path": "/v1/images/generations",
+        },
+    )
+    assert bound.status_code == 200
+
+    repointed = client.post(
+        "/api/settings",
+        json={
+            "active_preset_id": settings["active_preset_id"],
+            "preset_name": "Repointed preset",
+            "api_url": "https://example.com",
+            "api_key": "test-openai-api-key",
+            "api_path": "/v1/images/generations",
+        },
+    )
+    assert repointed.status_code == 422
+    assert "not bound to the target origin" in repointed.text
+
+    # Changing only the URL drops the credential instead of forwarding it.
+    moved = client.post(
+        "/api/settings",
+        json={
+            "active_preset_id": settings["active_preset_id"],
+            "preset_name": "Moved preset",
+            "api_url": "https://example.com",
+            "api_key": None,
+            "api_path": "/v1/images/generations",
+        },
+    )
+    assert moved.status_code == 200
+    assert moved.json()["has_api_key"] is False
+    assert settings_repo.load_settings()["presets"][0]["api_key"] == ""
+
+
+def test_credentials_are_not_resolved_without_a_startup_host_allowlist(client, monkeypatch):
+    settings = client.get("/api/settings").json()
+    configured = client.post(
+        "/api/settings",
+        json={
+            "active_preset_id": settings["active_preset_id"],
+            "preset_name": "Allowlist preset",
+            "api_url": "https://api.example.com",
+            "api_key": "test-openai-api-key",
+            "api_path": "/v1/images/generations",
+        },
+    )
+    assert configured.status_code == 200
+
+    monkeypatch.setattr(config, "UPSTREAM_HOST_ALLOWLIST", "")
+    health = client.post(
+        f"/api/settings/presets/{settings['active_preset_id']}/health",
+        json={"use_credentials": True},
+    )
+    assert health.status_code == 422
+    assert "host allowlist" in health.json()["detail"]
+
+
+def test_plaintext_opt_in_no_longer_accepts_web_managed_literals(client):
     config.ALLOW_PLAINTEXT_SECRETS = True
     settings = client.get("/api/settings").json()
     resp = client.post(
         "/api/settings",
         json={
             "active_preset_id": settings["active_preset_id"],
-            "preset_name": "Plaintext allowed",
+            "preset_name": "Plaintext rejected",
             "api_url": "https://api.example.com",
             "api_key": "plain-secret",
             "api_path": "/v1/images/generations",
-            "upstream_socks5_proxy": "socks5://user:secret@127.0.0.1:1080",
-            "webhook_url": "https://hooks.example.com/services/top-secret?token=hidden",
         },
     )
 
-    assert resp.status_code == 200
-    persisted = settings_repo.load_settings()
-    assert persisted["presets"][0]["api_key"] == "plain-secret"
-    assert persisted["upstream_socks5_proxy"] == "socks5://user:secret@127.0.0.1:1080"
-    assert persisted["webhook_url"] == "https://hooks.example.com/services/top-secret?token=hidden"
+    assert resp.status_code == 422
+    assert "literal secret values are not accepted from Web Settings" in resp.text
+    assert settings_repo.load_settings()["presets"][0]["api_key"] != "plain-secret"
 
 
 def _settings_payload(settings: dict, **overrides):
@@ -931,7 +1092,7 @@ def _assistant_runtime_payload(
     optimizer_api_url: str = "https://example.com/v1/chat/completions",
     optimizer_model: str = "assistant-model",
     optimizer_timeout_seconds: int = 45,
-    optimizer_api_key: str = "${TEST_PROMPT_OPTIMIZER_API_KEY}",
+    optimizer_api_key: str = "test-prompt-optimizer-key",
 ):
     return _settings_payload(
         settings,
@@ -964,7 +1125,7 @@ def test_prompt_optimizer_settings_mask_preserve_and_clear(client):
                 "api_url": "https://example.com/v1/chat/completions",
                 "model": "gpt-4o-mini",
                 "timeout_seconds": 75,
-                "api_key": "${TEST_PROMPT_OPTIMIZER_API_KEY}",
+                "api_key": "test-prompt-optimizer-key",
             },
         ),
     )
@@ -977,10 +1138,10 @@ def test_prompt_optimizer_settings_mask_preserve_and_clear(client):
     assert optimizer["model"] == "gpt-4o-mini"
     assert optimizer["timeout_seconds"] == 75
     assert optimizer["has_api_key"] is True
-    assert optimizer["api_key_source"] == "env"
-    assert optimizer["api_key_env_var"] == "TEST_PROMPT_OPTIMIZER_API_KEY"
+    assert optimizer["api_key_source"] == "registry"
+    assert optimizer["api_key_secret_id"] == "test-prompt-optimizer-key"
     assert "optimizer-secret" not in json.dumps(body)
-    assert settings_repo.load_prompt_optimizer_settings()["api_key"] == "${TEST_PROMPT_OPTIMIZER_API_KEY}"
+    assert settings_repo.load_prompt_optimizer_settings()["api_key"] == "test-prompt-optimizer-key"
     assert settings_repo.load_prompt_optimizer_settings()["timeout_seconds"] == 75
 
     preserved = client.post(
@@ -992,12 +1153,12 @@ def test_prompt_optimizer_settings_mask_preserve_and_clear(client):
                 "api_url": "https://example.com/v1/chat/completions",
                 "model": "gpt-4o-mini",
                 "timeout_seconds": 90,
-                "api_key": "${TEST_PROMPT_OPTIMIZER_API_KEY}",
+                "api_key": "test-prompt-optimizer-key",
             },
         ),
     )
     assert preserved.status_code == 200
-    assert settings_repo.load_prompt_optimizer_settings()["api_key"] == "${TEST_PROMPT_OPTIMIZER_API_KEY}"
+    assert settings_repo.load_prompt_optimizer_settings()["api_key"] == "test-prompt-optimizer-key"
     assert settings_repo.load_prompt_optimizer_settings()["timeout_seconds"] == 90
 
     cleared = client.post(
@@ -1044,7 +1205,7 @@ def test_ai_assistant_settings_mask_preserve_and_clear(client):
                 "api_url": "https://example.com/v1/chat/completions",
                 "model": "shared-model",
                 "timeout_seconds": 75,
-                "api_key": "${TEST_PROMPT_OPTIMIZER_API_KEY}",
+                "api_key": "test-prompt-optimizer-key",
             },
         ),
     )
@@ -1053,8 +1214,8 @@ def test_ai_assistant_settings_mask_preserve_and_clear(client):
     assistant = settings["ai_assistant"]
     assert assistant["enabled"] is True
     assert assistant["has_api_key"] is True
-    assert assistant["api_key_source"] == "env"
-    assert assistant["api_key_env_var"] == "TEST_PROMPT_OPTIMIZER_API_KEY"
+    assert assistant["api_key_source"] == "registry"
+    assert assistant["api_key_secret_id"] == "test-prompt-optimizer-key"
     assert assistant["api_url"] == "https://example.com"
     assert assistant["model"] == "shared-model"
     assert assistant["vision_model"] == "gpt-4o-mini"
@@ -1082,8 +1243,8 @@ def test_ai_assistant_settings_mask_preserve_and_clear(client):
     assert assistant["timeout_seconds"] == 75
     assert assistant["api_path"] == "/v1/chat/completions"
     assert assistant["has_api_key"] is True
-    assert assistant["api_key_source"] == "env"
-    assert assistant["api_key_env_var"] == "TEST_PROMPT_OPTIMIZER_API_KEY"
+    assert assistant["api_key_source"] == "registry"
+    assert assistant["api_key_secret_id"] == "test-prompt-optimizer-key"
     assert "optimizer-secret" not in json.dumps(body)
     assert settings_repo.load_ai_assistant_settings()["vision_model"] == "assistant-vision-model"
     assert "api_key" not in settings_repo.load_ai_assistant_settings()
@@ -1128,7 +1289,7 @@ def test_ai_assistant_settings_mask_preserve_and_clear(client):
     assert invalid_timeout.status_code == 200
 
 
-def test_prompt_optimizer_rejects_plaintext_api_key_by_default(client):
+def test_prompt_optimizer_rejects_unregistered_api_key(client):
     settings = client.get("/api/settings").json()
     resp = client.post(
         "/api/settings",
@@ -1145,7 +1306,11 @@ def test_prompt_optimizer_rejects_plaintext_api_key_by_default(client):
     )
 
     assert resp.status_code == 422
-    assert "Prompt optimizer API key must use ${ENV_VAR_NAME} unless ALLOW_PLAINTEXT_SECRETS=true." in resp.text
+    assert (
+        "Prompt optimizer API key must name a secret_id declared in the startup "
+        "SECRET_REGISTRY_JSON registry"
+    ) in resp.text
+    assert "literal secret values are not accepted from Web Settings" in resp.text
 def test_r2_backup_settings_mask_preserve_and_clear(client):
     settings = client.get("/api/settings").json()
     assert settings["r2_backup"]["enabled"] is False
@@ -1163,8 +1328,8 @@ def test_r2_backup_settings_mask_preserve_and_clear(client):
                 "region": "auto",
                 "key_prefix": "gallery-test",
                 "sync_interval_hours": 6,
-                "access_key_id": "${TEST_R2_ACCESS_KEY_ID}",
-                "secret_access_key": "${TEST_R2_SECRET_ACCESS_KEY}",
+                "access_key_id": "test-r2-access-key-id",
+                "secret_access_key": "test-r2-secret-access-key",
             },
         ),
     )
@@ -1178,14 +1343,14 @@ def test_r2_backup_settings_mask_preserve_and_clear(client):
     assert r2["key_prefix"] == "gallery-test/"
     assert r2["sync_interval_hours"] == 6
     assert r2["has_access_key_id"] is True
-    assert r2["access_key_id_source"] == "env"
-    assert r2["access_key_id_env_var"] == "TEST_R2_ACCESS_KEY_ID"
+    assert r2["access_key_id_source"] == "registry"
+    assert r2["access_key_id_secret_id"] == "test-r2-access-key-id"
     assert r2["has_secret_access_key"] is True
-    assert r2["secret_access_key_source"] == "env"
-    assert r2["secret_access_key_env_var"] == "TEST_R2_SECRET_ACCESS_KEY"
+    assert r2["secret_access_key_source"] == "registry"
+    assert r2["secret_access_key_secret_id"] == "test-r2-secret-access-key"
     assert "r2-secret-key" not in json.dumps(body)
-    assert settings_repo.load_r2_backup_settings()["access_key_id"] == "${TEST_R2_ACCESS_KEY_ID}"
-    assert settings_repo.load_r2_backup_settings()["secret_access_key"] == "${TEST_R2_SECRET_ACCESS_KEY}"
+    assert settings_repo.load_r2_backup_settings()["access_key_id"] == "test-r2-access-key-id"
+    assert settings_repo.load_r2_backup_settings()["secret_access_key"] == "test-r2-secret-access-key"
 
     preserved = client.post(
         "/api/settings",
@@ -1204,8 +1369,8 @@ def test_r2_backup_settings_mask_preserve_and_clear(client):
         ),
     )
     assert preserved.status_code == 200
-    assert settings_repo.load_r2_backup_settings()["access_key_id"] == "${TEST_R2_ACCESS_KEY_ID}"
-    assert settings_repo.load_r2_backup_settings()["secret_access_key"] == "${TEST_R2_SECRET_ACCESS_KEY}"
+    assert settings_repo.load_r2_backup_settings()["access_key_id"] == "test-r2-access-key-id"
+    assert settings_repo.load_r2_backup_settings()["secret_access_key"] == "test-r2-secret-access-key"
 
     cleared = client.post(
         "/api/settings",
@@ -1262,8 +1427,8 @@ def test_r2_backup_settings_rejects_private_endpoint_before_probe(client, monkey
             "bucket_name": "image-backups",
             "region": "auto",
             "key_prefix": "gallery/",
-            "access_key_id": "${TEST_R2_ACCESS_KEY_ID}",
-            "secret_access_key": "${TEST_R2_SECRET_ACCESS_KEY}",
+            "access_key_id": "test-r2-access-key-id",
+            "secret_access_key": "test-r2-secret-access-key",
             "use_credentials": True,
         },
     )
@@ -1280,8 +1445,8 @@ def test_r2_backup_settings_rejects_private_endpoint_before_probe(client, monkey
                 "bucket_name": "image-backups",
                 "region": "auto",
                 "key_prefix": "gallery/",
-                "access_key_id": "${TEST_R2_ACCESS_KEY_ID}",
-                "secret_access_key": "${TEST_R2_SECRET_ACCESS_KEY}",
+                "access_key_id": "test-r2-access-key-id",
+                "secret_access_key": "test-r2-secret-access-key",
             },
         ),
     )
@@ -1302,8 +1467,8 @@ def test_r2_backup_settings_allows_custom_endpoint_only_with_admin_allowlist(
             "bucket_name": "image-backups",
             "region": "auto",
             "key_prefix": "gallery/",
-            "access_key_id": "${TEST_R2_ACCESS_KEY_ID}",
-            "secret_access_key": "${TEST_R2_SECRET_ACCESS_KEY}",
+            "access_key_id": "test-r2-access-key-id",
+            "secret_access_key": "test-r2-secret-access-key",
             "use_credentials": True,
         },
     )
@@ -1334,8 +1499,8 @@ def test_r2_backup_settings_allows_custom_endpoint_only_with_admin_allowlist(
             "bucket_name": "image-backups",
             "region": "auto",
             "key_prefix": "gallery/",
-            "access_key_id": "${TEST_R2_ACCESS_KEY_ID}",
-            "secret_access_key": "${TEST_R2_SECRET_ACCESS_KEY}",
+            "access_key_id": "test-r2-storage-access-key-id",
+            "secret_access_key": "test-r2-storage-secret-access-key",
             "use_credentials": True,
         },
     )
@@ -1412,7 +1577,7 @@ def test_missing_r2_settings_key_persists_env_defaults_to_sqlite(tmp_path, monke
                     "id": "default",
                     "name": "Default",
                     "api_url": "https://api.example.com",
-                    "api_key": "${TEST_DEFAULT_API_KEY}",
+                    "api_key": "test-openai-api-key",
                     "api_path": "/v1/images/generations",
                     "default_model": "gpt-image-2",
                     "default_response_format": "url",
@@ -1476,8 +1641,8 @@ def test_r2_health_uses_draft_settings_and_preserves_masked_credentials(client, 
                 "bucket_name": "image-backups",
                 "region": "auto",
                 "key_prefix": "gallery/",
-                "access_key_id": "${TEST_R2_ACCESS_KEY_ID}",
-                "secret_access_key": "${TEST_R2_SECRET_ACCESS_KEY}",
+                "access_key_id": "test-r2-access-key-id",
+                "secret_access_key": "test-r2-secret-access-key",
             },
         ),
     )
@@ -1512,8 +1677,8 @@ def test_r2_health_uses_draft_settings_and_preserves_masked_credentials(client, 
     assert health.json()["checks"][0]["name"] == "configuration"
     assert seen["draft"]["endpoint_url"] == "https://account.r2.cloudflarestorage.com"
     assert seen["draft"]["bucket_name"] == "draft-backups"
-    assert seen["draft"]["access_key_id"] == "${TEST_R2_ACCESS_KEY_ID}"
-    assert seen["draft"]["secret_access_key"] == "${TEST_R2_SECRET_ACCESS_KEY}"
+    assert seen["draft"]["access_key_id"] == "test-r2-access-key-id"
+    assert seen["draft"]["secret_access_key"] == "test-r2-secret-access-key"
 
 
 def test_storage_secures_data_directory_and_database_permissions(client):
@@ -1585,7 +1750,7 @@ def test_prompt_optimize_success_uses_configured_upstream(client, monkeypatch):
                 "api_url": "https://example.com/v1/chat/completions",
                 "model": "prompt-model",
                 "timeout_seconds": 45,
-                "api_key": "${TEST_PROMPT_OPTIMIZER_API_KEY}",
+                "api_key": "test-prompt-optimizer-key",
             },
         ),
     )
@@ -1645,7 +1810,7 @@ def test_prompt_optimize_accepts_structured_intent(client, monkeypatch):
                 "enabled": True,
                 "api_url": "https://example.com/v1/chat/completions",
                 "model": "prompt-model",
-                "api_key": "${TEST_PROMPT_OPTIMIZER_API_KEY}",
+                "api_key": "test-prompt-optimizer-key",
             },
         ),
     )
@@ -1691,7 +1856,7 @@ def test_prompt_optimize_upstream_error_and_timeout(client, monkeypatch):
                 "enabled": True,
                 "api_url": "https://example.com/v1/chat/completions",
                 "model": "prompt-model",
-                "api_key": "${TEST_PROMPT_OPTIMIZER_API_KEY}",
+                "api_key": "test-prompt-optimizer-key",
             },
         ),
     )
@@ -1726,7 +1891,7 @@ def test_prompt_optimizer_health_reports_connectivity_and_errors(client, monkeyp
                 "enabled": True,
                 "api_url": "https://example.com/v1/chat/completions",
                 "model": "prompt-model",
-                "api_key": "${TEST_PROMPT_OPTIMIZER_API_KEY}",
+                "api_key": "test-prompt-optimizer-key",
             },
         ),
     )
@@ -1842,7 +2007,7 @@ def test_prompt_snippets_crud_search_and_validation(client):
     ]
 
 
-def test_settings_rejects_invalid_socks5_proxy(client):
+def test_settings_rejects_unregistered_socks5_proxy(client):
     config.ALLOW_PLAINTEXT_SECRETS = True
     settings = client.get("/api/settings").json()
 
@@ -1859,10 +2024,10 @@ def test_settings_rejects_invalid_socks5_proxy(client):
     )
 
     assert resp.status_code == 422
-    assert "socks5://" in json.dumps(resp.json())
+    assert "SOCKS5 proxy URL must name a secret_id" in json.dumps(resp.json())
 
 
-def test_settings_rejects_invalid_global_webhook_url(client):
+def test_settings_rejects_unregistered_global_webhook_url(client):
     config.ALLOW_PLAINTEXT_SECRETS = True
     settings = client.get("/api/settings").json()
 
@@ -1879,7 +2044,7 @@ def test_settings_rejects_invalid_global_webhook_url(client):
     )
 
     assert resp.status_code == 422
-    assert "https://" in json.dumps(resp.json())
+    assert "Webhook URL must name a secret_id" in json.dumps(resp.json())
 
 
 def test_socks5_proxy_only_flows_to_generation_and_edit(client, monkeypatch):
@@ -1895,7 +2060,7 @@ def test_socks5_proxy_only_flows_to_generation_and_edit(client, monkeypatch):
             "api_url": "https://api.example.com",
             "api_key": None,
             "api_path": "/v1/images/generations",
-            "upstream_socks5_proxy": "${TEST_UPSTREAM_PROXY_URL}",
+            "upstream_socks5_proxy": "test-upstream-proxy",
         },
     )
     assert updated.status_code == 200
@@ -1987,8 +2152,7 @@ def test_socks5_proxy_only_flows_to_generation_and_edit(client, monkeypatch):
     assert seen["edit_proxy"] == "socks5://user:secret@127.0.0.1:1080"
 
 
-def test_preset_health_and_env_api_key_resolution(client, monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "env-secret")
+def test_preset_health_and_registry_api_key_resolution(client, monkeypatch):
     settings = client.get("/api/settings").json()
     active_preset_id = settings["active_preset_id"]
     seen: dict[str, str] = {}
@@ -2040,17 +2204,17 @@ def test_preset_health_and_env_api_key_resolution(client, monkeypatch):
         "/api/settings",
         json={
             "active_preset_id": active_preset_id,
-            "preset_name": "Env preset",
+            "preset_name": "Registry preset",
             "api_url": "https://api.example.com",
-            "api_key": "${OPENAI_API_KEY}",
+            "api_key": "test-openai-api-key",
             "api_path": "/v1/images/generations",
         },
     )
     assert updated.status_code == 200
     updated_body = updated.json()
-    assert updated_body["api_key_source"] == "env"
-    assert updated_body["api_key_env_var"] == "OPENAI_API_KEY"
-    assert updated_body["api_key_masked"] == "${OPENAI_API_KEY}"
+    assert updated_body["api_key_source"] == "registry"
+    assert updated_body["api_key_secret_id"] == "test-openai-api-key"
+    assert updated_body["api_key_masked"] == "test-openai-api-key"
     assert "env-secret" not in json.dumps(updated_body)
 
     health = client.post(
@@ -2215,7 +2379,7 @@ def test_preset_health_ignores_upstream_probe_error_for_overall_status(client, m
             "active_preset_id": active_preset_id,
             "preset_name": "Probe-only failure",
             "api_url": "https://api.example.com",
-            "api_key": "${TEST_DEFAULT_API_KEY}",
+            "api_key": "test-openai-api-key",
             "api_path": "/v1/images/generations",
         },
     )
@@ -2231,7 +2395,9 @@ def test_preset_health_ignores_upstream_probe_error_for_overall_status(client, m
     )
 
 
-def test_missing_env_api_key_is_reported(client, monkeypatch):
+def test_unregistered_env_api_key_is_rejected_and_never_resolved(client, monkeypatch):
+    from backend.app.api import presets as presets_module
+
     monkeypatch.delenv("MISSING_IMAGE_KEY", raising=False)
     settings = client.get("/api/settings").json()
     active_preset_id = settings["active_preset_id"]
@@ -2243,7 +2409,7 @@ def test_missing_env_api_key_is_reported(client, monkeypatch):
         }
 
     monkeypatch.setattr(backend_main.proxy, "probe_upstream_endpoint", fake_probe)
-    updated = client.post(
+    rejected = client.post(
         "/api/settings",
         json={
             "active_preset_id": active_preset_id,
@@ -2253,7 +2419,14 @@ def test_missing_env_api_key_is_reported(client, monkeypatch):
             "api_path": "/v1/images/generations",
         },
     )
-    assert updated.status_code == 200
+    assert rejected.status_code == 422
+    assert "${ENV_VAR_NAME} references are not accepted" in rejected.text
+
+    # A reference stored before the registry became mandatory must not resolve.
+    stored = settings_repo.load_settings()
+    stored["presets"][0]["api_key"] = "${MISSING_IMAGE_KEY}"
+    settings_repo.save_settings(stored)
+    presets_module.load_api_settings()
 
     health = client.post(
         f"/api/settings/presets/{active_preset_id}/health",
@@ -2261,6 +2434,7 @@ def test_missing_env_api_key_is_reported(client, monkeypatch):
     )
     assert health.status_code == 422
     assert "MISSING_IMAGE_KEY" in health.json()["detail"]
+    assert "SECRET_REGISTRY_JSON" in health.json()["detail"]
 
     resp = client.post(
         "/api/generate",

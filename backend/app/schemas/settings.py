@@ -4,10 +4,8 @@ from pydantic import BaseModel, Field, StrictInt, field_validator, model_validat
 
 from ..core.validators import (
     normalize_r2_endpoint_url,
-    normalize_secret_env_ref_or_plaintext,
-    normalize_socks5_proxy_url,
+    normalize_managed_secret_reference,
     normalize_upstream_base_url,
-    normalize_webhook_url,
 )
 from .common import (
     ApiKeySource,
@@ -62,7 +60,7 @@ class PresetCreateRequest(StrictRequestModel):
     def validate_api_key(cls, value: Optional[str]) -> Optional[str]:
         if value is None:
             return None
-        return normalize_secret_env_ref_or_plaintext(
+        return normalize_managed_secret_reference(
             value,
             field_name="API key",
         )
@@ -121,7 +119,7 @@ class SettingsRequest(StrictRequestModel):
     def validate_api_key(cls, value: Optional[str]) -> Optional[str]:
         if value is None:
             return None
-        return normalize_secret_env_ref_or_plaintext(
+        return normalize_managed_secret_reference(
             value,
             field_name="API key",
         )
@@ -131,10 +129,9 @@ class SettingsRequest(StrictRequestModel):
     def validate_upstream_socks5_proxy(cls, value: Optional[str]) -> Optional[str]:
         if value is None:
             return None
-        return normalize_secret_env_ref_or_plaintext(
+        return normalize_managed_secret_reference(
             value,
             field_name="SOCKS5 proxy URL",
-            normalizer=normalize_socks5_proxy_url,
         )
 
     @field_validator("webhook_url")
@@ -142,10 +139,9 @@ class SettingsRequest(StrictRequestModel):
     def validate_settings_webhook_url(cls, value: Optional[str]) -> Optional[str]:
         if value is None:
             return None
-        return normalize_secret_env_ref_or_plaintext(
+        return normalize_managed_secret_reference(
             value,
             field_name="Webhook URL",
-            normalizer=normalize_webhook_url,
         )
 
 
@@ -279,7 +275,7 @@ class PromptOptimizerSettingsRequest(StrictRequestModel):
     def validate_api_key(cls, value: Optional[str]) -> Optional[str]:
         if value is None:
             return None
-        return normalize_secret_env_ref_or_plaintext(
+        return normalize_managed_secret_reference(
             value,
             field_name="Prompt optimizer API key",
         )
@@ -344,7 +340,7 @@ class AIAssistantSettingsRequest(StrictRequestModel):
             return None
         if value.strip() == MASKED_SECRET_VALUE:
             return MASKED_SECRET_VALUE
-        return normalize_secret_env_ref_or_plaintext(
+        return normalize_managed_secret_reference(
             value,
             field_name="deprecated AI Assistant API key",
         )
@@ -394,7 +390,7 @@ class R2BackupSettingsRequest(StrictRequestModel):
             return None
         if value.strip() == MASKED_SECRET_VALUE:
             return MASKED_SECRET_VALUE
-        return normalize_secret_env_ref_or_plaintext(
+        return normalize_managed_secret_reference(
             value,
             field_name="R2 access key ID",
         )
@@ -406,7 +402,7 @@ class R2BackupSettingsRequest(StrictRequestModel):
             return None
         if value.strip() == MASKED_SECRET_VALUE:
             return MASKED_SECRET_VALUE
-        return normalize_secret_env_ref_or_plaintext(
+        return normalize_managed_secret_reference(
             value,
             field_name="R2 secret access key",
         )
@@ -433,7 +429,7 @@ class NodeImageSettingsRequest(StrictRequestModel):
             return None
         if value.strip() == MASKED_SECRET_VALUE:
             return MASKED_SECRET_VALUE
-        return normalize_secret_env_ref_or_plaintext(
+        return normalize_managed_secret_reference(
             value,
             field_name="NodeImage API key",
         )

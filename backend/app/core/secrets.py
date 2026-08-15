@@ -176,14 +176,19 @@ def _builtin_entries() -> dict[str, SecretEntry]:
             config.NODEIMAGE_API_KEY,
         ),
     )
+    from .validators import get_env_var_ref_name
+
     entries: dict[str, SecretEntry] = {}
     for secret_id, purpose, target_url, value in candidates:
         normalized_value = str(value or "").strip()
         if not normalized_value or not str(target_url or "").strip():
             continue
-        # Legacy placeholders are deliberately not resolved. Operators must
-        # declare them in SECRET_REGISTRY_JSON under an opaque ID instead.
-        if "${" in normalized_value or "}" in normalized_value:
+        # A startup value may be a literal or a well-formed ${ENV_VAR} reference.
+        # Both are operator-declared at process start, so both get a builtin
+        # entry bound to the startup target origin. Malformed placeholders are
+        # never resolved.
+        env_name = get_env_var_ref_name(normalized_value)
+        if not env_name and ("${" in normalized_value or "}" in normalized_value):
             continue
         try:
             origin = canonical_origin(target_url)
@@ -193,7 +198,8 @@ def _builtin_entries() -> dict[str, SecretEntry]:
             secret_id=secret_id,
             purpose=purpose,
             origin=origin,
-            value=normalized_value,
+            env_name=env_name,
+            value=None if env_name else normalized_value,
         )
     return entries
 
@@ -296,6 +302,55 @@ def resolve_secret(
     return value
 
 
+def _entries_for_env_name(env_name: str, purpose: str) -> list[SecretEntry]:
+    with _registry_lock:
+        return [
+            entry
+            for entry in _registry.values()
+            if entry.env_name == env_name and entry.purpose == purpose
+        ]
+
+
+def resolve_env_reference(
+    env_name: str,
+    *,
+    purpose: SecretPurpose,
+    target_url: str,
+    host_allowlist: str,
+    field_name: str,
+) -> str:
+    """Resolve a legacy ``${ENV_VAR}`` reference through the registry only.
+
+    The environment variable is read only when a registry entry declares it for
+    this purpose and is bound to the target origin. Without that binding an
+    ``${ENV_VAR}`` reference could name any process secret (``ACCESS_KEY``,
+    cloud credentials, ...) and ship it to an arbitrary destination.
+    """
+
+    for entry in _entries_for_env_name(env_name, purpose):
+        try:
+            validate_secret_binding(
+                entry.secret_id,
+                purpose=purpose,
+                target_url=target_url,
+                host_allowlist=host_allowlist,
+            )
+        except SecretRegistryError:
+            continue
+        resolved = entry.resolve()
+        if not resolved:
+            raise SecretRegistryError(
+                f"{field_name} environment variable {env_name} is not set or empty."
+            )
+        return resolved
+
+    raise SecretRegistryError(
+        f"{field_name} references ${{{env_name}}}, which no Secret Registry entry "
+        "declares for this purpose and target origin. Declare it in "
+        "SECRET_REGISTRY_JSON and reference it by secret_id."
+    )
+
+
 def resolve_secret_reference(
     value: object,
     *,
@@ -306,33 +361,16 @@ def resolve_secret_reference(
 ) -> str:
     """Resolve a settings secret reference without exposing its source details.
 
-    Settings may contain an empty value, an explicit environment reference, a
-    predeclared registry ID, or (when plaintext storage is enabled at the
-    settings boundary) a literal value. Registry IDs are always validated for
-    purpose, origin, and the startup host allowlist before resolution.
+    Settings may contain an empty value, a predeclared registry ID, a legacy
+    ``${ENV_VAR}`` reference, or a legacy literal value. Registry IDs and
+    ``${ENV_VAR}`` references are always validated for purpose, origin, and the
+    startup host allowlist before resolution. Literals are inert credentials
+    that the settings API no longer accepts, so they are returned as-is.
     """
 
     raw = str(value or "").strip()
     if not raw:
         return ""
-
-    # Keep the parser local to avoid making the validators module import the
-    # secrets registry during application startup.
-    from .validators import get_env_var_ref_name, resolve_env_var_ref
-
-    env_var = get_env_var_ref_name(raw)
-    if env_var:
-        resolved = resolve_env_var_ref(raw)
-        if resolved:
-            return resolved
-        raise SecretRegistryError(
-            f"{field_name} environment variable {env_var} is not set or empty."
-        )
-
-    if "${" in raw or "}" in raw:
-        raise SecretRegistryError(
-            f"{field_name} env ref must be formatted as ${{ENV_VAR_NAME}}."
-        )
 
     if raw in configured_secret_ids():
         try:
@@ -344,6 +382,79 @@ def resolve_secret_reference(
             )
         except SecretRegistryError as exc:
             raise SecretRegistryError(f"{field_name}: {exc}") from exc
+
+    # Keep the parser local to avoid making the validators module import the
+    # secrets registry during application startup.
+    from .validators import get_env_var_ref_name
+
+    env_var = get_env_var_ref_name(raw)
+    if env_var:
+        return resolve_env_reference(
+            env_var,
+            purpose=purpose,
+            target_url=target_url,
+            host_allowlist=host_allowlist,
+            field_name=field_name,
+        )
+
+    if "${" in raw or "}" in raw:
+        raise SecretRegistryError(
+            f"{field_name} env ref must be formatted as ${{ENV_VAR_NAME}}."
+        )
+
+    return raw
+
+
+def resolve_url_secret_reference(
+    value: object,
+    *,
+    purpose: SecretPurpose,
+    host_allowlist: str,
+    field_name: str,
+) -> str:
+    """Resolve a secret whose value is itself the target URL (proxy, webhook)."""
+
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+
+    if raw in configured_secret_ids():
+        entry = secret_entry(raw)
+        return resolve_secret(
+            raw,
+            purpose=purpose,
+            target_url=entry.resolve(),
+            host_allowlist=host_allowlist,
+        )
+
+    from .validators import get_env_var_ref_name
+
+    env_var = get_env_var_ref_name(raw)
+    if env_var:
+        for entry in _entries_for_env_name(env_var, purpose):
+            resolved = entry.resolve()
+            if not resolved:
+                continue
+            try:
+                validate_secret_binding(
+                    entry.secret_id,
+                    purpose=purpose,
+                    target_url=resolved,
+                    host_allowlist=host_allowlist,
+                )
+            except SecretRegistryError:
+                continue
+            return resolved
+        raise SecretRegistryError(
+            f"{field_name} references ${{{env_var}}}, which no Secret Registry entry "
+            "declares for this purpose. Declare it in SECRET_REGISTRY_JSON and "
+            "reference it by secret_id."
+        )
+
+    if "${" in raw or "}" in raw:
+        raise SecretRegistryError(
+            f"{field_name} env ref must be formatted as ${{ENV_VAR_NAME}}."
+        )
 
     return raw
 

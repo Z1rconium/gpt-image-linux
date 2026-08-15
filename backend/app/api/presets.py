@@ -13,10 +13,9 @@ from ..core.validators import (
     get_env_var_ref_name,
     mask_socks5_proxy_url,
     mask_webhook_url,
-    normalize_secret_env_ref_or_plaintext,
     normalize_socks5_proxy_url,
+    normalize_stored_secret_reference,
     normalize_webhook_url,
-    resolve_env_var_ref,
 )
 from ..integrations.nodeimage.client import (
     NodeImageConfigurationError,
@@ -58,22 +57,17 @@ def get_api_key_env_var(api_key: str) -> str | None:
     return get_env_var_ref_name(api_key)
 
 
-def is_malformed_api_key_env_ref(api_key: str) -> bool:
-    return "${" in str(api_key or "") or "}" in str(api_key or "")
-
-
 def _default_secret_reference(secret_id: str, value: str | None) -> str:
     if secret_id in secrets.configured_secret_ids():
         return secret_id
     normalized = str(value or "").strip()
     env_var = get_api_key_env_var(normalized)
     if env_var:
+        # No builtin registry entry could be bound (no startup target URL), so
+        # keep the legacy reference visible; resolving it fails with a message
+        # that names the environment variable to declare.
         return f"${{{env_var}}}"
     return ""
-
-
-def resolve_api_key(api_key: str) -> str:
-    return resolve_env_var_ref(api_key)
 
 
 def api_key_response_fields(api_key: str) -> dict:
@@ -127,29 +121,19 @@ def get_effective_preset_api_key(preset: dict) -> str:
     secret_id = str(preset.get("api_key") or "").strip()
     if not secret_id:
         raise HTTPException(status_code=422, detail="API credential is not configured")
-    env_var = get_api_key_env_var(secret_id)
-    if secret_id not in secrets.configured_secret_ids():
-        resolved_key = resolve_api_key(secret_id)
-        if resolved_key:
-            return resolved_key
-        if env_var:
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    f"API Key environment variable {env_var} is not set or empty. "
-                    "Set it in the server environment."
-                ),
-            )
-        raise HTTPException(status_code=422, detail="API credential is not configured")
     try:
-        return secrets.resolve_secret(
+        resolved = secrets.resolve_secret_reference(
             secret_id,
             purpose="upstream_api",
             target_url=str(preset.get("api_url") or ""),
             host_allowlist=config.UPSTREAM_HOST_ALLOWLIST,
+            field_name="API key",
         )
     except secrets.SecretRegistryError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if not resolved:
+        raise HTTPException(status_code=422, detail="API credential is not configured")
+    return resolved
 
 
 def _default_prompt_optimizer_settings() -> dict:
@@ -333,26 +317,21 @@ def get_upstream_socks5_proxy(*, raw: bool = False) -> str:
         return value
     if not value:
         return ""
-    if value not in secrets.configured_secret_ids():
-        resolved = resolve_env_var_ref(value)
-        return normalize_socks5_proxy_url(resolved) if resolved else ""
     try:
-        entry = secrets.secret_entry(value)
-        target = entry.resolve()
-        return secrets.resolve_secret(
+        resolved = secrets.resolve_url_secret_reference(
             value,
             purpose="upstream_proxy",
-            target_url=target,
             host_allowlist=config.UPSTREAM_PROXY_HOST_ALLOWLIST,
+            field_name="SOCKS5 proxy URL",
         )
     except secrets.SecretRegistryError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return normalize_socks5_proxy_url(resolved) if resolved else ""
 
 
 def apply_upstream_socks5_proxy(value: str | None):
-    app.state.upstream_socks5_proxy = normalize_secret_env_ref_or_plaintext(
+    app.state.upstream_socks5_proxy = normalize_stored_secret_reference(
         value,
-        field_name="SOCKS5 proxy URL",
         normalizer=normalize_socks5_proxy_url,
     )
 
@@ -363,26 +342,21 @@ def get_webhook_url(*, raw: bool = False) -> str:
         return value
     if not value:
         return ""
-    if value not in secrets.configured_secret_ids():
-        resolved = resolve_env_var_ref(value)
-        return normalize_webhook_url(resolved) if resolved else ""
     try:
-        entry = secrets.secret_entry(value)
-        target = entry.resolve()
-        return secrets.resolve_secret(
+        resolved = secrets.resolve_url_secret_reference(
             value,
             purpose="webhook_url",
-            target_url=target,
             host_allowlist=config.WEBHOOK_HOST_ALLOWLIST,
+            field_name="Webhook URL",
         )
     except secrets.SecretRegistryError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return normalize_webhook_url(resolved) if resolved else ""
 
 
 def apply_webhook_url(value: str | None):
-    app.state.webhook_url = normalize_secret_env_ref_or_plaintext(
+    app.state.webhook_url = normalize_stored_secret_reference(
         value,
-        field_name="Webhook URL",
         normalizer=normalize_webhook_url,
     )
 
@@ -530,64 +504,34 @@ def build_nodeimage_settings_response(raw: dict | None) -> NodeImageSettingsResp
     )
 
 
-def resolve_prompt_optimizer_api_key(raw: dict | None) -> str:
-    settings = normalize_prompt_optimizer_settings(raw)
+def _resolve_optimizer_secret(settings: dict, *, field_name: str) -> str:
     secret_id = str(settings.get("api_key") or "").strip()
     if not secret_id:
         return ""
-    env_var = get_api_key_env_var(secret_id)
-    if secret_id not in secrets.configured_secret_ids():
-        resolved_key = resolve_api_key(secret_id)
-        if resolved_key:
-            return resolved_key
-        if env_var:
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    f"Prompt optimizer API Key environment variable {env_var} "
-                    "is not set or empty. Set it in the server environment."
-                ),
-            )
-        return secret_id
     try:
-        return secrets.resolve_secret(
+        return secrets.resolve_secret_reference(
             secret_id,
             purpose="prompt_optimizer",
             target_url=str(settings.get("api_url") or ""),
             host_allowlist=config.PROMPT_OPTIMIZER_HOST_ALLOWLIST,
+            field_name=field_name,
         )
     except secrets.SecretRegistryError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+def resolve_prompt_optimizer_api_key(raw: dict | None) -> str:
+    return _resolve_optimizer_secret(
+        normalize_prompt_optimizer_settings(raw),
+        field_name="Prompt optimizer API key",
+    )
 
 
 def resolve_ai_assistant_api_key(raw: dict | None) -> str:
-    settings = effective_ai_assistant_settings(raw)
-    secret_id = str(settings.get("api_key") or "").strip()
-    if not secret_id:
-        return ""
-    env_var = get_api_key_env_var(secret_id)
-    if secret_id not in secrets.configured_secret_ids():
-        resolved_key = resolve_api_key(secret_id)
-        if resolved_key:
-            return resolved_key
-        if env_var:
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    f"Prompt Optimizer API Key environment variable {env_var} "
-                    "is not set or empty for AI Assistant. Set it in the server environment."
-                ),
-            )
-        return secret_id
-    try:
-        return secrets.resolve_secret(
-            secret_id,
-            purpose="prompt_optimizer",
-            target_url=str(settings.get("api_url") or ""),
-            host_allowlist=config.PROMPT_OPTIMIZER_HOST_ALLOWLIST,
-        )
-    except secrets.SecretRegistryError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return _resolve_optimizer_secret(
+        effective_ai_assistant_settings(raw),
+        field_name="AI Assistant API key",
+    )
 
 
 def get_prompt_optimizer_settings() -> dict:

@@ -1,6 +1,5 @@
 import asyncio
 import ipaddress
-import os
 import re
 import socket
 from urllib.parse import urlparse, urlsplit, urlunsplit
@@ -16,49 +15,70 @@ def get_env_var_ref_name(value: str | None) -> str | None:
     return match.group(1) if match else None
 
 
-def is_malformed_env_var_ref(value: str | None) -> bool:
-    normalized = str(value or "").strip()
-    return bool(normalized) and ("${" in normalized or "}" in normalized) and not get_env_var_ref_name(normalized)
+# NOTE: there is deliberately no generic "resolve ${ENV_VAR}" helper here.
+# Environment-backed secrets are only ever read through the Secret Registry
+# (backend/app/core/secrets.py), which binds each value to a purpose and a
+# target origin before resolving it.
 
 
-def resolve_env_var_ref(value: str | None) -> str:
-    normalized = str(value or "").strip()
-    env_var = get_env_var_ref_name(normalized)
-    if env_var:
-        return os.getenv(env_var, "").strip()
-    return normalized
+SECRET_REGISTRY_HINT = (
+    "must name a secret_id declared in the startup SECRET_REGISTRY_JSON registry"
+)
 
 
-def normalize_secret_env_ref_or_plaintext(
-    value: str | None,
-    *,
-    field_name: str,
-    normalizer=None,
-) -> str:
+def normalize_managed_secret_reference(value: str | None, *, field_name: str) -> str:
+    """Validate a secret supplied through the Web Settings API.
+
+    Web-managed secrets may only name a secret_id that the operator predeclared
+    at process startup, because registry entries are bound to a purpose and a
+    target origin. Raw ``${ENV_VAR}`` references and literal secret values are
+    rejected: either would let a Settings session read an arbitrary process
+    secret and forward it to an operator-unapproved destination.
+    """
+
     from .secrets import configured_secret_ids, normalize_secret_id
 
     normalized = str(value or "").strip()
     if not normalized:
         return ""
-    if is_malformed_env_var_ref(normalized):
+    if "${" in normalized or "}" in normalized:
         raise ValueError(
-            f"{field_name} env ref must be formatted as ${{ENV_VAR_NAME}}."
+            f"{field_name} {SECRET_REGISTRY_HINT}; "
+            "${ENV_VAR_NAME} references are not accepted from Web Settings."
         )
-
-    env_var = get_env_var_ref_name(normalized)
-    if env_var:
-        return f"${{{env_var}}}"
-
-    if normalized in configured_secret_ids():
-        return normalize_secret_id(normalized, field_name=field_name)
-
-    if not config.ALLOW_PLAINTEXT_SECRETS:
+    if normalized not in configured_secret_ids():
         raise ValueError(
-            f"{field_name} must use ${{ENV_VAR_NAME}} unless "
-            "ALLOW_PLAINTEXT_SECRETS=true."
+            f"{field_name} {SECRET_REGISTRY_HINT}; "
+            "literal secret values are not accepted from Web Settings."
         )
+    return normalize_secret_id(normalized, field_name=field_name)
 
-    return normalizer(normalized) if normalizer is not None else normalized
+
+def normalize_stored_secret_reference(
+    value: str | None,
+    *,
+    normalizer=None,
+) -> str:
+    """Normalize a secret reference that already lives in storage.
+
+    Values written before the registry became mandatory are kept verbatim so the
+    Settings UI can still show what needs migrating; they are re-validated (and
+    rejected) when a credential is actually resolved for an outbound request.
+    """
+
+    from .secrets import configured_secret_ids
+
+    normalized = str(value or "").strip()
+    if not normalized:
+        return ""
+    if normalized in configured_secret_ids() or get_env_var_ref_name(normalized):
+        return normalized
+    if normalizer is None:
+        return normalized
+    try:
+        return normalizer(normalized)
+    except ValueError:
+        return normalized
 
 
 def _get_private_ip_ranges() -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]:

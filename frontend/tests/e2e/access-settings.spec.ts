@@ -252,7 +252,7 @@ test('settings drawer saves R2 sync interval hours', async ({ page }) => {
   });
 });
 
-test('settings drawer saves the NodeImage API key reference', async ({ page }) => {
+test('settings drawer saves the NodeImage secret registry reference', async ({ page }) => {
   await loadApp(page);
 
   await page.getByRole('button', { name: 'Settings' }).click();
@@ -262,7 +262,7 @@ test('settings drawer saves the NodeImage API key reference', async ({ page }) =
 
   await expect(apiKey).toHaveAttribute('type', 'password');
   await expect(section.getByRole('link', { name: 'Get API key from NodeImage' })).toHaveAttribute('href', 'https://nodeimage.com');
-  await apiKey.fill('${CUSTOM_NODEIMAGE_API_KEY}');
+  await apiKey.fill('nodeimage-upload-key');
 
   const saveRequest = page.waitForRequest(
     (request) => new URL(request.url()).pathname === '/api/settings' && request.method() === 'POST'
@@ -272,7 +272,7 @@ test('settings drawer saves the NodeImage API key reference', async ({ page }) =
 
   expect(request.postDataJSON().nodeimage).toEqual({
     enabled: true,
-    api_key: '${CUSTOM_NODEIMAGE_API_KEY}'
+    api_key: 'nodeimage-upload-key'
   });
 });
 

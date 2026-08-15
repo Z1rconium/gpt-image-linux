@@ -666,8 +666,8 @@ def test_gallery_tracked_jobs_allow_granian_multi_worker(client, monkeypatch):
             "bucket_name": "image-backups",
             "region": "auto",
             "key_prefix": "gallery-test/",
-            "access_key_id": "${TEST_R2_ACCESS_KEY_ID}",
-            "secret_access_key": "${TEST_R2_SECRET_ACCESS_KEY}",
+            "access_key_id": "test-r2-access-key-id",
+            "secret_access_key": "test-r2-secret-access-key",
         }
     )
 
@@ -695,8 +695,8 @@ def test_gallery_sync_job_reports_progress_and_terminal_sse(client, monkeypatch)
             "bucket_name": "image-backups",
             "region": "auto",
             "key_prefix": "gallery-test/",
-            "access_key_id": "${TEST_R2_ACCESS_KEY_ID}",
-            "secret_access_key": "${TEST_R2_SECRET_ACCESS_KEY}",
+            "access_key_id": "test-r2-access-key-id",
+            "secret_access_key": "test-r2-secret-access-key",
         }
     )
 
@@ -754,8 +754,8 @@ def test_gallery_sync_job_supports_dry_run_preflight(client, monkeypatch):
             "bucket_name": "image-backups",
             "region": "auto",
             "key_prefix": "gallery-test/",
-            "access_key_id": "${TEST_R2_ACCESS_KEY_ID}",
-            "secret_access_key": "${TEST_R2_SECRET_ACCESS_KEY}",
+            "access_key_id": "test-r2-access-key-id",
+            "secret_access_key": "test-r2-secret-access-key",
         }
     )
 
@@ -849,8 +849,8 @@ def test_scheduled_gallery_sync_creates_regular_sync_job(client, monkeypatch):
             "region": "auto",
             "key_prefix": "gallery-test/",
             "sync_interval_hours": 1,
-            "access_key_id": "${TEST_R2_ACCESS_KEY_ID}",
-            "secret_access_key": "${TEST_R2_SECRET_ACCESS_KEY}",
+            "access_key_id": "test-r2-access-key-id",
+            "secret_access_key": "test-r2-secret-access-key",
         }
     )
     seen = {}
@@ -890,8 +890,8 @@ def test_scheduled_gallery_sync_skips_active_sync(client):
             "region": "auto",
             "key_prefix": "gallery-test/",
             "sync_interval_hours": 1,
-            "access_key_id": "${TEST_R2_ACCESS_KEY_ID}",
-            "secret_access_key": "${TEST_R2_SECRET_ACCESS_KEY}",
+            "access_key_id": "test-r2-access-key-id",
+            "secret_access_key": "test-r2-secret-access-key",
         }
     )
 

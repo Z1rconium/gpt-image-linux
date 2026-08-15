@@ -13,7 +13,9 @@ from . import settings as config
 
 
 def configured_admin_key() -> str:
-    return str(config.ADMIN_KEY or config.ACCESS_KEY or "").strip()
+    # Admin step-up is only ever backed by ADMIN_KEY. Falling back to ACCESS_KEY
+    # would let every access-key holder mint an admin session.
+    return str(config.ADMIN_KEY or "").strip()
 
 
 def _signature_secret() -> bytes:

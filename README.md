@@ -248,9 +248,9 @@ Most runtime options live in `.env.example`. API presets, prompt optimizer, R2 b
 | Variable | Purpose |
 | --- | --- |
 | `ACCESS_KEY` | Access gate key. Required unless it is unset and `ALLOW_UNAUTHENTICATED=true`. |
-| `ADMIN_KEY` | Settings management step-up key. Set a distinct value; if omitted it falls back to `ACCESS_KEY` and startup logs a warning. |
+| `ADMIN_KEY` | Settings management step-up key. Required whenever `ACCESS_KEY` is set and it must differ from it; startup fails otherwise. It never falls back to `ACCESS_KEY`. |
 | `DEFAULT_API_URL` | Default upstream API base URL; may omit or include `/v1`. |
-| `DEFAULT_API_KEY` | Default upstream API key. Prefer env refs such as `${OPENAI_API_KEY}` in Web Settings. |
+| `DEFAULT_API_KEY` | Default upstream API key (literal or `${ENV_VAR_NAME}`). Declared at startup and bound to `DEFAULT_API_URL`. |
 | `DEFAULT_API_PATH` | `/v1/images/generations`, `/v1/responses`, or `/v1/chat/completions`. |
 | `DEFAULT_RESPONSES_MODEL` | Fallback model for `/v1/responses` when no request/preset model is provided. |
 | `AIOHTTP_CONNECTION_LIMIT` / `AIOHTTP_CONNECTION_LIMIT_PER_HOST` | Shared aiohttp connector limits for upstream/probe/download calls. |
@@ -282,7 +282,19 @@ Most runtime options live in `.env.example`. API presets, prompt optimizer, R2 b
 | `ENABLE_METRICS` | Enables JSON/Prometheus metrics endpoints. |
 | `LOG_DIR` / `LOG_LEVEL` / `LOG_RETENTION_HOURS` | Backend logs on stdout plus rotated files, retained for 24h by default. |
 
-Secret fields prefer `${ENV_VAR_NAME}` references. Literal secrets stored in SQLite require `ALLOW_PLAINTEXT_SECRETS=true`.
+### Secret Registry
+
+Credentials that Web Settings can select are declared at process startup in `SECRET_REGISTRY_JSON`:
+
+```json
+{"openai-images": {"purpose": "upstream_api", "origin": "https://api.openai.com", "env": "OPENAI_API_KEY"}}
+```
+
+Each entry binds a `secret_id` to a purpose (`upstream_api`, `prompt_optimizer`, `upstream_proxy`, `webhook_url`, `r2_access_key_id`, `r2_secret_access_key`, `nodeimage_api_key`), to the exact target origin it may be sent to, and to an environment variable holding the value. The startup values (`DEFAULT_API_KEY`, `PROMPT_OPTIMIZER_API_KEY`, `R2_*`, `NODEIMAGE_API_KEY`, `DEFAULT_UPSTREAM_SOCKS5_PROXY`) get equivalent builtin entries bound to their startup target URL.
+
+Web Settings accept **only** a declared `secret_id`. Raw `${ENV_VAR_NAME}` references and literal secret values are rejected, and `ALLOW_PLAINTEXT_SECRETS` is now a no-op: an administrator must not be able to read an arbitrary process secret or forward a credential to an unapproved host. Resolving a credential also requires its host to appear in the matching startup allowlist (`UPSTREAM_HOST_ALLOWLIST`, `PROMPT_OPTIMIZER_HOST_ALLOWLIST`, `WEBHOOK_HOST_ALLOWLIST`, `UPSTREAM_PROXY_HOST_ALLOWLIST`, `R2_ENDPOINT_HOST_ALLOWLIST`).
+
+Upgrading: values stored before this rule (literal keys, `${ENV_VAR}` references) stay visible in Settings but are no longer resolved unless a registry entry declares the same environment variable for that purpose and origin. Declare them in `SECRET_REGISTRY_JSON`, set the matching host allowlist, and re-select the `secret_id` in Settings.
 
 Overall Config persists overrides in SQLite. Some settings are hot-reloaded; restart-required and build-only settings are marked in the UI and should still be changed through `.env`/Compose for reproducible deployments.
 
@@ -294,7 +306,7 @@ Webhook concurrency and queue limits are process-local. With multiple `GRANIAN_W
 2. Unlock with `ACCESS_KEY` if enabled.
 3. Open Settings.
 4. Create or select an API preset.
-5. Set API base URL, API path, model, response format, and API key/env ref.
+5. Set API base URL, API path, model, response format, and the API key `secret_id` from the Secret Registry.
 6. Optionally configure SOCKS5 proxy, webhook, prompt optimizer, AI Assistant, R2 backup, NodeImage upload, or Overall Config overrides.
 7. Save the preset and run its health check if needed.
 8. Generate images from a prompt, or upload/select source images and run edits.

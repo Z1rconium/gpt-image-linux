@@ -244,9 +244,9 @@ ALLOW_UNAUTHENTICATED=true .venv/bin/granian --interface asgi backend.app.main:a
 | 变量 | 用途 |
 | --- | --- |
 | `ACCESS_KEY` | 访问密钥。除非清空该变量并设置 `ALLOW_UNAUTHENTICATED=true`，否则必填。 |
-| `ADMIN_KEY` | 设置管理的二次验证密钥。应设置为不同的值；省略时会回退到 `ACCESS_KEY`，并在启动日志中发出警告。 |
+| `ADMIN_KEY` | 设置管理的二次验证密钥。只要设置了 `ACCESS_KEY` 就必须配置，且必须与其不同，否则启动失败；它不会回退到 `ACCESS_KEY`。 |
 | `DEFAULT_API_URL` | 默认上游 API base URL，可带或不带 `/v1`。 |
-| `DEFAULT_API_KEY` | 默认上游 API key。Web Settings 中建议用 `${OPENAI_API_KEY}` 这类 env ref。 |
+| `DEFAULT_API_KEY` | 默认上游 API key（明文或 `${ENV_VAR_NAME}`）。在启动时声明，并绑定到 `DEFAULT_API_URL`。 |
 | `DEFAULT_API_PATH` | `/v1/images/generations`、`/v1/responses` 或 `/v1/chat/completions`。 |
 | `DEFAULT_RESPONSES_MODEL` | `/v1/responses` 在请求/预设未提供模型时使用的 fallback 模型。 |
 | `AIOHTTP_CONNECTION_LIMIT` / `AIOHTTP_CONNECTION_LIMIT_PER_HOST` | 上游请求、探测、下载共用的 aiohttp connector 限制。 |
@@ -278,7 +278,19 @@ ALLOW_UNAUTHENTICATED=true .venv/bin/granian --interface asgi backend.app.main:a
 | `ENABLE_METRICS` | 启用 JSON/Prometheus metrics 接口。 |
 | `LOG_DIR` / `LOG_LEVEL` / `LOG_RETENTION_HOURS` | 后端日志输出到 stdout 和轮转文件，默认保留 24 小时。 |
 
-Secret 字段优先使用 `${ENV_VAR_NAME}` 引用。若要把明文 secret 写入 SQLite，必须显式设置 `ALLOW_PLAINTEXT_SECRETS=true`。
+### Secret Registry（密钥注册表）
+
+Web Settings 可选用的凭据必须在启动时通过 `SECRET_REGISTRY_JSON` 声明：
+
+```json
+{"openai-images": {"purpose": "upstream_api", "origin": "https://api.openai.com", "env": "OPENAI_API_KEY"}}
+```
+
+每条记录把一个 `secret_id` 绑定到用途（`upstream_api`、`prompt_optimizer`、`upstream_proxy`、`webhook_url`、`r2_access_key_id`、`r2_secret_access_key`、`nodeimage_api_key`）、允许发送到的目标源（scheme://host:port）以及存放真实值的环境变量。启动配置（`DEFAULT_API_KEY`、`PROMPT_OPTIMIZER_API_KEY`、`R2_*`、`NODEIMAGE_API_KEY`、`DEFAULT_UPSTREAM_SOCKS5_PROXY`）会自动获得绑定到其启动目标 URL 的内置条目。
+
+Web Settings **只接受**已声明的 `secret_id`：原始 `${ENV_VAR_NAME}` 引用和明文密钥一律拒绝，`ALLOW_PLAINTEXT_SECRETS` 已成为空操作——管理员不应能读取任意进程机密，或把凭据发往未经批准的主机。解析凭据时还要求目标主机出现在对应的启动白名单中（`UPSTREAM_HOST_ALLOWLIST`、`PROMPT_OPTIMIZER_HOST_ALLOWLIST`、`WEBHOOK_HOST_ALLOWLIST`、`UPSTREAM_PROXY_HOST_ALLOWLIST`、`R2_ENDPOINT_HOST_ALLOWLIST`）。
+
+升级说明：此前存入的明文密钥或 `${ENV_VAR}` 引用仍会显示在 Settings 中，但除非注册表为同一用途和目标源声明了同名环境变量，否则不再解析。请在 `SECRET_REGISTRY_JSON` 中声明、配置对应主机白名单，并在 Settings 中重新选择 `secret_id`。
 
 Overall Config 会把 override 持久化到 SQLite。部分配置可热更新；需要重启或只影响构建的配置会在 UI 中标记，可复现部署仍建议通过 `.env`/Compose 管理。
 
@@ -290,7 +302,7 @@ Webhook 并发和队列限制按进程生效。使用多个 `GRANIAN_WORKERS` �
 2. 如启用访问密钥，先用 `ACCESS_KEY` 解锁。
 3. 打开 Settings。
 4. 创建或选择 API 预设。
-5. 设置 API base URL、API path、模型、response format 和 API key/env ref。
+5. 设置 API base URL、API path、模型、response format，以及来自 Secret Registry 的 API key `secret_id`。
 6. 按需配置 SOCKS5 代理、webhook、提示词优化器、AI Assistant、R2 备份、NodeImage 上传或 Overall Config override。
 7. 保存预设，必要时执行健康检查。
 8. 输入 prompt 生成图片，或上传/选择源图执行编辑。
