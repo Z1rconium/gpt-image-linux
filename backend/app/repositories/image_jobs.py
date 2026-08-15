@@ -217,6 +217,7 @@ def _build_image_job_units(
             "operation": operation,
             "unit_index": index,
             "status": "queued",
+            "claim_epoch": 0,
             "stage": "queued",
             "message": "Queued image unit",
             "created_at": now,
@@ -398,6 +399,10 @@ def claim_next_image_job_unit(
                         SELECT COUNT(*)
                         FROM image_job_units
                         WHERE status = 'running'
+                            AND (
+                                claim_expires_at IS NULL
+                                OR claim_expires_at > ?
+                            )
                     ),
                     expired_candidate(unit_id, priority) AS (
                         SELECT unit_id, 0
@@ -425,6 +430,7 @@ def claim_next_image_job_unit(
                 UPDATE image_job_units
                 SET status = 'running',
                     claimed_by = ?,
+                    claim_epoch = claim_epoch + 1,
                     claim_expires_at = ?,
                     stage = COALESCE(NULLIF(stage, 'queued'), stage),
                     message = COALESCE(message, 'Running image unit'),
@@ -435,6 +441,7 @@ def claim_next_image_job_unit(
                 RETURNING {", ".join(IMAGE_JOB_UNIT_COLUMNS)}
                 """,
                 (
+                    now,
                     now,
                     worker_id,
                     lease_expires_at,
@@ -449,39 +456,69 @@ def claim_next_image_job_unit(
 def update_image_job_unit_progress(
     unit_id: str,
     *,
+    claimed_by: str,
+    claim_epoch: int,
     stage: str,
     message: str,
-    claim_expires_at: str | None = None,
 ) -> dict[str, Any] | None:
     _ensure_database()
     now = utc_now()
     with _connect() as conn:
         with _transaction(conn):
-            conn.execute(
-                """
+            row = conn.execute(
+                f"""
                 UPDATE image_job_units
                 SET stage = ?,
                     message = ?,
-                    claim_expires_at = COALESCE(?, claim_expires_at),
                     updated_at = ?
-                WHERE unit_id = ? AND status = 'running'
-                """,
-                (stage, message, claim_expires_at, now, unit_id),
-            )
-            row = conn.execute(
-                f"""
-                SELECT {", ".join(IMAGE_JOB_UNIT_COLUMNS)}
-                FROM image_job_units
                 WHERE unit_id = ?
+                    AND claimed_by = ?
+                    AND claim_epoch = ?
+                    AND status = 'running'
+                RETURNING {", ".join(IMAGE_JOB_UNIT_COLUMNS)}
                 """,
-                (unit_id,),
+                (stage, message, now, unit_id, claimed_by, int(claim_epoch)),
             ).fetchone()
     return _image_job_unit_from_row(row) if row else None
+
+
+def renew_image_job_unit_lease(
+    unit_id: str,
+    *,
+    claimed_by: str,
+    claim_epoch: int,
+    claim_expires_at: str,
+) -> bool:
+    _ensure_database()
+    now = utc_now()
+    with _connect() as conn:
+        with _transaction(conn):
+            cursor = conn.execute(
+                """
+                UPDATE image_job_units
+                SET claim_expires_at = ?,
+                    updated_at = ?
+                WHERE unit_id = ?
+                    AND claimed_by = ?
+                    AND claim_epoch = ?
+                    AND status = 'running'
+                """,
+                (
+                    claim_expires_at,
+                    now,
+                    unit_id,
+                    claimed_by,
+                    int(claim_epoch),
+                ),
+            )
+    return cursor.rowcount > 0
 
 
 def complete_image_job_unit(
     unit_id: str,
     *,
+    claimed_by: str,
+    claim_epoch: int,
     result: dict[str, Any],
     stage_timings: dict[str, float],
     duration: str,
@@ -491,8 +528,8 @@ def complete_image_job_unit(
     now = utc_now()
     with _connect() as conn:
         with _transaction(conn):
-            conn.execute(
-                """
+            row = conn.execute(
+                f"""
                 UPDATE image_job_units
                 SET status = 'success',
                     stage = 'completed',
@@ -504,6 +541,10 @@ def complete_image_job_unit(
                     updated_at = ?,
                     claim_expires_at = NULL
                 WHERE unit_id = ?
+                    AND claimed_by = ?
+                    AND claim_epoch = ?
+                    AND status = 'running'
+                RETURNING {", ".join(IMAGE_JOB_UNIT_COLUMNS)}
                 """,
                 (
                     json.dumps(result, ensure_ascii=False, sort_keys=True),
@@ -512,15 +553,9 @@ def complete_image_job_unit(
                     completed_at,
                     now,
                     unit_id,
+                    claimed_by,
+                    int(claim_epoch),
                 ),
-            )
-            row = conn.execute(
-                f"""
-                SELECT {", ".join(IMAGE_JOB_UNIT_COLUMNS)}
-                FROM image_job_units
-                WHERE unit_id = ?
-                """,
-                (unit_id,),
             ).fetchone()
     return _image_job_unit_from_row(row) if row else None
 
@@ -528,6 +563,8 @@ def complete_image_job_unit(
 def fail_image_job_unit(
     unit_id: str,
     *,
+    claimed_by: str,
+    claim_epoch: int,
     status: str,
     stage: str,
     message: str,
@@ -540,8 +577,8 @@ def fail_image_job_unit(
     now = utc_now()
     with _connect() as conn:
         with _transaction(conn):
-            conn.execute(
-                """
+            row = conn.execute(
+                f"""
                 UPDATE image_job_units
                 SET status = ?,
                     stage = ?,
@@ -553,6 +590,10 @@ def fail_image_job_unit(
                     updated_at = ?,
                     claim_expires_at = NULL
                 WHERE unit_id = ?
+                    AND claimed_by = ?
+                    AND claim_epoch = ?
+                    AND status = 'running'
+                RETURNING {", ".join(IMAGE_JOB_UNIT_COLUMNS)}
                 """,
                 (
                     status,
@@ -564,15 +605,9 @@ def fail_image_job_unit(
                     completed_at or now,
                     now,
                     unit_id,
+                    claimed_by,
+                    int(claim_epoch),
                 ),
-            )
-            row = conn.execute(
-                f"""
-                SELECT {", ".join(IMAGE_JOB_UNIT_COLUMNS)}
-                FROM image_job_units
-                WHERE unit_id = ?
-                """,
-                (unit_id,),
             ).fetchone()
     return _image_job_unit_from_row(row) if row else None
 

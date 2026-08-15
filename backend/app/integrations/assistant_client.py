@@ -39,6 +39,7 @@ logger = logging.getLogger(__name__)
 
 ASSISTANT_ALLOWED_API_PATHS = {CHAT_COMPLETIONS_API_PATH, RESPONSES_API_PATH}
 ASSISTANT_JSON_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE | re.MULTILINE)
+ASSISTANT_DECODE_BYTES_PER_PIXEL = 8
 
 
 class AssistantError(Exception):
@@ -409,12 +410,34 @@ def _fit_preview(image, *, has_alpha: bool, byte_limit_error: str) -> tuple[byte
         scale *= 0.75
 
 
+def _enforce_vision_decode_budget(image, *, resident_input_bytes: int) -> None:
+    width, height = image.size
+    pixels = int(width) * int(height)
+    if width <= 0 or height <= 0 or pixels > config.MAX_IMAGE_PIXELS:
+        raise AssistantError("Image exceeds the configured pixel limit for AI analysis", status=400)
+
+    preview_pixels = config.AI_ASSISTANT_IMAGE_MAX_SIDE**2
+    estimated_bytes = (
+        max(0, int(resident_input_bytes))
+        + pixels * ASSISTANT_DECODE_BYTES_PER_PIXEL
+        + preview_pixels * ASSISTANT_DECODE_BYTES_PER_PIXEL
+        + config.AI_ASSISTANT_IMAGE_MAX_BYTES * 3
+    )
+    memory_limit = config.AI_ASSISTANT_IMAGE_DECODE_MAX_MB * 1024 * 1024
+    if estimated_bytes > memory_limit:
+        raise AssistantError(
+            "Image exceeds the decoded-memory limit for AI analysis",
+            status=400,
+        )
+
+
 def _prepare_vision_preview(
     opener,
     *,
     header: bytes,
     filename: str,
     content_type: str,
+    resident_input_bytes: int,
     decode_error: str,
     byte_limit_error: str,
 ) -> dict[str, str | int | bool]:
@@ -426,10 +449,18 @@ def _prepare_vision_preview(
         with warnings.catch_warnings():
             warnings.simplefilter("error", DecompressionBombWarning)
             with opener() as image:
+                _enforce_vision_decode_budget(
+                    image,
+                    resident_input_bytes=resident_input_bytes,
+                )
                 if str(getattr(image, "format", "")).lower().replace("jpg", "jpeg") != expected_format:
                     raise ValueError("Image decoder format does not match image data")
                 image.verify()
             with opener() as image:
+                _enforce_vision_decode_budget(
+                    image,
+                    resident_input_bytes=resident_input_bytes,
+                )
                 if getattr(image, "is_animated", False):
                     raise AssistantError("Animated images are not supported for AI analysis", status=400)
                 if str(getattr(image, "format", "")).lower().replace("jpg", "jpeg") != expected_format:
@@ -477,6 +508,7 @@ def prepare_vision_preview(path: Path) -> dict[str, str | int | bool]:
         header=header,
         filename=path.name,
         content_type="",
+        resident_input_bytes=0,
         decode_error="Gallery image could not be decoded for AI analysis",
         byte_limit_error="Gallery image preview exceeds AI Assistant byte limit",
     )
@@ -493,6 +525,7 @@ def prepare_vision_preview_bytes(
         header=image_bytes[:512],
         filename=filename,
         content_type=content_type,
+        resident_input_bytes=len(image_bytes),
         decode_error="Image data must be a fully decodable supported raster image",
         byte_limit_error="Uploaded image preview exceeds AI Assistant byte limit",
     )

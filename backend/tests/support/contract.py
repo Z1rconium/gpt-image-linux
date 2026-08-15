@@ -244,7 +244,7 @@ def _configure_runtime(
     config.UPLOAD_RESERVATION_TTL_SECONDS = 1800
     config.MAX_JSON_BODY_MB = 1
     config.MAX_UPSTREAM_JSON_MB = 128
-    config.MAX_IMAGE_PIXELS = 100000000
+    config.MAX_IMAGE_PIXELS = 25000000
     config.MAX_PENDING_EDIT_SOURCE_MB = config.MAX_FILE_SIZE_MB * 4
     config.IMPORT_ARCHIVE_MAX_MB = 256
     config.IMPORT_TEMP_RESERVATION_MAX_MB = 512
@@ -277,6 +277,7 @@ def _configure_runtime(
     config.AI_ASSISTANT_BATCH_MAX_IMAGES = 200
     config.AI_ASSISTANT_IMAGE_MAX_SIDE = 1024
     config.AI_ASSISTANT_IMAGE_MAX_BYTES = 1048576
+    config.AI_ASSISTANT_IMAGE_DECODE_MAX_MB = 128
     config.R2_BACKUP_ENABLED = False
     config.R2_ENDPOINT_URL = ""
     config.R2_ENDPOINT_HOST_ALLOWLIST = "account.r2.cloudflarestorage.com"

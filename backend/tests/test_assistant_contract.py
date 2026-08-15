@@ -506,10 +506,23 @@ def test_ai_assistant_gallery_metadata_and_analysis_flow(client, monkeypatch):
 
 
 def test_ai_assistant_uploaded_image_prompt_is_bounded_language_aware_and_not_persisted(client, monkeypatch):
+    from backend.app.services import assistant_vision
+
     settings = client.get("/api/settings").json()
     configured = client.post("/api/settings", json=_assistant_runtime_payload(settings))
     assert configured.status_code == 200
     seen: dict[str, object] = {}
+    image_operations: list[str | None] = []
+    original_run_image_operation = assistant_vision.run_image_operation
+
+    async def tracked_run_image_operation(callback, *args, metric_name=None, **kwargs):
+        image_operations.append(metric_name)
+        return await original_run_image_operation(
+            callback,
+            *args,
+            metric_name=metric_name,
+            **kwargs,
+        )
 
     async def fake_request_assistant_json(**kwargs):
         seen.update(kwargs)
@@ -523,6 +536,7 @@ def test_ai_assistant_uploaded_image_prompt_is_bounded_language_aware_and_not_pe
         )
 
     monkeypatch.setattr(assistant_router.assistant_client, "request_assistant_json", fake_request_assistant_json)
+    monkeypatch.setattr(assistant_vision, "run_image_operation", tracked_run_image_operation)
     gallery_count = gallery_queries.get_gallery_count()
     response = client.post(
         "/api/assistant/image/prompt",
@@ -538,6 +552,7 @@ def test_ai_assistant_uploaded_image_prompt_is_bounded_language_aware_and_not_pe
     assert len(body["warnings"]) == 10
     assert all(len(warning) == 500 for warning in body["warnings"])
     assert gallery_queries.get_gallery_count() == gallery_count
+    assert image_operations == ["prepare_assistant_upload_preview"]
 
     assert seen["image"]["mime_type"] == "image/png"
     assert seen["image"]["source_has_alpha"] is True
@@ -636,6 +651,43 @@ def test_ai_assistant_uploaded_image_prompt_rejects_decompression_bomb_warning(c
 
     assert response.status_code == 400
     assert "fully decodable" in response.json()["detail"]
+
+
+def test_ai_assistant_image_memory_budget_is_checked_before_decode(monkeypatch):
+    from backend.app.integrations import assistant_client
+
+    decode_attempted = False
+
+    class HeaderOnlyImage:
+        size = (2048, 2048)
+        format = "PNG"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def verify(self):
+            nonlocal decode_attempted
+            decode_attempted = True
+            raise AssertionError("budget must be enforced before verify")
+
+    monkeypatch.setattr(config, "MAX_IMAGE_PIXELS", 25_000_000)
+    monkeypatch.setattr(config, "AI_ASSISTANT_IMAGE_DECODE_MAX_MB", 16)
+
+    with pytest.raises(assistant_client.AssistantError, match="decoded-memory limit"):
+        assistant_client._prepare_vision_preview(
+            HeaderOnlyImage,
+            header=PNG_BYTES[:512],
+            filename="large.png",
+            content_type="image/png",
+            resident_input_bytes=len(PNG_BYTES),
+            decode_error="decode failed",
+            byte_limit_error="preview too large",
+        )
+
+    assert not decode_attempted
 
 
 def test_ai_assistant_uploaded_image_prompt_validates_language_and_maps_upstream_errors(client, monkeypatch):

@@ -122,7 +122,7 @@ UPSTREAM_MEMORY_BUDGET_MB = max(
     MAX_UPSTREAM_IMAGE_BYTES_PER_TASK_MB,
     int(os.getenv("UPSTREAM_MEMORY_BUDGET_MB", "256")),
 )
-MAX_IMAGE_PIXELS = max(1, int(os.getenv("MAX_IMAGE_PIXELS", "100000000")))
+MAX_IMAGE_PIXELS = max(1, int(os.getenv("MAX_IMAGE_PIXELS", "25000000")))
 IMAGE_CPU_CONCURRENCY = max(1, int(os.getenv("IMAGE_CPU_CONCURRENCY", "2")))
 FILE_IO_CONCURRENCY = max(1, int(os.getenv("FILE_IO_CONCURRENCY", "4")))
 DB_EXECUTOR_WORKERS = max(1, int(os.getenv("DB_EXECUTOR_WORKERS", "4")))
@@ -224,6 +224,10 @@ AI_ASSISTANT_IMAGE_MAX_SIDE = max(
 AI_ASSISTANT_IMAGE_MAX_BYTES = max(
     65536,
     int(os.getenv("AI_ASSISTANT_IMAGE_MAX_BYTES", str(1024 * 1024))),
+)
+AI_ASSISTANT_IMAGE_DECODE_MAX_MB = max(
+    16,
+    int(os.getenv("AI_ASSISTANT_IMAGE_DECODE_MAX_MB", "128")),
 )
 
 # ── Cloudflare R2 gallery backup ─────────────────────────────────

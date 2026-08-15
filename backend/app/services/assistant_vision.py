@@ -96,6 +96,7 @@ from .assistant_runtime import (
     _truncate_assistant_data,
     _warnings,
 )
+from .blocking import run_image_operation
 
 async def _read_image_prompt_upload(image: UploadFile) -> bytes:
     if not is_image_upload(image):
@@ -141,11 +142,12 @@ async def prompt_from_uploaded_image(
     finally:
         await image.close()
     try:
-        preview = await asyncio.to_thread(
+        preview = await run_image_operation(
             assistant_client.prepare_vision_preview_bytes,
             image_bytes,
             filename=image.filename or "image",
             content_type=resolve_upload_content_type(image),
+            metric_name="prepare_assistant_upload_preview",
         )
     except assistant_client.AssistantError as e:
         raise HTTPException(status_code=400 if e.status == 400 else 502, detail=str(e)) from e
@@ -288,11 +290,12 @@ async def optimize_uploaded_image_prompt(
     finally:
         await image.close()
     try:
-        target_preview = await asyncio.to_thread(
+        target_preview = await run_image_operation(
             assistant_client.prepare_vision_preview_bytes,
             image_bytes,
             filename=image.filename or "image",
             content_type=resolve_upload_content_type(image),
+            metric_name="prepare_assistant_target_preview",
         )
     except assistant_client.AssistantError as e:
         raise HTTPException(status_code=400 if e.status == 400 else 502, detail=str(e)) from e
@@ -337,11 +340,12 @@ async def optimize_uploaded_image_prompt(
     generation_duration_ms = int((time.monotonic() - generation_started) * 1000)
 
     try:
-        generated_preview = await asyncio.to_thread(
+        generated_preview = await run_image_operation(
             assistant_client.prepare_vision_preview_bytes,
             generated_bytes,
             filename="assistant-preview",
             content_type="",
+            metric_name="prepare_assistant_generated_preview",
         )
     except assistant_client.AssistantError as e:
         raise HTTPException(status_code=502, detail=f"Generated preview image is invalid: {e}") from e
@@ -413,7 +417,11 @@ async def _gallery_entry_and_preview(image_id: str) -> tuple[Any, dict[str, Any]
         raise HTTPException(status_code=404, detail="Gallery image file not found")
     if not await asyncio.to_thread(is_gallery_filename_referenced, entry.filename):
         raise HTTPException(status_code=404, detail="Gallery image file is not referenced")
-    preview = await asyncio.to_thread(assistant_client.prepare_vision_preview, Path(path))
+    preview = await run_image_operation(
+        assistant_client.prepare_vision_preview,
+        Path(path),
+        metric_name="prepare_assistant_gallery_preview",
+    )
     return entry, preview  # type: ignore[return-value]
 
 

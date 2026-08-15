@@ -21,6 +21,7 @@ from ..repositories.image_jobs import (
     fail_image_job_unit,
     get_generate_job,
     get_generate_job_with_unit_aggregate,
+    renew_image_job_unit_lease,
     update_image_job_unit_progress,
 )
 from .job_events import publish_generate_job, store_generate_job_async
@@ -224,6 +225,7 @@ def datetime_from_monotonic_delta(seconds: float) -> str:
 
 async def run_claimed_image_unit(unit: dict, worker_id: str):
     unit_id = str(unit["unit_id"])
+    claim_epoch = int(unit.get("claim_epoch") or 0)
     parent_job_id = str(unit["parent_job_id"])
     operation = str(unit.get("operation") or "generation")
     stage_timer = JobStageTimer()
@@ -258,6 +260,41 @@ async def run_claimed_image_unit(unit: dict, worker_id: str):
     progress_pending: tuple[str, str] | None = None
     progress_task: asyncio.Task | None = None
     last_progress_persist_at = 0.0
+    lease_lost = asyncio.Event()
+    lease_heartbeat_stop = asyncio.Event()
+
+    async def renew_lease() -> bool:
+        renewed = await run_db_operation(
+            renew_image_job_unit_lease,
+            unit_id,
+            claimed_by=worker_id,
+            claim_epoch=claim_epoch,
+            claim_expires_at=image_unit_lease_expires_at(),
+            metric_name="renew_image_job_unit_lease",
+        )
+        if not renewed:
+            lease_lost.set()
+        return renewed
+
+    async def maintain_lease():
+        interval = max(0.1, config.IMAGE_JOB_UNIT_LEASE_SECONDS / 3)
+        while not lease_heartbeat_stop.is_set():
+            try:
+                await asyncio.wait_for(lease_heartbeat_stop.wait(), timeout=interval)
+            except asyncio.TimeoutError:
+                try:
+                    if not await renew_lease():
+                        return
+                except Exception:
+                    logger.warning(
+                        "Image unit lease renewal failed: unit_id=%s worker_id=%s claim_epoch=%s",
+                        unit_id,
+                        worker_id,
+                        claim_epoch,
+                        exc_info=True,
+                    )
+
+    lease_heartbeat_task = asyncio.create_task(maintain_lease())
 
     async def persist_progress_updates():
         nonlocal progress_pending, progress_task, last_progress_persist_at
@@ -270,14 +307,19 @@ async def run_claimed_image_unit(unit: dict, worker_id: str):
                     await asyncio.sleep(delay)
                 stage, message = progress_pending
                 progress_pending = None
-                await run_db_operation(
+                persisted = await run_db_operation(
                     update_image_job_unit_progress,
                     unit_id,
+                    claimed_by=worker_id,
+                    claim_epoch=claim_epoch,
                     stage=stage,
                     message=message,
-                    claim_expires_at=image_unit_lease_expires_at(),
                     metric_name="persist_image_job_progress",
                 )
+                if persisted is None:
+                    lease_lost.set()
+                    return
+                set_generate_job_progress(parent_job_id, stage, message, operation)
                 last_progress_persist_at = time.monotonic()
                 await aggregate_parent_image_job(parent_job_id)
         finally:
@@ -287,7 +329,8 @@ async def run_claimed_image_unit(unit: dict, worker_id: str):
 
     def progress(stage: str, message: str):
         nonlocal progress_pending, progress_task
-        set_generate_job_progress(parent_job_id, stage, message, operation)
+        if lease_lost.is_set():
+            return
         progress_pending = (stage, message)
         if progress_task is None or progress_task.done():
             progress_task = asyncio.create_task(persist_progress_updates())
@@ -316,14 +359,24 @@ async def run_claimed_image_unit(unit: dict, worker_id: str):
         start_message = (
             "Starting image edit" if operation == "edit" else "Starting image generation"
         )
-        await run_db_operation(
+        started = await run_db_operation(
             update_image_job_unit_progress,
             unit_id,
+            claimed_by=worker_id,
+            claim_epoch=claim_epoch,
             stage=start_stage,
             message=start_message,
-            claim_expires_at=image_unit_lease_expires_at(),
             metric_name="start_image_job_unit",
         )
+        if started is None:
+            lease_lost.set()
+            logger.warning(
+                "Skipping image unit after losing lease: unit_id=%s worker_id=%s claim_epoch=%s",
+                unit_id,
+                worker_id,
+                claim_epoch,
+            )
+            return
         await store_generate_job_async(
             parent_job_id,
             {
@@ -370,6 +423,14 @@ async def run_claimed_image_unit(unit: dict, worker_id: str):
                 raise proxy.UpstreamApiError("No image data in upstream response")
 
         await flush_progress_updates()
+        if lease_lost.is_set() or not await renew_lease():
+            logger.warning(
+                "Discarding stale image unit result: unit_id=%s worker_id=%s claim_epoch=%s",
+                unit_id,
+                worker_id,
+                claim_epoch,
+            )
+            return
         duration_seconds = time.monotonic() - started_at
         duration = f"{duration_seconds:.2f}s"
         completed_at = beijing_now()
@@ -395,13 +456,12 @@ async def run_claimed_image_unit(unit: dict, worker_id: str):
         kick_thumbnail_dispatcher()
         result_images = [gallery_entry_job_result(entry) for entry in updated_entries]
         stage_timings = stage_timer.snapshot()
-        metrics.increment(f"image_jobs.{operation}.succeeded")
-        metrics.observe_ms("image_job.duration", duration_seconds * 1000)
-        metrics.observe_job_stage_timings(stage_timings)
         if await parent_was_cancelled():
-            await run_db_operation(
+            cancelled = await run_db_operation(
                 fail_image_job_unit,
                 unit_id,
+                claimed_by=worker_id,
+                claim_epoch=claim_epoch,
                 status="cancelled",
                 stage="cancelled",
                 message="Generation job cancelled",
@@ -411,23 +471,40 @@ async def run_claimed_image_unit(unit: dict, worker_id: str):
                 completed_at=utc_now(),
                 metric_name="cancel_completed_image_job_unit",
             )
+            if cancelled is not None:
+                metrics.increment(f"image_jobs.{operation}.cancelled")
             return
-        await run_db_operation(
+        completed = await run_db_operation(
             complete_image_job_unit,
             unit_id,
+            claimed_by=worker_id,
+            claim_epoch=claim_epoch,
             result={"images": result_images},
             stage_timings=stage_timings,
             duration=duration,
             completed_at=completed_at,
             metric_name="complete_image_job_unit",
         )
+        if completed is None:
+            lease_lost.set()
+            logger.warning(
+                "Image unit completion rejected by lease fence: unit_id=%s worker_id=%s claim_epoch=%s",
+                unit_id,
+                worker_id,
+                claim_epoch,
+            )
+            return
+        metrics.increment(f"image_jobs.{operation}.succeeded")
+        metrics.observe_ms("image_job.duration", duration_seconds * 1000)
+        metrics.observe_job_stage_timings(stage_timings)
     except asyncio.CancelledError:
         duration_seconds = time.monotonic() - started_at
         stage_timings = stage_timer.snapshot()
-        metrics.increment(f"image_jobs.{operation}.cancelled")
-        await run_db_operation(
+        cancelled = await run_db_operation(
             fail_image_job_unit,
             unit_id,
+            claimed_by=worker_id,
+            claim_epoch=claim_epoch,
             status="cancelled",
             stage="cancelled",
             message="Generation job cancelled",
@@ -437,6 +514,8 @@ async def run_claimed_image_unit(unit: dict, worker_id: str):
             completed_at=utc_now(),
             metric_name="cancel_image_job_unit",
         )
+        if cancelled is not None:
+            metrics.increment(f"image_jobs.{operation}.cancelled")
     except Exception as error:
         error_message = get_exception_message(error)
         status = (
@@ -445,20 +524,11 @@ async def run_claimed_image_unit(unit: dict, worker_id: str):
         duration_seconds = time.monotonic() - started_at
         stage_timings = stage_timer.snapshot()
         cancelled = await parent_was_cancelled()
-        if not cancelled:
-            metrics.increment(f"image_jobs.{operation}.failed")
-            metrics.observe_ms("image_job.duration", duration_seconds * 1000)
-            metrics.observe_job_stage_timings(stage_timings)
-            logger.exception(
-                "Image unit failed: unit_id=%s parent_job_id=%s worker_id=%s error_type=%s",
-                unit_id,
-                parent_job_id,
-                worker_id,
-                error.__class__.__name__,
-            )
-        await run_db_operation(
+        failed = await run_db_operation(
             fail_image_job_unit,
             unit_id,
+            claimed_by=worker_id,
+            claim_epoch=claim_epoch,
             status="cancelled" if cancelled else status,
             stage=(
                 "cancelled"
@@ -472,6 +542,28 @@ async def run_claimed_image_unit(unit: dict, worker_id: str):
             completed_at=utc_now(),
             metric_name="fail_image_job_unit",
         )
+        if failed is not None and not cancelled:
+            metrics.increment(f"image_jobs.{operation}.failed")
+            metrics.observe_ms("image_job.duration", duration_seconds * 1000)
+            metrics.observe_job_stage_timings(stage_timings)
+            logger.exception(
+                "Image unit failed: unit_id=%s parent_job_id=%s worker_id=%s error_type=%s",
+                unit_id,
+                parent_job_id,
+                worker_id,
+                error.__class__.__name__,
+            )
+        elif failed is None:
+            lease_lost.set()
+            logger.warning(
+                "Image unit failure rejected by lease fence: unit_id=%s worker_id=%s claim_epoch=%s",
+                unit_id,
+                worker_id,
+                claim_epoch,
+            )
     finally:
+        lease_heartbeat_stop.set()
+        lease_heartbeat_task.cancel()
+        await asyncio.gather(lease_heartbeat_task, return_exceptions=True)
         await flush_progress_updates()
         await aggregate_parent_image_job(parent_job_id, force_publish=True)

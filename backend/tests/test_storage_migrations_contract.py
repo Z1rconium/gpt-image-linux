@@ -85,30 +85,91 @@ def test_storage_claim_prefers_expired_running_unit_over_queued_unit(tmp_path):
 
     first = image_jobs_repo.claim_next_image_job_unit(
         worker_id="worker-a",
-        lease_expires_at="2099-01-01T00:00:00+00:00",
+        lease_expires_at="2026-01-01T00:00:01+00:00",
         now="2026-01-01T00:00:00+00:00",
-        running_limit=2,
+        running_limit=1,
     )
     assert first is not None
     assert first["unit_id"] == units[0]["unit_id"]
+    assert first["claim_epoch"] == 1
 
-    image_jobs_repo.update_image_job_unit_progress(
+    assert image_jobs_repo.update_image_job_unit_progress(
         str(first["unit_id"]),
+        claimed_by="worker-a",
+        claim_epoch=1,
         stage="waiting_for_api",
         message="expired lease",
-        claim_expires_at="2026-01-01T00:00:01+00:00",
-    )
+    ) is not None
 
     reclaimed = image_jobs_repo.claim_next_image_job_unit(
         worker_id="worker-b",
         lease_expires_at="2099-01-01T00:00:00+00:00",
         now="2026-01-01T00:00:02+00:00",
-        running_limit=2,
+        running_limit=1,
     )
 
     assert reclaimed is not None
     assert reclaimed["unit_id"] == first["unit_id"]
     assert reclaimed["claimed_by"] == "worker-b"
+    assert reclaimed["claim_epoch"] == 2
+
+    unit_id = str(first["unit_id"])
+    assert image_jobs_repo.update_image_job_unit_progress(
+        unit_id,
+        claimed_by="worker-a",
+        claim_epoch=1,
+        stage="stale_progress",
+        message="stale worker must not write",
+    ) is None
+    assert not image_jobs_repo.renew_image_job_unit_lease(
+        unit_id,
+        claimed_by="worker-a",
+        claim_epoch=1,
+        claim_expires_at="2099-01-01T00:00:00+00:00",
+    )
+    assert image_jobs_repo.complete_image_job_unit(
+        unit_id,
+        claimed_by="worker-a",
+        claim_epoch=1,
+        result={"images": [{"id": "stale"}]},
+        stage_timings={},
+        duration="121.00s",
+        completed_at="2026-01-01T00:02:01+00:00",
+    ) is None
+    assert image_jobs_repo.fail_image_job_unit(
+        unit_id,
+        claimed_by="worker-a",
+        claim_epoch=1,
+        status="error",
+        stage="generation_failed",
+        message="stale failure",
+        error="stale failure",
+    ) is None
+
+    current = image_jobs_repo.get_image_job_unit(unit_id)
+    assert current is not None
+    assert current["status"] == "running"
+    assert current["claimed_by"] == "worker-b"
+    assert current["claim_epoch"] == 2
+    assert current["stage"] == "waiting_for_api"
+    assert image_jobs_repo.renew_image_job_unit_lease(
+        unit_id,
+        claimed_by="worker-b",
+        claim_epoch=2,
+        claim_expires_at="2099-01-01T00:00:00+00:00",
+    )
+    completed = image_jobs_repo.complete_image_job_unit(
+        unit_id,
+        claimed_by="worker-b",
+        claim_epoch=2,
+        result={"images": [{"id": "current"}]},
+        stage_timings={},
+        duration="1.00s",
+        completed_at="2026-01-01T00:00:03+00:00",
+    )
+    assert completed is not None
+    assert completed["status"] == "success"
+    assert completed["result"]["images"][0]["id"] == "current"
 
 
 def test_storage_sse_slots_enforce_global_and_per_ip_leases(tmp_path):
@@ -261,7 +322,7 @@ def test_schema_migrations_are_recorded_and_idempotent(tmp_path):
         anchor_table = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE name = 'gallery_page_anchors'"
         ).fetchone()
-    assert [row["version"] for row in versions] == list(range(1, 17))
+    assert [row["version"] for row in versions] == list(range(1, 18))
     assert gallery_version["value"] == 0
     assert anchor_table is not None
 
@@ -390,7 +451,7 @@ def test_schema_migrations_upgrade_legacy_gallery_schema(tmp_path):
             "SELECT favorite, sort_seq, bytes, thumbnail_filename, completed_at, sha256 FROM gallery_entries WHERE id = 'legacy-1'"
         ).fetchone()
 
-        assert versions == list(range(1, 17))
+        assert versions == list(range(1, 18))
     assert {"favorite", "sort_seq", "bytes", "thumbnail_filename", "completed_at", "sha256"}.issubset(gallery_columns)
     assert {"default_model", "default_response_format"}.issubset(preset_columns)
     assert row["favorite"] == 0

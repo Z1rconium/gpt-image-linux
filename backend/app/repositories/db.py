@@ -152,6 +152,7 @@ IMAGE_JOB_UNIT_COLUMNS = (
     "unit_index",
     "status",
     "claimed_by",
+    "claim_epoch",
     "claim_expires_at",
     "stage",
     "message",
@@ -1262,6 +1263,7 @@ def _ensure_database():
                     unit_index INTEGER NOT NULL,
                     status TEXT NOT NULL,
                     claimed_by TEXT,
+                    claim_epoch INTEGER NOT NULL DEFAULT 0,
                     claim_expires_at TEXT,
                     stage TEXT,
                     message TEXT,
@@ -1934,6 +1936,14 @@ def _migration_security_resource_limits(conn: sqlite3.Connection):
     )
 
 
+def _migration_image_job_claim_fencing(conn: sqlite3.Connection):
+    columns = _table_columns(conn, "image_job_units")
+    if "claim_epoch" not in columns:
+        conn.execute(
+            "ALTER TABLE image_job_units ADD COLUMN claim_epoch INTEGER NOT NULL DEFAULT 0"
+        )
+
+
 SCHEMA_MIGRATIONS = (
     (1, "baseline_legacy_schema", _migration_baseline_legacy_schema),
     (2, "gallery_filter_options", _migration_gallery_filter_options),
@@ -1951,6 +1961,7 @@ SCHEMA_MIGRATIONS = (
     (14, "gallery_ai_metadata_schema", _migration_gallery_ai_metadata_schema),
     (15, "generate_job_counts", _migration_generate_job_counts),
     (16, "security_resource_limits", _migration_security_resource_limits),
+    (17, "image_job_claim_fencing", _migration_image_job_claim_fencing),
 )
 
 

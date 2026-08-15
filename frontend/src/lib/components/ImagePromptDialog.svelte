@@ -17,7 +17,7 @@
   export let onCopy: (prompt: string) => MaybePromise = () => {};
 
   const FALLBACK_MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
-  const FALLBACK_MAX_IMAGE_PIXELS = 100_000_000;
+  const FALLBACK_MAX_IMAGE_PIXELS = 25_000_000;
   const SAFE_IMAGE_EXTENSIONS = /\.(avif|bmp|gif|heic|heif|ico|jpe?g|png|tiff?|webp)$/i;
   const GENERATIONS_API_PATH = '/v1/images/generations';
 
@@ -279,7 +279,7 @@
           >
             <span class="text-sm font-semibold text-stone-800 dark:text-zinc-200">{$t.imagePrompt.choose}</span>
             <span class="mt-2 text-xs text-stone-500 dark:text-zinc-400">{$t.imagePrompt.dropHint}</span>
-            <span class="mt-4 text-[11px] text-stone-500 dark:text-zinc-500">{$t.imagePrompt.fileHint(maxUploadSize)}</span>
+            <span class="mt-4 text-xs text-stone-500 dark:text-zinc-500">{$t.imagePrompt.fileHint(maxUploadSize)}</span>
           </button>
         {:else if optimizedResult}
           <div class="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
