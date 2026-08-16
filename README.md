@@ -266,6 +266,7 @@ Most runtime options live in `.env.example`. API presets, prompt optimizer, R2 b
 | `MAX_PENDING_EDIT_SOURCE_MB` | Global pending edit-source byte reservation cap. |
 | `MAX_FILE_SIZE_MB` / `EDIT_UPLOAD_MAX_MB` / `IMPORT_ARCHIVE_MAX_MB` | Per-image, total edit multipart, and Gallery import archive limits. Edits accept at most 8 files. |
 | `UPLOAD_INFLIGHT_MAX_MB` / `UPLOAD_INFLIGHT_PER_IP_MAX_MB` / `UPLOAD_RESERVATION_TTL_SECONDS` | Cross-process SQLite upload byte reservations and expired-lease cleanup. |
+| `ACCESS_MAX_FAILURES` / `ACCESS_LOCKOUT_SECONDS` | Access-gate failure threshold and per-client-IP lockout duration. |
 | `ADMIN_MAX_FAILURES` / `ADMIN_LOCKOUT_SECONDS` | Independent administrator step-up failure threshold and per-client-IP lockout duration. |
 | `WEBHOOK_MAX_CONCURRENCY` / `WEBHOOK_QUEUE_MAX_SIZE` | Fixed delivery workers and pending webhook queue per Granian worker process. Full queues drop new deliveries and increment drop metrics. |
 | `MAX_SSE_SUBSCRIBERS_GLOBAL` / `MAX_SSE_SUBSCRIBERS_PER_IP` / `SSE_CONNECTION_TTL_SECONDS` | SSE slot limits and max connection lifetime. |
@@ -276,6 +277,9 @@ Most runtime options live in `.env.example`. API presets, prompt optimizer, R2 b
 | `AI_ASSISTANT_*` | AI Assistant is enabled by default; set `AI_ASSISTANT_ENABLED=false` to disable it. API URL, key, text model, timeout, route, and host allowlist reuse `PROMPT_OPTIMIZER_*`. `AI_ASSISTANT_MAX_CONCURRENCY` caps concurrent upstream assistant calls and `AI_ASSISTANT_BATCH_MAX_IMAGES` caps one gallery AI batch. |
 | `R2_*` | Optional Cloudflare R2 gallery backup sync settings; custom endpoint hosts require `R2_ENDPOINT_HOST_ALLOWLIST`. |
 | `NODEIMAGE_API_KEY` | Optional NodeImage API key for server-side Gallery uploads. |
+| `IP_ALLOWLIST` | Optional comma-separated client IP/CIDR allowlist. |
+| `TRUST_PROXY_HEADERS` / `TRUSTED_PROXY_IPS` | Trust reverse-proxy `X-Forwarded-*` headers, limited to the configured proxy IP/CIDRs. |
+| `CSRF_ORIGIN_CHECK_ENABLED` | Reject state-changing requests without valid Origin/Referer/same-origin fetch metadata. |
 | `PUBLIC_ORIGIN` / `ALLOWED_HOSTS` | Reverse-proxy Host/CSRF hardening. |
 | `ENABLE_NGINX_ACCEL_REDIRECT` / `PUBLIC_IMAGE_BASE_URL` / `PUBLIC_THUMBNAIL_BASE_URL` | Optional nginx/CDN image byte serving behavior. |
 | `GRANIAN_*` | Production runtime process/thread/static-asset tuning. |

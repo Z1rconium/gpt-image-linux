@@ -262,6 +262,7 @@ ALLOW_UNAUTHENTICATED=true .venv/bin/granian --interface asgi backend.app.main:a
 | `MAX_PENDING_EDIT_SOURCE_MB` | 全域待處理編輯來源圖片的位元組保留上限。 |
 | `MAX_FILE_SIZE_MB` / `EDIT_UPLOAD_MAX_MB` / `IMPORT_ARCHIVE_MAX_MB` | 單張圖片、編輯 Multipart 總量與 Gallery 匯入壓縮檔上限；編輯最多接受 8 個檔案。 |
 | `UPLOAD_INFLIGHT_MAX_MB` / `UPLOAD_INFLIGHT_PER_IP_MAX_MB` / `UPLOAD_RESERVATION_TTL_SECONDS` | 跨程序 SQLite 上傳位元組預約與過期 Lease 清理。 |
+| `ACCESS_MAX_FAILURES` / `ACCESS_LOCKOUT_SECONDS` | 存取密鑰失敗門檻與依用戶端 IP 計算的鎖定時間。 |
 | `ADMIN_MAX_FAILURES` / `ADMIN_LOCKOUT_SECONDS` | 獨立管理員二次驗證失敗門檻與依用戶端 IP 計算的鎖定時間。 |
 | `WEBHOOK_MAX_CONCURRENCY` / `WEBHOOK_QUEUE_MAX_SIZE` | 每個 Granian Worker 程序的固定投遞 Worker 與待處理 Webhook 佇列；佇列滿時會捨棄新投遞並增加捨棄指標。 |
 | `MAX_SSE_SUBSCRIBERS_GLOBAL` / `MAX_SSE_SUBSCRIBERS_PER_IP` / `SSE_CONNECTION_TTL_SECONDS` | SSE slot 限制與最長連線生命週期。 |
@@ -272,6 +273,9 @@ ALLOW_UNAUTHENTICATED=true .venv/bin/granian --interface asgi backend.app.main:a
 | `AI_ASSISTANT_*` | AI Assistant 預設啟用；可設 `AI_ASSISTANT_ENABLED=false` 關閉。API URL、密鑰、文字模型、逾時、路徑與 Host 允許清單沿用 `PROMPT_OPTIMIZER_*`。`AI_ASSISTANT_MAX_CONCURRENCY` 限制同時進行的上游 Assistant 呼叫，`AI_ASSISTANT_BATCH_MAX_IMAGES` 限制單次 Gallery AI 批次處理的圖片數。 |
 | `R2_*` | 選用的 Cloudflare R2 Gallery 備份設定；自訂 Endpoint Host 須設定 `R2_ENDPOINT_HOST_ALLOWLIST`。 |
 | `NODEIMAGE_API_KEY` | 選用的 NodeImage API key，用於從伺服器上傳 Gallery 圖片；也可在 Web Settings 中設定 env ref。 |
+| `IP_ALLOWLIST` | 選用的逗號分隔用戶端 IP/CIDR 允許清單。 |
+| `TRUST_PROXY_HEADERS` / `TRUSTED_PROXY_IPS` | 信任反向代理的 `X-Forwarded-*` Header，僅限設定的代理 IP/CIDR。 |
+| `CSRF_ORIGIN_CHECK_ENABLED` | 拒絕缺少有效 Origin/Referer/同源 fetch 中繼資料的狀態變更要求。 |
 | `PUBLIC_ORIGIN` / `ALLOWED_HOSTS` | Reverse Proxy Host/CSRF 強化。 |
 | `ENABLE_NGINX_ACCEL_REDIRECT` / `PUBLIC_IMAGE_BASE_URL` / `PUBLIC_THUMBNAIL_BASE_URL` | 選用的 nginx/CDN 圖片位元組傳送行為。 |
 | `GRANIAN_*` | 正式環境程序、執行緒與靜態資源調校。 |
