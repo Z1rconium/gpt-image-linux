@@ -231,6 +231,44 @@ def test_access_key_cannot_unlock_admin_session(tmp_path):
         assert granted.json()["authenticated"] is True
 
 
+def test_delete_all_gallery_requires_admin_step_up_in_protected_mode(tmp_path):
+    _configure_runtime(
+        tmp_path,
+        access_key="secret",
+        allow_unauthenticated=False,
+        admin_key="separate-admin-secret",
+    )
+
+    with _test_client() as client:
+        assert client.post("/api/access", json={"access_key": "secret"}).status_code == 200
+        _fake_gallery_entry("delete-all-protected", "protected", "1024x1024", "protected.png")
+
+        denied = client.delete("/api/gallery")
+        assert denied.status_code == 403
+        assert denied.json()["error_code"] == "admin_reauth_required"
+        assert gallery_queries.get_gallery_entry("delete-all-protected") is not None
+
+        granted = client.post(
+            "/api/access/admin",
+            json={"admin_key": "separate-admin-secret"},
+        )
+        assert granted.status_code == 200
+
+        deleted = client.delete("/api/gallery")
+        assert deleted.status_code == 200
+        assert deleted.json()["status"] == "ok"
+        assert gallery_queries.get_gallery_entry("delete-all-protected") is None
+
+
+def test_delete_all_gallery_keeps_explicit_anonymous_exemption(client):
+    _fake_gallery_entry("delete-all-anonymous", "anonymous", "1024x1024", "anonymous.png")
+
+    deleted = client.delete("/api/gallery")
+
+    assert deleted.status_code == 200
+    assert gallery_queries.get_gallery_entry("delete-all-anonymous") is None
+
+
 def test_frontend_build_assets_are_available_before_access_unlock(tmp_path, monkeypatch):
     _configure_runtime(tmp_path, access_key="secret", allow_unauthenticated=False)
     build_dir = tmp_path / "frontend_build"

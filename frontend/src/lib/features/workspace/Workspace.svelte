@@ -112,7 +112,6 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
     onError: showError
   });
   const adminGate = createAdminGate({
-    openSettings: () => openUiPanel('settings', 'settingsOpen'),
     fallbackError: () => $t.messages.requestFailed
   });
 
@@ -906,11 +905,17 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
   }
 
   async function deleteAllImages() {
-    await galleryStore.deleteAll(showToast, () => {
-      closeLightbox();
-      editSourceStore.clearGallerySource($editSourceStore.selectedGalleryImageId);
-      closeEditPreview();
-      clearPreview();
+    await adminGate.runProtected(async () => {
+      try {
+        await galleryStore.deleteAll(showToast, () => {
+          closeLightbox();
+          editSourceStore.clearGallerySource($editSourceStore.selectedGalleryImageId);
+          closeEditPreview();
+          clearPreview();
+        });
+      } catch (error) {
+        showError(error);
+      }
     });
   }
 
@@ -1098,7 +1103,7 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
 <a class="skip-link control-focus" href="#main-content">{$t.common.skipToMain}</a>
 
 <AccessGate visible={$accessStore.gateVisible} error={$accessStore.error} loading={$accessStore.loading} onUnlock={(key) => accessStore.unlockAccess(key, loadAuthenticatedData)} />
-<AccessGate visible={$adminGate.visible} error={$adminGate.error} loading={$adminGate.loading} credential="admin" onUnlock={adminGate.unlock} />
+<AccessGate visible={$adminGate.visible} error={$adminGate.error} loading={$adminGate.loading} credential="admin" onUnlock={adminGate.unlock} onCancel={adminGate.cancel} />
 <Header
   version={$versionStore.version}
   latestVersion={$versionStore.latestVersion}
@@ -1112,7 +1117,7 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
   onOpenPromptSnippets={openPromptSnippetsDrawer}
   onOpenImagePrompt={openImagePromptDialog}
   onOpenJobs={openJobsDrawer}
-  onOpenSettings={() => void adminGate.openSettingsSecure()}
+  onOpenSettings={() => void adminGate.runProtected(() => openUiPanel('settings', 'settingsOpen'))}
   onPrefetchPromptSnippets={() => prefetchPanel('snippets')}
   onPrefetchImagePrompt={() => prefetchPanel('imagePrompt')}
   onPrefetchJobs={() => prefetchPanel('jobs')}

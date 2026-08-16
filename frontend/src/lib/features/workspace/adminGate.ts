@@ -8,9 +8,10 @@ type AdminGateState = {
 };
 
 type AdminGateOptions = {
-  openSettings: () => void | Promise<void>;
   fallbackError: () => string;
 };
+
+type ProtectedAction = () => void | Promise<void>;
 
 const initialState: AdminGateState = {
   visible: false,
@@ -20,22 +21,39 @@ const initialState: AdminGateState = {
 
 export function createAdminGate(options: AdminGateOptions) {
   const { subscribe, update } = writable<AdminGateState>(initialState);
+  let pendingAction: ProtectedAction | null = null;
+  let checking = false;
 
-  async function openSettingsSecure() {
+  async function runProtected(action: ProtectedAction) {
+    if (checking || pendingAction) return false;
+    checking = true;
+    pendingAction = action;
+    let authenticated = false;
     try {
       const status = await apiFetch<{ authenticated: boolean }>(
         '/api/access/admin/status',
         {},
         'checking management access'
       );
-      if (status.authenticated) {
-        await options.openSettings();
-        return;
-      }
+      authenticated = status.authenticated;
     } catch {
       // The step-up form handles a missing or expired management session.
+    } finally {
+      checking = false;
+    }
+
+    if (authenticated) {
+      pendingAction = null;
+      await action();
+      return true;
     }
     update((current) => ({ ...current, visible: true, error: '' }));
+    return false;
+  }
+
+  function cancel() {
+    pendingAction = null;
+    update((current) => ({ ...current, visible: false, error: '' }));
   }
 
   async function unlock(adminKey: string) {
@@ -48,11 +66,8 @@ export function createAdminGate(options: AdminGateOptions) {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ admin_key: adminKey })
         },
-        'unlocking management settings'
+        'unlocking protected action'
       );
-      update((current) => ({ ...current, visible: false }));
-      await options.openSettings();
-      return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : options.fallbackError();
       update((current) => ({ ...current, error: message }));
@@ -60,7 +75,13 @@ export function createAdminGate(options: AdminGateOptions) {
     } finally {
       update((current) => ({ ...current, loading: false }));
     }
+
+    const action = pendingAction;
+    pendingAction = null;
+    update((current) => ({ ...current, visible: false, error: '' }));
+    if (action) await action();
+    return true;
   }
 
-  return { subscribe, openSettingsSecure, unlock };
+  return { subscribe, runProtected, cancel, unlock };
 }

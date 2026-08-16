@@ -243,6 +243,8 @@ def _requires_admin_session(request: Request) -> bool:
     ):
         return False
     path = request.url.path
+    if path == "/api/gallery" and request.method.upper() == "DELETE":
+        return True
     if path == "/api/settings/overall-config":
         return True
     if path == "/api/prompt/optimizer-system-prompt":

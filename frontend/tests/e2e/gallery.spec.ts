@@ -914,3 +914,57 @@ test('delete all requires typed confirmation before submitting', async ({ page }
   await deleteAllRequest;
   await expect(page.getByRole('status')).toContainText('All server images deleted');
 });
+
+test('delete all requires admin step-up before typed confirmation and supports both cancellations', async ({ page }) => {
+  await mockApi(page);
+  let adminAuthenticated = false;
+  let deleteRequests = 0;
+
+  await page.route('**/api/access/admin/status', async (route) => {
+    await route.fulfill(json({
+      authenticated: adminAuthenticated,
+      expires_at: adminAuthenticated ? '2026-05-18T14:00:00Z' : null
+    }));
+  });
+  await page.route('**/api/access/admin', async (route) => {
+    const body = JSON.parse(route.request().postData() || '{}');
+    adminAuthenticated = body.admin_key === 'admin-secret';
+    await route.fulfill(
+      adminAuthenticated
+        ? json({ authenticated: true, expires_at: '2026-05-18T14:00:00Z' })
+        : json({ detail: 'Invalid admin key' }, 403)
+    );
+  });
+  page.on('request', (request) => {
+    const url = new URL(request.url());
+    if (request.method() === 'DELETE' && url.pathname === '/api/gallery') deleteRequests += 1;
+  });
+
+  await page.goto('/');
+  await expect(page.getByRole('heading', { name: 'Prompt', exact: true })).toBeVisible();
+
+  await page.getByRole('button', { name: 'Delete All' }).click();
+  await expect(page.getByRole('heading', { name: 'Access Key' })).toBeVisible();
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Access Key' })).toBeHidden();
+  await expect(page.getByRole('dialog', { name: 'Delete all gallery images?' })).toBeHidden();
+  expect(deleteRequests).toBe(0);
+
+  await page.getByRole('button', { name: 'Delete All' }).click();
+  await page.getByLabel('Access Key').fill('admin-secret');
+  await page.getByRole('button', { name: 'Unlock' }).click();
+  const cancelledConfirm = page.getByRole('dialog', { name: 'Delete all gallery images?' });
+  await expect(cancelledConfirm).toBeVisible();
+  await cancelledConfirm.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(cancelledConfirm).toBeHidden();
+  expect(deleteRequests).toBe(0);
+
+  await page.getByRole('button', { name: 'Delete All' }).click();
+  const confirmDialog = page.getByRole('dialog', { name: 'Delete all gallery images?' });
+  await expect(confirmDialog).toBeVisible();
+  await expect(confirmDialog.getByRole('button', { name: 'DELETE' })).toBeDisabled();
+  await confirmDialog.getByRole('textbox').fill('DELETE');
+  await confirmDialog.getByRole('button', { name: 'DELETE' }).click();
+  await expect.poll(() => deleteRequests).toBe(1);
+  await expect(page.getByRole('status')).toContainText('All server images deleted');
+});

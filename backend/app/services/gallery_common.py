@@ -11,9 +11,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote
 
+import anyio
 from fastapi import APIRouter, Body, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from starlette.background import BackgroundTask
+from starlette.datastructures import MutableHeaders
+from starlette.types import Send
 
 from ..api.app_state import app
 from .gallery_archive_export import (
@@ -79,9 +82,12 @@ from ..repositories.gallery.sync_state import (
     mark_gallery_r2_sync_state,
 )
 from ..repositories.image_files import (
+    SecureFileHandle,
     THUMBNAIL_CONTENT_TYPE,
     safe_image_path,
     safe_thumbnail_path,
+    secure_open_image_file,
+    secure_open_thumbnail_file,
 )
 from ..repositories.settings import load_r2_backup_settings
 from ..repositories.thumbnail_jobs import (
@@ -155,6 +161,149 @@ NODEIMAGE_UPLOAD_JOB_KIND = "nodeimage_upload"
 NODEIMAGE_UPLOAD_JOB_TTL_SECONDS = 1800
 
 
+class FileDescriptorResponse(FileResponse):
+    """Serve an already verified file descriptor without reopening its path."""
+
+    def __init__(
+        self,
+        handle: SecureFileHandle,
+        *,
+        media_type: str,
+        filename: str | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        self._handle = handle
+        super().__init__(
+            handle.name,
+            media_type=media_type,
+            filename=filename,
+            headers=headers,
+            stat_result=handle.stat_result,
+        )
+
+    async def __call__(self, scope, receive, send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            self._handle.close()
+
+    async def _read(self, size: int, offset: int) -> bytes:
+        return await anyio.to_thread.run_sync(
+            os.pread,
+            self._handle.fd,
+            size,
+            offset,
+        )
+
+    async def _send_bytes(
+        self,
+        send: Send,
+        *,
+        start: int,
+        end: int,
+        final_more_body: bool = False,
+    ) -> None:
+        offset = start
+        while offset < end:
+            chunk = await self._read(min(self.chunk_size, end - offset), offset)
+            if not chunk:
+                raise OSError("Gallery file changed while being served")
+            offset += len(chunk)
+            await send(
+                {
+                    "type": "http.response.body",
+                    "body": chunk,
+                    "more_body": final_more_body or offset < end,
+                }
+            )
+
+    async def _handle_simple(
+        self,
+        send: Send,
+        send_header_only: bool,
+        send_pathsend: bool,
+    ) -> None:
+        del send_pathsend
+        await send(
+            {
+                "type": "http.response.start",
+                "status": self.status_code,
+                "headers": self.raw_headers,
+            }
+        )
+        if send_header_only or self.stat_result.st_size == 0:
+            await send({"type": "http.response.body", "body": b"", "more_body": False})
+            return
+        await self._send_bytes(send, start=0, end=self.stat_result.st_size)
+
+    async def _handle_single_range(
+        self,
+        send: Send,
+        start: int,
+        end: int,
+        file_size: int,
+        send_header_only: bool,
+    ) -> None:
+        headers = MutableHeaders(raw=list(self.raw_headers))
+        headers["content-range"] = f"bytes {start}-{end - 1}/{file_size}"
+        headers["content-length"] = str(end - start)
+        await send({"type": "http.response.start", "status": 206, "headers": headers.raw})
+        if send_header_only:
+            await send({"type": "http.response.body", "body": b"", "more_body": False})
+            return
+        await self._send_bytes(send, start=start, end=end)
+
+    async def _handle_multiple_ranges(
+        self,
+        send: Send,
+        ranges: list[tuple[int, int]],
+        file_size: int,
+        send_header_only: bool,
+    ) -> None:
+        boundary = uuid.uuid4().hex[:26]
+        content_length, header_generator = self.generate_multipart(
+            ranges,
+            boundary,
+            file_size,
+            self.headers["content-type"],
+        )
+        headers = MutableHeaders(raw=list(self.raw_headers))
+        headers["content-type"] = f"multipart/byteranges; boundary={boundary}"
+        headers["content-length"] = str(content_length)
+        await send({"type": "http.response.start", "status": 206, "headers": headers.raw})
+        if send_header_only:
+            await send({"type": "http.response.body", "body": b"", "more_body": False})
+            return
+        for start, end in ranges:
+            await send(
+                {
+                    "type": "http.response.body",
+                    "body": header_generator(start, end),
+                    "more_body": True,
+                }
+            )
+            await self._send_bytes(
+                send,
+                start=start,
+                end=end,
+                final_more_body=True,
+            )
+            await send(
+                {
+                    "type": "http.response.body",
+                    "body": b"\r\n",
+                    "more_body": True,
+                }
+            )
+        await send(
+            {
+                "type": "http.response.body",
+                "body": f"--{boundary}--".encode("latin-1"),
+                "more_body": False,
+            }
+        )
+
+
 def _trusted_gallery_job_dir(kind: str) -> Path:
     if kind == "import":
         return Path(config.DATA_DIR) / "imports"
@@ -219,16 +368,13 @@ class GalleryProgressThrottler:
         self.publish(updates)
 
 
-def _resolve_gallery_image_path(filename: str) -> Path | None:
-    path = safe_image_path(filename)
-    if not path or not path.exists():
-        return None
+def _resolve_gallery_image_file(filename: str) -> SecureFileHandle | None:
     if not is_gallery_filename_referenced(filename):
         return None
-    return path
+    return secure_open_image_file(filename)
 
 
-def _resolve_gallery_thumbnail_path(filename: str) -> Path | None:
+def _resolve_gallery_thumbnail_file(filename: str) -> SecureFileHandle | None:
     if not is_gallery_filename_referenced(filename):
         return None
 
@@ -236,19 +382,16 @@ def _resolve_gallery_thumbnail_path(filename: str) -> Path | None:
     if not thumbnail_filename:
         return None
 
-    path = safe_thumbnail_path(thumbnail_filename)
-    if path and path.exists():
-        return path
+    handle = secure_open_thumbnail_file(thumbnail_filename)
+    if handle:
+        return handle
 
     invalidate_thumbnail_cache(thumbnail_filename)
     thumbnail_filename = ensure_thumbnail_for_image(filename)
     if not thumbnail_filename:
         return None
 
-    path = safe_thumbnail_path(thumbnail_filename)
-    if not path or not path.exists():
-        return None
-    return path
+    return secure_open_thumbnail_file(thumbnail_filename)
 
 
 def _x_accel_response(

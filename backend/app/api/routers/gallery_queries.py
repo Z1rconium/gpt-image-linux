@@ -11,7 +11,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from fastapi import APIRouter, Body, File, HTTPException, Query, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.background import BackgroundTask
 
 from ..app_state import app
@@ -334,47 +334,54 @@ async def get_gallery_item(image_id: str):
 
 
 async def _image_file_response(filename: str, *, download: bool = False):
-    path = await asyncio.to_thread(_resolve_gallery_image_path, filename)
-    if not path:
+    handle = await asyncio.to_thread(_resolve_gallery_image_file, filename)
+    if not handle:
         raise HTTPException(status_code=404, detail="Image not found")
 
-    media_type = image_content_type_for_filename(path.name)
+    media_type = image_content_type_for_filename(handle.name)
     if config.ENABLE_NGINX_ACCEL_REDIRECT:
-        return _x_accel_response(
-            path,
-            internal_prefix="/_protected/images/",
-            media_type=media_type,
-            download=download,
-        )
+        try:
+            return _x_accel_response(
+                Path(handle.name),
+                internal_prefix="/_protected/images/",
+                media_type=media_type,
+                download=download,
+            )
+        finally:
+            handle.close()
 
-    if download:
-        extension = path.suffix.lstrip(".") or "png"
-        return FileResponse(
-            path,
+    try:
+        download_filename = None
+        if download:
+            extension = Path(handle.name).suffix.lstrip(".") or "png"
+            download_filename = (
+                f"gpt-image-{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.{extension}"
+            )
+        return FileDescriptorResponse(
+            handle,
             media_type=media_type,
-            filename=f"gpt-image-{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.{extension}",
+            filename=download_filename,
             headers={"Cache-Control": IMMUTABLE_GALLERY_CACHE_CONTROL},
         )
-
-    return FileResponse(
-        path,
-        media_type=media_type,
-        headers={"Cache-Control": IMMUTABLE_GALLERY_CACHE_CONTROL},
-    )
+    except BaseException:
+        handle.close()
+        raise
 
 
 @router.get("/api/image/{filename}")
+@router.head("/api/image/{filename}", include_in_schema=False)
 async def serve_image(filename: str):
     return await _image_file_response(filename)
 
 
 @router.get("/api/thumb/{filename}")
+@router.head("/api/thumb/{filename}", include_in_schema=False)
 async def serve_thumbnail(filename: str):
-    path = await asyncio.to_thread(
-        _resolve_gallery_thumbnail_path,
+    handle = await asyncio.to_thread(
+        _resolve_gallery_thumbnail_file,
         filename,
     )
-    if not path:
+    if not handle:
         kick_thumbnail_dispatcher()
         raise HTTPException(
             status_code=404,
@@ -383,19 +390,27 @@ async def serve_thumbnail(filename: str):
         )
 
     if config.ENABLE_NGINX_ACCEL_REDIRECT:
-        return _x_accel_response(
-            path,
-            internal_prefix="/_protected/thumbs/",
-            media_type=THUMBNAIL_CONTENT_TYPE,
-        )
+        try:
+            return _x_accel_response(
+                Path(handle.name),
+                internal_prefix="/_protected/thumbs/",
+                media_type=THUMBNAIL_CONTENT_TYPE,
+            )
+        finally:
+            handle.close()
 
-    return FileResponse(
-        path,
-        media_type=THUMBNAIL_CONTENT_TYPE,
-        headers={"Cache-Control": IMMUTABLE_GALLERY_CACHE_CONTROL},
-    )
+    try:
+        return FileDescriptorResponse(
+            handle,
+            media_type=THUMBNAIL_CONTENT_TYPE,
+            headers={"Cache-Control": IMMUTABLE_GALLERY_CACHE_CONTROL},
+        )
+    except BaseException:
+        handle.close()
+        raise
 
 
 @router.get("/api/download/{filename}")
+@router.head("/api/download/{filename}", include_in_schema=False)
 async def download_image(filename: str):
     return await _image_file_response(filename, download=True)

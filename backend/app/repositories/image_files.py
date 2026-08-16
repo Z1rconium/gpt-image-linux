@@ -1,9 +1,12 @@
 import io
 import mimetypes
+import os
+import stat
 import struct
 import tempfile
 import uuid
 import warnings
+from dataclasses import dataclass
 from pathlib import Path
 
 from ..core import settings as config
@@ -84,6 +87,36 @@ PILLOW_FORMATS = {
     "TIFF": "tiff",
     "WEBP": "webp",
 }
+
+
+@dataclass
+class SecureFileHandle:
+    fd: int
+    name: str
+    stat_result: os.stat_result
+
+    def close(self) -> None:
+        if self.fd < 0:
+            return
+        fd = self.fd
+        self.fd = -1
+        os.close(fd)
+
+
+def require_secure_file_open_support() -> None:
+    missing = [
+        name
+        for name in ("O_CLOEXEC", "O_DIRECTORY", "O_NOFOLLOW")
+        if not hasattr(os, name)
+    ]
+    if not hasattr(os, "supports_dir_fd") or os.open not in os.supports_dir_fd:
+        missing.append("os.open(dir_fd=...)")
+    if not hasattr(os, "pread"):
+        missing.append("os.pread")
+    if missing:
+        raise RuntimeError(
+            "Secure gallery file serving is unavailable: missing " + ", ".join(missing)
+        )
 
 
 def image_content_type_for_filename(filename: str | Path) -> str:
@@ -345,14 +378,20 @@ def image_dimension_metadata(image_bytes: bytes) -> dict[str, int]:
     return {"image_width": width, "image_height": height}
 
 
-def _safe_path(filename: str, base_dir: str, allowed_suffixes: set[str]) -> Path | None:
+def _valid_file_name(filename: str, allowed_suffixes: set[str]) -> bool:
     if not filename or "\x00" in filename or "/" in filename or "\\" in filename:
-        return None
+        return False
     if filename in {".", ".."}:
-        return None
+        return False
 
     path_name = Path(filename)
     if path_name.name != filename or path_name.suffix.lower() not in allowed_suffixes:
+        return False
+    return True
+
+
+def _safe_path(filename: str, base_dir: str, allowed_suffixes: set[str]) -> Path | None:
+    if not _valid_file_name(filename, allowed_suffixes):
         return None
 
     root = Path(base_dir).resolve()
@@ -370,6 +409,59 @@ def safe_image_path(filename: str) -> Path | None:
 
 def safe_thumbnail_path(filename: str) -> Path | None:
     return _safe_path(filename, config.THUMBNAILS_DIR, {THUMBNAIL_EXTENSION})
+
+
+def _secure_open_file(
+    filename: str,
+    base_dir: str,
+    allowed_suffixes: set[str],
+) -> SecureFileHandle | None:
+    if not _valid_file_name(filename, allowed_suffixes):
+        return None
+    require_secure_file_open_support()
+
+    dir_fd = -1
+    file_fd = -1
+    try:
+        root = Path(base_dir)
+        dir_fd = os.open(
+            root,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+        file_fd = os.open(
+            filename,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=dir_fd,
+        )
+        stat_result = os.fstat(file_fd)
+        if not stat.S_ISREG(stat_result.st_mode):
+            return None
+        handle = SecureFileHandle(
+            fd=file_fd,
+            name=filename,
+            stat_result=stat_result,
+        )
+        file_fd = -1
+        return handle
+    except (OSError, RuntimeError, ValueError):
+        return None
+    finally:
+        if file_fd >= 0:
+            os.close(file_fd)
+        if dir_fd >= 0:
+            os.close(dir_fd)
+
+
+def secure_open_image_file(filename: str) -> SecureFileHandle | None:
+    return _secure_open_file(filename, config.IMAGES_DIR, IMAGE_FILE_EXTENSIONS)
+
+
+def secure_open_thumbnail_file(filename: str) -> SecureFileHandle | None:
+    return _secure_open_file(
+        filename,
+        config.THUMBNAILS_DIR,
+        {THUMBNAIL_EXTENSION},
+    )
 
 
 def save_image_to_temp(image_bytes: bytes, filename: str) -> Path:

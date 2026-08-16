@@ -8,6 +8,7 @@
   export let loading = false;
   export let credential: 'access' | 'admin' = 'access';
   export let onUnlock: (accessKey: string) => Promise<boolean> = async () => false;
+  export let onCancel: (() => void) | undefined = undefined;
 
   let accessKey = '';
   let localError = '';
@@ -40,7 +41,7 @@
   <div
     class="mobile-dialog-root fixed inset-0 z-[100] flex items-center justify-center bg-stone-100 px-4 dark:bg-zinc-950"
     aria-label={$t.access.dialogLabel}
-    use:dialog={{ open: visible }}
+    use:dialog={{ open: visible, onClose: onCancel }}
   >
     <button
       type="button"
@@ -74,13 +75,25 @@
             localError = '';
           }}
         />
-        <button
-          type="submit"
-          disabled={loading}
-          class="control-focus w-full rounded-xl bg-emerald-600 px-4 py-3 text-sm font-semibold text-white transition-colors hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {loading ? $t.access.unlocking : $t.access.unlock}
-        </button>
+        <div class={`grid gap-2 ${onCancel ? 'grid-cols-2' : 'grid-cols-1'}`}>
+          {#if onCancel}
+            <button
+              type="button"
+              disabled={loading}
+              class="control-focus rounded-xl border border-stone-300 bg-white px-4 py-3 text-sm font-semibold text-stone-700 transition-colors hover:bg-stone-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
+              on:click={onCancel}
+            >
+              {$t.confirm.cancel}
+            </button>
+          {/if}
+          <button
+            type="submit"
+            disabled={loading}
+            class="control-focus rounded-xl bg-emerald-600 px-4 py-3 text-sm font-semibold text-white transition-colors hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {loading ? $t.access.unlocking : $t.access.unlock}
+          </button>
+        </div>
       </form>
       {#if combinedError}
         <p id={accessErrorId} class="mt-3 text-sm text-red-400" role="alert" aria-live="assertive">

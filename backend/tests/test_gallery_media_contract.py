@@ -1,5 +1,7 @@
 from urllib.parse import parse_qs, urlsplit
 
+import anyio
+
 from backend.tests.support.contract import *  # noqa: F403
 
 
@@ -119,6 +121,201 @@ def test_gallery_image_download_and_zip(client, monkeypatch):
         assert "thumbnail_filename" not in metadata["images"][0]
     assert "thumbnail_url" not in metadata["images"][0]
     assert metadata["images"][0]["sha256"]
+
+
+@pytest.mark.parametrize("endpoint", ["/api/image/race.png", "/api/download/race.png"])
+def test_gallery_media_rejects_symlink_swapped_after_reference_check(
+    client,
+    monkeypatch,
+    tmp_path,
+    endpoint,
+):
+    _fake_gallery_entry("race", "race", "1024x1024", "race.png")
+    image_path = Path(config.IMAGES_DIR) / "race.png"
+    outside_path = tmp_path / "outside.png"
+    outside_bytes = b"outside-secret-content"
+    outside_path.write_bytes(outside_bytes)
+    original_is_referenced = gallery_common.is_gallery_filename_referenced
+    swapped = False
+
+    def swap_after_reference_check(filename: str) -> bool:
+        nonlocal swapped
+        referenced = original_is_referenced(filename)
+        if referenced and not swapped:
+            swapped = True
+            image_path.unlink()
+            image_path.symlink_to(outside_path)
+        return referenced
+
+    monkeypatch.setattr(
+        gallery_common,
+        "is_gallery_filename_referenced",
+        swap_after_reference_check,
+    )
+
+    response = client.get(endpoint)
+
+    assert response.status_code == 404
+    assert outside_bytes not in response.content
+
+
+def test_gallery_thumbnail_rejects_symlink_swapped_during_resolution(
+    client,
+    monkeypatch,
+    tmp_path,
+):
+    _fake_gallery_entry("thumb-race", "race", "1024x1024", "thumb-race.png")
+    thumbnail_filename = thumbnail_jobs_repo.generate_thumbnail_for_image("thumb-race.png")
+    assert thumbnail_filename
+    thumbnail_path = Path(config.THUMBNAILS_DIR) / thumbnail_filename
+    outside_path = tmp_path / "outside.webp"
+    outside_bytes = b"outside-thumbnail-secret"
+    outside_path.write_bytes(outside_bytes)
+    original_ensure = gallery_common.ensure_thumbnail_for_image
+    swapped = False
+
+    def swap_after_thumbnail_resolution(filename: str) -> str | None:
+        nonlocal swapped
+        resolved = original_ensure(filename)
+        if resolved and not swapped:
+            swapped = True
+            thumbnail_path.unlink()
+            thumbnail_path.symlink_to(outside_path)
+        return resolved
+
+    monkeypatch.setattr(
+        gallery_common,
+        "ensure_thumbnail_for_image",
+        swap_after_thumbnail_resolution,
+    )
+
+    response = client.get("/api/thumb/thumb-race.png")
+
+    assert response.status_code == 404
+    assert outside_bytes not in response.content
+
+
+def test_gallery_media_uses_open_descriptor_after_directory_entry_is_replaced(
+    client,
+    monkeypatch,
+):
+    _fake_gallery_entry("fd-stable", "stable", "1024x1024", "fd-stable.png")
+    image_path = Path(config.IMAGES_DIR) / "fd-stable.png"
+    replacement_bytes = b"replacement-content"
+    original_response = gallery_queries_router.FileDescriptorResponse
+
+    class ReplacingFileDescriptorResponse(original_response):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            image_path.unlink()
+            image_path.write_bytes(replacement_bytes)
+
+    monkeypatch.setattr(
+        gallery_queries_router,
+        "FileDescriptorResponse",
+        ReplacingFileDescriptorResponse,
+    )
+
+    response = client.get("/api/image/fd-stable.png")
+
+    assert response.status_code == 200
+    assert response.content == PNG_BYTES
+    assert response.content != replacement_bytes
+
+
+@pytest.mark.parametrize(
+    ("method", "headers", "expected_status"),
+    [
+        ("get", {}, 200),
+        ("head", {}, 200),
+        ("get", {"Range": "bytes=0-7"}, 206),
+        ("get", {"Range": "bytes=0-1,4-5"}, 206),
+        ("get", {"Range": "items=0-1"}, 400),
+        ("get", {"Range": "bytes=999-1000"}, 416),
+    ],
+)
+def test_gallery_media_closes_descriptor_for_all_http_response_paths(
+    client,
+    monkeypatch,
+    method,
+    headers,
+    expected_status,
+):
+    _fake_gallery_entry("fd-close", "close", "1024x1024", "fd-close.png")
+    original_open = gallery_common.secure_open_image_file
+    opened_fds: list[int] = []
+
+    def capture_open(filename: str):
+        handle = original_open(filename)
+        if handle:
+            opened_fds.append(handle.fd)
+        return handle
+
+    monkeypatch.setattr(gallery_common, "secure_open_image_file", capture_open)
+
+    response = getattr(client, method)("/api/image/fd-close.png", headers=headers)
+
+    assert response.status_code == expected_status
+    assert len(opened_fds) == 1
+    with pytest.raises(OSError):
+        os.fstat(opened_fds[0])
+    if method == "head":
+        assert response.content == b""
+        assert response.headers["content-length"] == str(len(PNG_BYTES))
+    if headers.get("Range", "").count(","):
+        assert response.headers["content-type"].startswith("multipart/byteranges")
+    if expected_status < 400:
+        assert response.headers.get("etag")
+
+
+def test_gallery_media_closes_descriptor_on_send_error_and_cancellation(client):
+    _fake_gallery_entry("fd-interrupt", "interrupt", "1024x1024", "fd-interrupt.png")
+    image_path = Path(config.IMAGES_DIR) / "fd-interrupt.png"
+    image_path.write_bytes(PNG_BYTES * 2048)
+    scope = {"type": "http", "method": "GET", "headers": [], "extensions": {}}
+
+    async def receive():
+        return {"type": "http.disconnect"}
+
+    error_handle = image_files.secure_open_image_file("fd-interrupt.png")
+    assert error_handle
+    error_fd = error_handle.fd
+    error_response = gallery_common.FileDescriptorResponse(
+        error_handle,
+        media_type="image/png",
+    )
+
+    async def fail_send(message):
+        if message["type"] == "http.response.body":
+            raise RuntimeError("client disconnected")
+
+    async def run_error_response():
+        with pytest.raises(RuntimeError, match="client disconnected"):
+            await error_response(scope, receive, fail_send)
+
+    anyio.run(run_error_response)
+    with pytest.raises(OSError):
+        os.fstat(error_fd)
+
+    cancel_handle = image_files.secure_open_image_file("fd-interrupt.png")
+    assert cancel_handle
+    cancel_fd = cancel_handle.fd
+    cancel_response = gallery_common.FileDescriptorResponse(
+        cancel_handle,
+        media_type="image/png",
+    )
+
+    async def run_cancelled_response():
+        with anyio.CancelScope() as cancel_scope:
+            async def cancel_send(message):
+                if message["type"] == "http.response.body" and message.get("body"):
+                    cancel_scope.cancel()
+
+            await cancel_response(scope, receive, cancel_send)
+
+    anyio.run(run_cancelled_response)
+    with pytest.raises(OSError):
+        os.fstat(cancel_fd)
 
 
 def test_gallery_thumbnail_statuses_are_fetched_in_one_batch(client, monkeypatch):
@@ -1446,7 +1643,7 @@ def test_thumbnail_cache_invalidation_self_heals_missing_verified_file(client):
     assert thumbnail_jobs_repo.ensure_thumbnail_for_image("self-heal-thumb.png") == thumbnail_filename
     assert not thumbnail_path.exists()
 
-    assert gallery_common._resolve_gallery_thumbnail_path("self-heal-thumb.png") is None
+    assert gallery_common._resolve_gallery_thumbnail_file("self-heal-thumb.png") is None
     with db_repo._connect() as conn:
         row = conn.execute(
             "SELECT status FROM thumbnail_jobs WHERE filename = ?",
@@ -1456,8 +1653,10 @@ def test_thumbnail_cache_invalidation_self_heals_missing_verified_file(client):
     assert row["status"] == "queued"
 
     assert thumbnail_jobs_repo.generate_thumbnail_for_image("self-heal-thumb.png") == thumbnail_filename
-    resolved_path = gallery_common._resolve_gallery_thumbnail_path("self-heal-thumb.png")
-    assert resolved_path == thumbnail_path
+    resolved_file = gallery_common._resolve_gallery_thumbnail_file("self-heal-thumb.png")
+    assert resolved_file is not None
+    assert resolved_file.name == thumbnail_path.name
+    resolved_file.close()
     assert thumbnail_path.exists()
 
 

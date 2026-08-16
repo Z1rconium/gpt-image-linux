@@ -89,7 +89,9 @@ def test_gallery_import_job_rejects_untrusted_db_path(client):
     assert job["error"] == "Import archive path is invalid"
 
 
-def test_import_gallery_entries_dedupes_existing_rows_at_commit(client):
+def test_import_gallery_entries_dedupes_existing_rows_at_commit(client, monkeypatch):
+    original_generate_thumbnail = thumbnail_jobs_repo.generate_thumbnail_for_image
+    monkeypatch.setattr(gallery_maintenance, "generate_thumbnail_for_image", lambda filename: None)
     _fake_gallery_entry("import-1", "existing", "1024x1024", "import-1.png")
 
     imported_count = gallery_mutations.import_gallery_entries(
@@ -121,6 +123,11 @@ def test_import_gallery_entries_dedupes_existing_rows_at_commit(client):
 
     thumb = client.get("/api/thumb/import-1_1.png")
     assert thumb.status_code == 404
+    monkeypatch.setattr(
+        gallery_maintenance,
+        "generate_thumbnail_for_image",
+        original_generate_thumbnail,
+    )
     assert thumbnail_jobs_repo.generate_thumbnail_for_image("import-1_1.png")
     thumb = client.get("/api/thumb/import-1_1.png")
     assert thumb.status_code == 200

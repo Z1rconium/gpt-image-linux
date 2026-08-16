@@ -94,7 +94,7 @@ def test_single_nodeimage_upload_success_and_missing_entry(client, monkeypatch):
     monkeypatch.setattr(gallery_queries_router, "upload_image_file", fake_upload)
     monkeypatch.setattr(
         gallery_queries_router,
-        "_resolve_gallery_image_path",
+        "_resolve_gallery_image_file",
         lambda _filename: pytest.fail("single upload must not re-query gallery references"),
     )
 

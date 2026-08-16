@@ -1,5 +1,6 @@
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
@@ -8,6 +9,15 @@ from backend.tests.support.contract import *  # noqa: F403
 from backend.app.api import body_limit, middleware as api_middleware
 from backend.app.api.routers import edits as edits_router
 from backend.app.services import webhook_service
+
+
+def test_nginx_protected_gallery_aliases_reject_symlinks():
+    nginx_config = (Path(__file__).resolve().parents[2] / "deploy" / "nginx.conf").read_text(
+        encoding="utf-8"
+    )
+
+    assert "disable_symlinks on from=/app/images/;" in nginx_config
+    assert "disable_symlinks on from=/app/images/thumbs/;" in nginx_config
 
 
 def test_admin_lockout_is_independent_and_success_clears_only_admin(tmp_path):

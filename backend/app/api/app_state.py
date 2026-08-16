@@ -23,6 +23,7 @@ from ..repositories.gallery.mutations import (
     backfill_missing_gallery_bytes,
     sync_gallery_with_image_files,
 )
+from ..repositories.image_files import require_secure_file_open_support
 from ..repositories.settings import (
     migrate_legacy_secret_references,
     sync_overall_config_env_values,
@@ -96,6 +97,7 @@ async def lifespan(app: FastAPI):
     Path(config.IMAGES_DIR).mkdir(parents=True, exist_ok=True)
     Path(config.THUMBNAILS_DIR).mkdir(parents=True, exist_ok=True)
     Path(config.DATA_DIR).mkdir(parents=True, exist_ok=True)
+    require_secure_file_open_support()
     rows = sync_overall_config_env_values(overall_config.current_env_snapshot())
     overall_config.apply_rows_to_config(
         rows,
