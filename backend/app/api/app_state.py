@@ -23,7 +23,10 @@ from ..repositories.gallery.mutations import (
     backfill_missing_gallery_bytes,
     sync_gallery_with_image_files,
 )
-from ..repositories.settings import sync_overall_config_env_values
+from ..repositories.settings import (
+    migrate_legacy_secret_references,
+    sync_overall_config_env_values,
+)
 from ..repositories.thumbnail_jobs import cleanup_auxiliary_state
 
 
@@ -90,7 +93,6 @@ async def lifespan(app: FastAPI):
     from ..services import job_events, job_scheduler
 
     app.state.worker_id = f"{os.getpid()}-{id(app)}"
-    secrets.configure_registry(config.SECRET_REGISTRY_JSON)
     Path(config.IMAGES_DIR).mkdir(parents=True, exist_ok=True)
     Path(config.THUMBNAILS_DIR).mkdir(parents=True, exist_ok=True)
     Path(config.DATA_DIR).mkdir(parents=True, exist_ok=True)
@@ -100,6 +102,8 @@ async def lifespan(app: FastAPI):
         include_restart_required=True,
         overrides_only=True,
     )
+    secrets.configure_registry(config.SECRET_REGISTRY_JSON)
+    migrate_legacy_secret_references()
 
     if not config.ACCESS_KEY and not config.ALLOW_UNAUTHENTICATED:
         raise RuntimeError(

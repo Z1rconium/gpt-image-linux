@@ -24,7 +24,7 @@ from ..core.api_paths import default_model_for_api_path, normalize_api_preset
 from ..core.cdn import signed_media_url
 from ..core.constants import ACTIVE_GENERATE_JOB_STATUSES
 from ..core.observability import metrics, observe_job_stage
-from ..core.secrets import configured_secret_ids
+from ..core.secrets import configured_secret_ids, match_secret_id_for_value
 from ..core.utils import utc_now
 from ..core.validators import (
     get_env_var_ref_name,
@@ -227,6 +227,7 @@ PROMPT_OPTIMIZER_SETTINGS_KEY = "prompt_optimizer_settings"
 AI_ASSISTANT_SETTINGS_KEY = "ai_assistant_settings"
 R2_BACKUP_SETTINGS_KEY = "r2_backup_settings"
 NODEIMAGE_SETTINGS_KEY = "nodeimage_settings"
+CREDENTIAL_MIGRATION_CLEARED_KEY = "_credential_migration_cleared"
 SQLITE_TIMEOUT_SECONDS = 30.0
 DATA_DIR_MODE = 0o700
 DATA_FILE_MODE = 0o600
@@ -715,13 +716,20 @@ def _normalize_r2_backup_settings(settings: dict | None) -> dict:
         return default
     endpoint_url = normalize_r2_endpoint_url(settings.get("endpoint_url") or "")
     bucket_name = str(settings.get("bucket_name") or "").strip()
-    access_key_id = _normalize_stored_r2_access_key_id(settings.get("access_key_id"))
-    secret_access_key = _normalize_stored_r2_secret_access_key(
+    migration_cleared = bool(settings.get(CREDENTIAL_MIGRATION_CLEARED_KEY))
+    stored_access_key_id = _normalize_stored_r2_access_key_id(
+        settings.get("access_key_id")
+    )
+    stored_secret_access_key = _normalize_stored_r2_secret_access_key(
         settings.get("secret_access_key")
     )
-    return {
-        "enabled": default["enabled"]
-        or _coerce_bool(settings.get("enabled"), default["enabled"]),
+    normalized = {
+        "enabled": (
+            _coerce_bool(settings.get("enabled"), False)
+            if migration_cleared
+            else default["enabled"]
+            or _coerce_bool(settings.get("enabled"), default["enabled"])
+        ),
         "endpoint_url": endpoint_url or default["endpoint_url"],
         "bucket_name": bucket_name or default["bucket_name"],
         "region": str(settings.get("region") or default["region"]).strip()
@@ -730,13 +738,24 @@ def _normalize_r2_backup_settings(settings: dict | None) -> dict:
             settings.get("key_prefix"),
             default["key_prefix"],
         ),
-        "access_key_id": access_key_id or default["access_key_id"],
-        "secret_access_key": secret_access_key or default["secret_access_key"],
+        "access_key_id": (
+            stored_access_key_id
+            if migration_cleared
+            else stored_access_key_id or default["access_key_id"]
+        ),
+        "secret_access_key": (
+            stored_secret_access_key
+            if migration_cleared
+            else stored_secret_access_key or default["secret_access_key"]
+        ),
         "sync_interval_hours": _coerce_non_negative_int(
             settings.get("sync_interval_hours"),
             default["sync_interval_hours"],
         ),
     }
+    if migration_cleared:
+        normalized[CREDENTIAL_MIGRATION_CLEARED_KEY] = True
+    return normalized
 
 
 def _has_r2_backup_storage_values(settings: dict | None) -> bool:
@@ -793,11 +812,24 @@ def _normalize_nodeimage_settings(settings: dict | None) -> dict:
     default = _default_nodeimage_settings()
     if not isinstance(settings, dict):
         return default
-    api_key = _normalize_stored_nodeimage_api_key(settings.get("api_key"))
-    return {
-        "enabled": _coerce_bool(settings.get("enabled"), default["enabled"]),
-        "api_key": api_key or default["api_key"],
+    migration_cleared = bool(settings.get(CREDENTIAL_MIGRATION_CLEARED_KEY))
+    api_key = (
+        _normalize_stored_nodeimage_api_key(settings.get("api_key"))
+        if migration_cleared
+        else _normalize_stored_nodeimage_api_key(settings.get("api_key"))
+        or default["api_key"]
+    )
+    normalized = {
+        "enabled": (
+            _coerce_bool(settings.get("enabled"), False)
+            if migration_cleared
+            else _coerce_bool(settings.get("enabled"), default["enabled"])
+        ),
+        "api_key": api_key,
     }
+    if migration_cleared:
+        normalized[CREDENTIAL_MIGRATION_CLEARED_KEY] = True
+    return normalized
 
 
 def _has_nodeimage_storage_values(settings: dict | None) -> bool:

@@ -553,3 +553,90 @@ def test_ensure_directories_validates_storage_paths(
 
     with pytest.raises(ValueError, match="system directory"):
         db_repo._ensure_directories()
+
+
+def test_secure_log_handler_enforces_directory_file_and_rollover_modes(
+    tmp_path,
+    monkeypatch,
+):
+    import logging
+    import os
+    import stat
+
+    from backend.app.core import logging_config
+
+    log_dir = tmp_path / "custom-logs"
+    log_dir.mkdir(mode=0o755)
+    existing = log_dir / "existing.log"
+    existing.write_text("existing\n", encoding="utf-8")
+    os.chmod(existing, 0o644)
+    monkeypatch.setenv("LOG_DIR", str(log_dir))
+    monkeypatch.setenv("LOG_LEVEL", "INFO")
+
+    root = logging.getLogger()
+    original_handlers = list(root.handlers)
+    original_level = root.level
+    try:
+        logging_config.setup_logging()
+        secure_handlers = [
+            handler
+            for handler in root.handlers
+            if isinstance(handler, logging_config.SecureTimedRotatingFileHandler)
+        ]
+        assert len(secure_handlers) == 1
+        handler = secure_handlers[0]
+        assert stat.S_IMODE(log_dir.stat().st_mode) == 0o700
+        assert stat.S_IMODE(existing.stat().st_mode) == 0o600
+        assert stat.S_IMODE(Path(handler.baseFilename).stat().st_mode) == 0o600
+
+        handler.rolloverAt = 0
+        logging.getLogger("secure-log-test").info("force secure rollover")
+        assert len(list(log_dir.glob("app-*.log*"))) >= 2
+        assert all(
+            stat.S_IMODE(path.stat().st_mode) == 0o600
+            for path in log_dir.glob("*.log*")
+        )
+    finally:
+        for handler in list(root.handlers):
+            if handler not in original_handlers:
+                handler.close()
+        root.handlers = original_handlers
+        root.setLevel(original_level)
+
+
+def test_logging_disables_file_output_when_permissions_cannot_be_enforced(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    import logging
+
+    from backend.app.core import logging_config
+
+    log_dir = tmp_path / "private-log-path"
+    log_dir.mkdir()
+    monkeypatch.setenv("LOG_DIR", str(log_dir))
+    monkeypatch.setattr(
+        logging_config.os,
+        "chmod",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(PermissionError()),
+    )
+
+    root = logging.getLogger()
+    original_handlers = list(root.handlers)
+    original_level = root.level
+    try:
+        logging_config.setup_logging()
+        assert not any(
+            isinstance(handler, logging_config.SecureTimedRotatingFileHandler)
+            for handler in root.handlers
+        )
+        warning = capsys.readouterr().err
+        assert "File logging disabled" in warning
+        assert str(log_dir) not in warning
+    finally:
+        for handler in list(root.handlers):
+            if handler not in original_handlers:
+                handler.close()
+        root.handlers = original_handlers
+        root.setLevel(original_level)

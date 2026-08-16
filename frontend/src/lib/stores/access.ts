@@ -58,11 +58,13 @@ function createAccessStore() {
       if (!data.authenticated) throw new Error(get(t).messages.invalidAccessKey);
       setGateVisible(false);
       await onAuthenticated();
+      return true;
     } catch (error) {
       update((state) => ({
         ...state,
         error: error instanceof Error ? error.message : get(t).messages.invalidAccessKey
       }));
+      return false;
     } finally {
       update((state) => ({ ...state, loading: false }));
     }

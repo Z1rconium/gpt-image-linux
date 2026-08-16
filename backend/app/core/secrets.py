@@ -1,3 +1,4 @@
+import hmac
 import json
 import os
 import re
@@ -302,6 +303,38 @@ def resolve_secret(
     return value
 
 
+def match_secret_id_for_value(
+    value: object,
+    *,
+    purpose: SecretPurpose,
+    target_url: str,
+    host_allowlist: str,
+) -> str:
+    """Return the deterministic registry ID for an exact legacy value match."""
+
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    raw_bytes = raw.encode("utf-8")
+    matches: list[str] = []
+    with _registry_lock:
+        entries = tuple(sorted(_registry.values(), key=lambda item: item.secret_id))
+    for entry in entries:
+        try:
+            validate_secret_binding(
+                entry.secret_id,
+                purpose=purpose,
+                target_url=target_url,
+                host_allowlist=host_allowlist,
+            )
+        except SecretRegistryError:
+            continue
+        candidate = entry.resolve().encode("utf-8")
+        if hmac.compare_digest(candidate, raw_bytes):
+            matches.append(entry.secret_id)
+    return matches[0] if matches else ""
+
+
 def _entries_for_env_name(env_name: str, purpose: str) -> list[SecretEntry]:
     with _registry_lock:
         return [
@@ -361,11 +394,10 @@ def resolve_secret_reference(
 ) -> str:
     """Resolve a settings secret reference without exposing its source details.
 
-    Settings may contain an empty value, a predeclared registry ID, a legacy
-    ``${ENV_VAR}`` reference, or a legacy literal value. Registry IDs and
-    ``${ENV_VAR}`` references are always validated for purpose, origin, and the
-    startup host allowlist before resolution. Literals are inert credentials
-    that the settings API no longer accepts, so they are returned as-is.
+    Settings may contain an empty value, a predeclared registry ID, or a legacy
+    ``${ENV_VAR}`` reference. Registry IDs and environment references are always
+    validated for purpose, origin, and the startup host allowlist. Any literal
+    found after startup migration is rejected and can never become outbound data.
     """
 
     raw = str(value or "").strip()
@@ -402,7 +434,9 @@ def resolve_secret_reference(
             f"{field_name} env ref must be formatted as ${{ENV_VAR_NAME}}."
         )
 
-    return raw
+    raise SecretRegistryError(
+        f"{field_name} must reference a secret_id declared in SECRET_REGISTRY_JSON"
+    )
 
 
 def resolve_url_secret_reference(
@@ -456,7 +490,9 @@ def resolve_url_secret_reference(
             f"{field_name} env ref must be formatted as ${{ENV_VAR_NAME}}."
         )
 
-    return raw
+    raise SecretRegistryError(
+        f"{field_name} must reference a secret_id declared in SECRET_REGISTRY_JSON"
+    )
 
 
 def active_secret_values() -> tuple[str, ...]:

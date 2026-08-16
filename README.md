@@ -154,13 +154,10 @@ docker run -d --name gpt-image-panel \
 
 If Docker Hub is slow or blocked:
 
-```bash
-docker build \
-  --build-arg PYTHON_BASE_IMAGE=docker.m.daocloud.io/library/python:3.11-slim \
-  --build-arg NODE_BASE_IMAGE=docker.m.daocloud.io/library/node:24-alpine \
-  --build-arg NGINX_BASE_IMAGE=docker.m.daocloud.io/library/nginx:alpine \
-  -t gpt-image-panel .
-```
+Prefer configuring a registry mirror in the Docker daemon so the pinned official
+base-image digests in `Dockerfile` remain authoritative. If you must use base
+images from another registry directly, verify its multi-architecture manifest
+first and pass each build argument with an explicit, verified `@sha256:` digest.
 
 ### Caddy Reverse Proxy
 

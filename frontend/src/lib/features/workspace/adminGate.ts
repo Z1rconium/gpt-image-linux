@@ -52,9 +52,11 @@ export function createAdminGate(options: AdminGateOptions) {
       );
       update((current) => ({ ...current, visible: false }));
       await options.openSettings();
+      return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : options.fallbackError();
       update((current) => ({ ...current, error: message }));
+      return false;
     } finally {
       update((current) => ({ ...current, loading: false }));
     }

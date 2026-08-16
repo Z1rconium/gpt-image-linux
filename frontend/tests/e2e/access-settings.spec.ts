@@ -24,6 +24,95 @@ test('access gate unlocks before loading the app', async ({ page }) => {
   await expect(page.getByRole('textbox', { name: 'Prompt', exact: true })).toBeVisible();
 });
 
+test('access gate retains failed input but clears it after success and session expiry', async ({ page }) => {
+  await mockApi(page, { authenticated: false });
+  let accessPosts = 0;
+  await page.route('**/api/access', async (route) => {
+    if (route.request().method() !== 'POST') {
+      await route.fallback();
+      return;
+    }
+    accessPosts += 1;
+    const body = JSON.parse(route.request().postData() || '{}');
+    const authenticated = body.access_key === 'open-sesame';
+    await route.fulfill(json({ authenticated, expires_at: authenticated ? '2026-05-18T14:00:00Z' : null }));
+  });
+  await page.goto('/');
+
+  const accessInput = page.getByLabel('Access Key');
+  await expect(accessInput).toHaveAttribute('id', 'access-gate-credential');
+  await expect(accessInput).toHaveAttribute('name', 'access_gate_credential');
+  await expect(accessInput).toHaveAttribute('autocomplete', 'off');
+  await accessInput.fill('wrong-key');
+  await page.getByRole('button', { name: 'Unlock' }).click();
+  await expect(accessInput).toHaveValue('wrong-key');
+
+  await accessInput.fill('open-sesame');
+  await page.getByRole('button', { name: 'Unlock' }).click();
+  await expect(page.getByRole('heading', { name: 'Prompt', exact: true })).toBeVisible();
+
+  await page.route('**/api/version/latest', async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await route.fulfill(json({ detail: 'expired' }, 401));
+  });
+  await page.reload();
+  await expect(page.getByRole('heading', { name: 'Access Key' })).toBeVisible();
+  await expect(accessInput).toHaveValue('');
+  const postsBeforeEmptySubmit = accessPosts;
+  await page.getByRole('button', { name: 'Unlock' }).click();
+  await expect.poll(() => accessPosts).toBe(postsBeforeEmptySubmit);
+});
+
+test('admin gate uses isolated credentials and cannot reuse a previous admin key', async ({ page }) => {
+  await mockApi(page);
+  let adminAuthenticated = false;
+  let adminPosts = 0;
+  await page.route('**/api/access/admin/status', async (route) => {
+    await route.fulfill(json({
+      authenticated: adminAuthenticated,
+      expires_at: adminAuthenticated ? '2026-05-18T14:00:00Z' : null
+    }));
+  });
+  await page.route('**/api/access/admin', async (route) => {
+    if (route.request().method() !== 'POST') {
+      await route.fallback();
+      return;
+    }
+    adminPosts += 1;
+    const body = JSON.parse(route.request().postData() || '{}');
+    adminAuthenticated = body.admin_key === 'admin-secret';
+    await route.fulfill(
+      adminAuthenticated
+        ? json({ authenticated: true, expires_at: '2026-05-18T14:00:00Z' })
+        : json({ detail: 'Invalid admin key' }, 403)
+    );
+  });
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Settings' }).click();
+
+  const adminInput = page.getByLabel('Access Key');
+  await expect(adminInput).toHaveAttribute('id', 'admin-gate-credential');
+  await expect(adminInput).toHaveAttribute('name', 'admin_gate_credential');
+  await expect(adminInput).toHaveAttribute('autocomplete', 'off');
+  await adminInput.fill('wrong-admin');
+  await page.getByRole('button', { name: 'Unlock' }).click();
+  await expect(adminInput).toHaveValue('wrong-admin');
+
+  await adminInput.fill('admin-secret');
+  await page.getByRole('button', { name: 'Unlock' }).click();
+  const settingsDrawer = page.getByRole('dialog', { name: 'Settings' });
+  await expect(settingsDrawer).toBeVisible();
+  await settingsDrawer.getByRole('button', { name: 'Close settings' }).click();
+
+  adminAuthenticated = false;
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await expect(adminInput).toBeVisible();
+  await expect(adminInput).toHaveValue('');
+  const postsBeforeEmptySubmit = adminPosts;
+  await page.getByRole('button', { name: 'Unlock' }).click();
+  await expect.poll(() => adminPosts).toBe(postsBeforeEmptySubmit);
+});
+
 test('startup data and latest version requests do not wait for access or current version responses', async ({ page }) => {
   await mockApi(page);
 

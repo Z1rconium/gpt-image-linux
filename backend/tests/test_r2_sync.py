@@ -1,7 +1,9 @@
+import json
 from pathlib import Path
 
 import pytest
 
+from backend.app.core import secrets
 from backend.app.core import settings as config
 from backend.app.core.validators import (
     is_private_ip,
@@ -101,11 +103,39 @@ def r2_settings(**overrides):
         "bucket_name": "image-backups",
         "region": "auto",
         "key_prefix": "gallery/",
-        "access_key_id": "key-id",
-        "secret_access_key": "secret-key",
+        "access_key_id": "test-r2-access-key",
+        "secret_access_key": "test-r2-secret-key",
     }
     settings.update(overrides)
     return settings
+
+
+@pytest.fixture(autouse=True)
+def r2_secret_registry(monkeypatch):
+    endpoint = "https://account.r2.cloudflarestorage.com"
+    monkeypatch.setenv("TEST_R2_SYNC_ACCESS_KEY", "key-id")
+    monkeypatch.setenv("TEST_R2_SYNC_SECRET_KEY", "secret-key")
+    monkeypatch.setattr(
+        config,
+        "R2_ENDPOINT_HOST_ALLOWLIST",
+        "account.r2.cloudflarestorage.com",
+    )
+    secrets.configure_registry(
+        json.dumps(
+            {
+                "test-r2-access-key": {
+                    "purpose": "r2_access_key_id",
+                    "origin": endpoint,
+                    "env": "TEST_R2_SYNC_ACCESS_KEY",
+                },
+                "test-r2-secret-key": {
+                    "purpose": "r2_secret_access_key",
+                    "origin": endpoint,
+                    "env": "TEST_R2_SYNC_SECRET_KEY",
+                },
+            }
+        )
+    )
 
 
 @pytest.fixture()

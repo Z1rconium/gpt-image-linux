@@ -1,18 +1,29 @@
 <script lang="ts">
+  import { onDestroy } from 'svelte';
   import { dialog } from '$lib/actions/dialog';
   import { language, t, toggleLanguage } from '$lib/i18n';
 
   export let visible = false;
   export let error = '';
   export let loading = false;
-  export let onUnlock: (accessKey: string) => Promise<void> | void = () => {};
+  export let credential: 'access' | 'admin' = 'access';
+  export let onUnlock: (accessKey: string) => Promise<boolean> = async () => false;
 
   let accessKey = '';
   let localError = '';
-  const accessInputId = 'access-gate-access-key';
-  const accessErrorId = 'access-gate-error';
+  $: accessInputId = `${credential}-gate-credential`;
+  $: accessInputName = `${credential}_gate_credential`;
+  $: accessErrorId = `${credential}-gate-error`;
 
   $: combinedError = error || localError;
+  $: if (!visible) clearLocalCredential();
+
+  function clearLocalCredential() {
+    accessKey = '';
+    localError = '';
+  }
+
+  onDestroy(clearLocalCredential);
 
   async function submit() {
     const value = accessKey.trim();
@@ -21,7 +32,7 @@
       return;
     }
     localError = '';
-    await onUnlock(value);
+    if (await onUnlock(value)) clearLocalCredential();
   }
 </script>
 
@@ -50,9 +61,9 @@
         <input
           bind:value={accessKey}
           id={accessInputId}
-          name="access_key"
+          name={accessInputName}
           type="password"
-          autocomplete="current-password"
+          autocomplete="off"
           aria-describedby={combinedError ? accessErrorId : undefined}
           aria-invalid={combinedError ? 'true' : undefined}
           aria-label={$t.access.title}

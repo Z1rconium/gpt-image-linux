@@ -3,6 +3,191 @@
 from .db import *
 
 
+def _migrate_credential_reference(
+    value: object,
+    *,
+    purpose: str,
+    target_url: str,
+    host_allowlist: str,
+) -> tuple[str, str]:
+    normalized = str(value or "").strip()
+    if not normalized:
+        return "", "unchanged"
+    if normalized in configured_secret_ids() or get_env_var_ref_name(normalized):
+        return normalized, "unchanged"
+    matched_id = match_secret_id_for_value(
+        normalized,
+        purpose=purpose,
+        target_url=target_url,
+        host_allowlist=host_allowlist,
+    )
+    return (matched_id, "replaced") if matched_id else ("", "cleared")
+
+
+def _load_json_object(raw: str | None) -> dict | None:
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def migrate_legacy_secret_references() -> dict[str, dict[str, int]]:
+    """Atomically replace or clear legacy literal credentials in persisted settings."""
+
+    _ensure_database()
+    counts: dict[str, dict[str, int]] = {}
+
+    def record(category: str, outcome: str, amount: int = 1) -> None:
+        if outcome == "unchanged":
+            return
+        category_counts = counts.setdefault(
+            category,
+            {"replaced": 0, "cleared": 0, "disabled": 0},
+        )
+        category_counts[outcome] += amount
+
+    with _connect() as conn:
+        with _transaction(conn):
+            preset_rows = conn.execute(
+                "SELECT id, api_url, api_key FROM api_presets ORDER BY id"
+            ).fetchall()
+            for row in preset_rows:
+                migrated, outcome = _migrate_credential_reference(
+                    row["api_key"],
+                    purpose="upstream_api",
+                    target_url=str(row["api_url"] or ""),
+                    host_allowlist=config.UPSTREAM_HOST_ALLOWLIST,
+                )
+                if outcome != "unchanged":
+                    conn.execute(
+                        "UPDATE api_presets SET api_key = ?, updated_at = ? WHERE id = ?",
+                        (migrated, utc_now(), row["id"]),
+                    )
+                    record("api_presets", outcome)
+
+            for key, purpose, allowlist, category in (
+                (
+                    UPSTREAM_SOCKS5_PROXY_KEY,
+                    "upstream_proxy",
+                    config.UPSTREAM_PROXY_HOST_ALLOWLIST,
+                    "upstream_proxy",
+                ),
+                (
+                    WEBHOOK_URL_KEY,
+                    "webhook_url",
+                    config.WEBHOOK_HOST_ALLOWLIST,
+                    "webhook",
+                ),
+            ):
+                raw = _get_setting_value(conn, key)
+                migrated, outcome = _migrate_credential_reference(
+                    raw,
+                    purpose=purpose,
+                    target_url=str(raw or ""),
+                    host_allowlist=allowlist,
+                )
+                if outcome != "unchanged":
+                    _set_setting_value(conn, key, migrated)
+                    record(category, outcome)
+
+            optimizer = _load_json_object(
+                _get_setting_value(conn, PROMPT_OPTIMIZER_SETTINGS_KEY)
+            )
+            optimizer_cleared = False
+            if optimizer is not None:
+                migrated, outcome = _migrate_credential_reference(
+                    optimizer.get("api_key"),
+                    purpose="prompt_optimizer",
+                    target_url=str(optimizer.get("api_url") or ""),
+                    host_allowlist=config.PROMPT_OPTIMIZER_HOST_ALLOWLIST,
+                )
+                if outcome != "unchanged":
+                    optimizer["api_key"] = migrated
+                    record("prompt_optimizer", outcome)
+                    if outcome == "cleared":
+                        optimizer["enabled"] = False
+                        optimizer_cleared = True
+                        record("prompt_optimizer", "disabled")
+                    _set_setting_value(
+                        conn,
+                        PROMPT_OPTIMIZER_SETTINGS_KEY,
+                        json.dumps(optimizer),
+                    )
+
+            if optimizer_cleared:
+                assistant = _load_json_object(
+                    _get_setting_value(conn, AI_ASSISTANT_SETTINGS_KEY)
+                ) or {}
+                if assistant.get("enabled") is not False:
+                    assistant["enabled"] = False
+                    _set_setting_value(
+                        conn,
+                        AI_ASSISTANT_SETTINGS_KEY,
+                        json.dumps(assistant),
+                    )
+                    record("ai_assistant", "disabled")
+
+            r2 = _load_json_object(_get_setting_value(conn, R2_BACKUP_SETTINGS_KEY))
+            if r2 is not None:
+                r2_cleared = False
+                for field, purpose in (
+                    ("access_key_id", "r2_access_key_id"),
+                    ("secret_access_key", "r2_secret_access_key"),
+                ):
+                    migrated, outcome = _migrate_credential_reference(
+                        r2.get(field),
+                        purpose=purpose,
+                        target_url=str(r2.get("endpoint_url") or ""),
+                        host_allowlist=config.R2_ENDPOINT_HOST_ALLOWLIST,
+                    )
+                    if outcome != "unchanged":
+                        r2[field] = migrated
+                        record("r2", outcome)
+                        r2_cleared = r2_cleared or outcome == "cleared"
+                if r2_cleared:
+                    r2["enabled"] = False
+                    r2[CREDENTIAL_MIGRATION_CLEARED_KEY] = True
+                    record("r2", "disabled")
+                if r2_cleared or any(
+                    counts.get("r2", {}).get(key, 0) for key in ("replaced", "cleared")
+                ):
+                    _set_setting_value(conn, R2_BACKUP_SETTINGS_KEY, json.dumps(r2))
+
+            nodeimage = _load_json_object(
+                _get_setting_value(conn, NODEIMAGE_SETTINGS_KEY)
+            )
+            if nodeimage is not None:
+                migrated, outcome = _migrate_credential_reference(
+                    nodeimage.get("api_key"),
+                    purpose="nodeimage_api_key",
+                    target_url="https://api.nodeimage.com",
+                    host_allowlist="api.nodeimage.com",
+                )
+                if outcome != "unchanged":
+                    nodeimage["api_key"] = migrated
+                    record("nodeimage", outcome)
+                    if outcome == "cleared":
+                        nodeimage["enabled"] = False
+                        nodeimage[CREDENTIAL_MIGRATION_CLEARED_KEY] = True
+                        record("nodeimage", "disabled")
+                    _set_setting_value(conn, NODEIMAGE_SETTINGS_KEY, json.dumps(nodeimage))
+
+    if counts:
+        _secure_data_storage_permissions()
+    for category, category_counts in sorted(counts.items()):
+        logger.info(
+            "Credential migration category=%s replaced=%d cleared=%d disabled=%d",
+            category,
+            category_counts["replaced"],
+            category_counts["cleared"],
+            category_counts["disabled"],
+        )
+    return counts
+
+
 def load_settings() -> dict:
     _ensure_database()
     with _connect() as conn:

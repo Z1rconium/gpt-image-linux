@@ -1,4 +1,5 @@
 import json
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from fastapi import FastAPI, HTTPException
@@ -7,9 +8,12 @@ from fastapi.testclient import TestClient
 from backend.app.api import presets
 from backend.app.api.middleware import register_exception_handlers
 from backend.app.core import secrets
+from backend.app.core import security
 from backend.app.core import settings as config
+from backend.app.core.validators import mask_socks5_proxy_url
 from backend.app.integrations.r2 import config as r2_config
 from backend.app.repositories import db as db_repo
+from backend.app.repositories import settings as settings_repo
 
 
 def test_resolve_secret_reference_supports_all_setting_sources(monkeypatch):
@@ -23,8 +27,8 @@ def test_resolve_secret_reference_supports_all_setting_sources(monkeypatch):
 
     secrets.configure_registry("{}")
     assert secrets.resolve_secret_reference("", **options) == ""
-    # Legacy stored literals stay usable; the settings API no longer accepts them.
-    assert secrets.resolve_secret_reference("literal-key", **options) == "literal-key"
+    with pytest.raises(secrets.SecretRegistryError, match="must reference a secret_id"):
+        secrets.resolve_secret_reference("literal-key", **options)
 
     # An undeclared ${ENV_VAR} reference must never be read from the process env.
     monkeypatch.setenv("NODEIMAGE_REFERENCE_KEY", "env-key")
@@ -241,3 +245,172 @@ def test_http_exception_envelope_preserves_safe_detail():
     assert body["error"] == body["detail"]
     assert body["correlation_id"]
     assert response.headers["X-Correlation-ID"] == body["correlation_id"]
+
+
+def test_socks5_mask_never_exposes_literal_credentials():
+    secrets.configure_registry("{}")
+
+    masked = mask_socks5_proxy_url("socks5://literal-user:literal-pass@proxy.example:1080")
+    assert masked == "socks5://***:***@proxy.example:1080"
+    assert "literal-user" not in masked
+    assert "literal-pass" not in masked
+    assert mask_socks5_proxy_url("socks5://literal-user@proxy.example:1080") == (
+        "socks5://***@proxy.example:1080"
+    )
+    assert mask_socks5_proxy_url("socks5://proxy.example:1080") == (
+        "socks5://proxy.example:1080"
+    )
+    assert mask_socks5_proxy_url("https://literal-user:literal-pass@proxy.example") == "***"
+    assert mask_socks5_proxy_url("socks5://literal-user:literal-pass@proxy.example:bad") == "***"
+    assert mask_socks5_proxy_url("not-a-proxy-literal") == "***"
+    assert mask_socks5_proxy_url("${LEGACY_PROXY_URL}") == "${LEGACY_PROXY_URL}"
+
+
+def test_admin_token_verification_fails_closed_for_missing_key_and_malformed_cookies(
+    monkeypatch,
+):
+    malformed = (
+        "",
+        "no-dot",
+        "too.many.dots",
+        "not_base64.not_base64",
+        "\N{SNOWMAN}.signature",
+        "a" * 9000 + ".signature",
+    )
+
+    monkeypatch.setattr(config, "ADMIN_KEY", "")
+    for token in malformed + ("payload.signature",):
+        assert security.verify_admin_token(token) is None
+
+    monkeypatch.setattr(config, "ADMIN_KEY", "admin-key")
+    for token in malformed:
+        assert security.verify_admin_token(token) is None
+
+
+def test_legacy_credential_migration_is_atomic_idempotent_and_redacted(
+    tmp_path,
+    monkeypatch,
+    caplog,
+):
+    database_file = tmp_path / "data" / "app.sqlite3"
+    monkeypatch.setattr(config, "DATA_DIR", str(database_file.parent))
+    monkeypatch.setattr(config, "DATABASE_FILE", str(database_file))
+    monkeypatch.setattr(config, "DEFAULT_API_URL", "https://api.example.com")
+    monkeypatch.setattr(config, "DEFAULT_API_KEY", "")
+    monkeypatch.setattr(config, "DEFAULT_UPSTREAM_SOCKS5_PROXY", "")
+    monkeypatch.setattr(config, "PROMPT_OPTIMIZER_API_KEY", "")
+    monkeypatch.setattr(config, "R2_ACCESS_KEY_ID", "")
+    monkeypatch.setattr(config, "R2_SECRET_ACCESS_KEY", "")
+    monkeypatch.setattr(config, "NODEIMAGE_API_KEY", "")
+    monkeypatch.setattr(config, "R2_BACKUP_ENABLED", False)
+    monkeypatch.setattr(config, "UPSTREAM_HOST_ALLOWLIST", "api.example.com")
+    monkeypatch.setattr(config, "UPSTREAM_PROXY_HOST_ALLOWLIST", "proxy.example")
+    monkeypatch.setattr(config, "WEBHOOK_HOST_ALLOWLIST", "hooks.example.com")
+    monkeypatch.setattr(config, "PROMPT_OPTIMIZER_HOST_ALLOWLIST", "optimizer.example")
+    monkeypatch.setattr(
+        config,
+        "R2_ENDPOINT_HOST_ALLOWLIST",
+        "account.r2.cloudflarestorage.com",
+    )
+    monkeypatch.setenv("MIGRATION_API_A", "matched-api-literal")
+    monkeypatch.setenv("MIGRATION_API_Z", "matched-api-literal")
+    monkeypatch.setenv("MIGRATION_R2_ACCESS", "matched-r2-access")
+    secrets.configure_registry(
+        json.dumps(
+            {
+                "aaa-api-secret": {
+                    "purpose": "upstream_api",
+                    "origin": "https://api.example.com",
+                    "env": "MIGRATION_API_A",
+                },
+                "zzz-api-secret": {
+                    "purpose": "upstream_api",
+                    "origin": "https://api.example.com",
+                    "env": "MIGRATION_API_Z",
+                },
+                "r2-access-secret": {
+                    "purpose": "r2_access_key_id",
+                    "origin": "https://account.r2.cloudflarestorage.com",
+                    "env": "MIGRATION_R2_ACCESS",
+                },
+            }
+        )
+    )
+
+    legacy_values = {
+        "proxy": "socks5://legacy-user:legacy-pass@proxy.example:1080",
+        "webhook": "https://hooks.example.com/private/legacy-webhook",
+        "optimizer": "legacy-optimizer-secret",
+        "r2": "legacy-r2-secret",
+        "nodeimage": "legacy-nodeimage-secret",
+    }
+    settings_repo.save_settings(
+        {
+            "active_preset_id": "legacy-preset",
+            "presets": [
+                {
+                    "id": "legacy-preset",
+                    "name": "Sensitive preset name",
+                    "api_url": "https://api.example.com",
+                    "api_key": "matched-api-literal",
+                    "api_path": "/v1/images/generations",
+                    "default_model": "gpt-image-2",
+                    "default_response_format": "url",
+                }
+            ],
+            "upstream_socks5_proxy": legacy_values["proxy"],
+            "webhook_url": legacy_values["webhook"],
+            "prompt_optimizer": {
+                "enabled": True,
+                "api_url": "https://optimizer.example",
+                "api_key": legacy_values["optimizer"],
+                "model": "text-model",
+            },
+            "ai_assistant": {"enabled": True, "vision_model": "vision-model"},
+            "r2_backup": {
+                "enabled": True,
+                "endpoint_url": "https://account.r2.cloudflarestorage.com",
+                "bucket_name": "images",
+                "access_key_id": "matched-r2-access",
+                "secret_access_key": legacy_values["r2"],
+            },
+            "nodeimage": {"enabled": True, "api_key": legacy_values["nodeimage"]},
+        }
+    )
+    caplog.clear()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        concurrent_results = list(
+            executor.map(
+                lambda _: settings_repo.migrate_legacy_secret_references(),
+                range(2),
+            )
+        )
+    first = next(result for result in concurrent_results if result)
+    second = settings_repo.migrate_legacy_secret_references()
+    migrated = settings_repo.load_settings()
+
+    assert first["api_presets"]["replaced"] == 1
+    assert first["r2"] == {"replaced": 1, "cleared": 1, "disabled": 1}
+    assert second == {}
+    assert sum(bool(result) for result in concurrent_results) == 1
+    assert migrated["presets"][0]["api_key"] == "aaa-api-secret"
+    assert migrated["presets"][0]["name"] == "Sensitive preset name"
+    assert migrated["upstream_socks5_proxy"] == ""
+    assert migrated["webhook_url"] == ""
+    assert migrated["prompt_optimizer"]["enabled"] is False
+    assert migrated["prompt_optimizer"]["api_key"] == ""
+    assert migrated["ai_assistant"]["enabled"] is False
+    assert migrated["r2_backup"]["enabled"] is False
+    assert migrated["r2_backup"]["access_key_id"] == "r2-access-secret"
+    assert migrated["r2_backup"]["secret_access_key"] == ""
+    assert migrated["nodeimage"]["enabled"] is False
+    assert migrated["nodeimage"]["api_key"] == ""
+    log_text = caplog.text
+    for forbidden in (
+        *legacy_values.values(),
+        "Sensitive preset name",
+        "api.example.com",
+        "MIGRATION_API_A",
+    ):
+        assert forbidden not in log_text

@@ -1098,7 +1098,7 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
 <a class="skip-link control-focus" href="#main-content">{$t.common.skipToMain}</a>
 
 <AccessGate visible={$accessStore.gateVisible} error={$accessStore.error} loading={$accessStore.loading} onUnlock={(key) => accessStore.unlockAccess(key, loadAuthenticatedData)} />
-<AccessGate visible={$adminGate.visible} error={$adminGate.error} loading={$adminGate.loading} onUnlock={adminGate.unlock} />
+<AccessGate visible={$adminGate.visible} error={$adminGate.error} loading={$adminGate.loading} credential="admin" onUnlock={adminGate.unlock} />
 <Header
   version={$versionStore.version}
   latestVersion={$versionStore.latestVersion}

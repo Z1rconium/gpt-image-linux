@@ -107,15 +107,20 @@ def create_admin_token() -> tuple[str, datetime]:
 
 
 def verify_admin_token(token: Optional[str]) -> Optional[datetime]:
-    if not token or "." not in token:
+    if (
+        not configured_admin_key()
+        or not token
+        or len(token) > 8192
+        or token.count(".") != 1
+    ):
         return None
-    payload_part, signature_part = token.split(".", 1)
-    expected = hmac.new(
-        _admin_signature_secret(),
-        b"admin." + payload_part.encode("ascii"),
-        sha256,
-    ).digest()
     try:
+        payload_part, signature_part = token.split(".", 1)
+        expected = hmac.new(
+            _admin_signature_secret(),
+            b"admin." + payload_part.encode("ascii"),
+            sha256,
+        ).digest()
         actual = _base64url_decode(signature_part)
         payload = json.loads(_base64url_decode(payload_part))
         if payload.get("scope") != "admin" or not payload.get("sid"):

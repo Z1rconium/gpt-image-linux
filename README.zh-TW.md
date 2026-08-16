@@ -150,13 +150,9 @@ docker run -d --name gpt-image-panel \
 
 Docker Hub 速度過慢或無法存取時：
 
-```bash
-docker build \
-  --build-arg PYTHON_BASE_IMAGE=docker.m.daocloud.io/library/python:3.11-slim \
-  --build-arg NODE_BASE_IMAGE=docker.m.daocloud.io/library/node:24-alpine \
-  --build-arg NGINX_BASE_IMAGE=docker.m.daocloud.io/library/nginx:alpine \
-  -t gpt-image-panel .
-```
+請優先在 Docker daemon 中設定 registry mirror，以繼續使用 `Dockerfile` 中固定的
+官方基礎映像 digest。若必須直接使用替代 registry 的基礎映像，請先核驗其多架構
+manifest，並為每個 build argument 指定明確且已核驗的 `@sha256:` digest。
 
 ### Caddy Reverse Proxy
 

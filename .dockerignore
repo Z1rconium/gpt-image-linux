@@ -1,7 +1,8 @@
 __pycache__/
 *.py[cod]
 .git/
-.env
+.env*
+**/.env*
 node_modules/
 frontend/node_modules/
 frontend/.svelte-kit/

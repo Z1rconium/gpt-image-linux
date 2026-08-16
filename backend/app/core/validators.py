@@ -544,16 +544,23 @@ def mask_socks5_proxy_url(url: str | None) -> str:
         parsed = urlsplit(value)
         port = parsed.port
     except ValueError:
-        return value
+        return "***"
 
-    if parsed.scheme.lower() != "socks5" or not parsed.hostname or port is None:
-        return value
+    if (
+        parsed.scheme.lower() != "socks5"
+        or not parsed.hostname
+        or port is None
+        or parsed.query
+        or parsed.fragment
+        or parsed.path not in {"", "/"}
+    ):
+        return "***"
 
     hostname = parsed.hostname
     host = f"[{hostname}]" if ":" in hostname and not hostname.startswith("[") else hostname
     user_info = ""
     if parsed.username is not None:
-        user_info = parsed.username
+        user_info = "***"
         if parsed.password is not None:
             user_info += ":***"
         user_info += "@"
