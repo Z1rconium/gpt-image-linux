@@ -5,12 +5,8 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from ...core import security as auth
 from ...core import settings as config
 from ...repositories.coordination import (
-    clear_admin_failure,
-    clear_access_failure,
-    get_admin_lockout,
-    get_access_lockout,
-    record_admin_failure,
-    record_access_failure,
+    check_access_attempt,
+    check_admin_attempt,
 )
 from ...schemas.access import AdminAccessRequest, AccessRequest, AccessStatusResponse
 from ...services.blocking import run_db_operation
@@ -40,34 +36,23 @@ async def unlock_access(req: AccessRequest, request: Request, response: Response
         return AccessStatusResponse(authenticated=True)
 
     client_ip = auth.get_client_ip(request)
-    remaining = await run_db_operation(
-        get_access_lockout,
+    correct = hmac.compare_digest(req.access_key, config.ACCESS_KEY)
+    remaining, _failure_count = await run_db_operation(
+        check_access_attempt,
         client_ip,
+        correct=correct,
         max_failures=config.ACCESS_MAX_FAILURES,
         lockout_seconds=config.ACCESS_LOCKOUT_SECONDS,
-        metric_name="get_access_lockout",
+        max_entries=_ACCESS_FAILURES_MAX_SIZE,
+        metric_name="check_access_attempt",
     )
     if remaining:
         raise HTTPException(
             status_code=429,
             detail=f"Too many failed attempts. Try again in {remaining} seconds.",
         )
-
-    if not hmac.compare_digest(req.access_key, config.ACCESS_KEY):
-        await run_db_operation(
-            record_access_failure,
-            client_ip,
-            lockout_seconds=config.ACCESS_LOCKOUT_SECONDS,
-            max_entries=_ACCESS_FAILURES_MAX_SIZE,
-            metric_name="record_access_failure",
-        )
+    if not correct:
         raise HTTPException(status_code=401, detail="Invalid access key")
-
-    await run_db_operation(
-        clear_access_failure,
-        client_ip,
-        metric_name="clear_access_failure",
-    )
 
     token, expires_at = auth.create_access_token()
     response.set_cookie(
@@ -101,34 +86,24 @@ async def unlock_admin_access(
     response: Response,
 ):
     client_ip = auth.get_client_ip(request)
-    remaining = await run_db_operation(
-        get_admin_lockout,
+    admin_key = auth.configured_admin_key()
+    correct = bool(admin_key) and hmac.compare_digest(req.admin_key, admin_key)
+    remaining, _failure_count = await run_db_operation(
+        check_admin_attempt,
         client_ip,
+        correct=correct,
         max_failures=config.ADMIN_MAX_FAILURES,
         lockout_seconds=config.ADMIN_LOCKOUT_SECONDS,
-        metric_name="get_admin_lockout",
+        max_entries=_ACCESS_FAILURES_MAX_SIZE,
+        metric_name="check_admin_attempt",
     )
     if remaining:
         raise HTTPException(
             status_code=429,
             detail=f"Too many failed admin attempts. Try again in {remaining} seconds.",
         )
-
-    admin_key = auth.configured_admin_key()
-    if not admin_key or not hmac.compare_digest(req.admin_key, admin_key):
-        await run_db_operation(
-            record_admin_failure,
-            client_ip,
-            lockout_seconds=config.ADMIN_LOCKOUT_SECONDS,
-            max_entries=_ACCESS_FAILURES_MAX_SIZE,
-            metric_name="record_admin_failure",
-        )
+    if not correct:
         raise HTTPException(status_code=403, detail="Invalid admin key")
-    await run_db_operation(
-        clear_admin_failure,
-        client_ip,
-        metric_name="clear_admin_failure",
-    )
     token, expires_at = auth.create_admin_token()
     response.set_cookie(
         key=config.ADMIN_COOKIE_NAME,

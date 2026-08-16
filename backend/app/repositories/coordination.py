@@ -255,6 +255,137 @@ def _clear_failure(table: str, client_ip: str) -> bool:
     return int(cursor.rowcount or 0) > 0
 
 
+def _check_and_apply_access_attempt(
+    table: str,
+    client_ip: str,
+    *,
+    correct: bool,
+    max_failures: int,
+    lockout_seconds: int,
+    max_entries: int,
+    now: float | None = None,
+) -> tuple[int, int]:
+    """Enforce an access failure lockout and apply one attempt atomically.
+
+    The lockout check, failure counting, and success clearing all run inside a
+    single SQLite write transaction so concurrent guesses cannot pass the
+    lockout check before the failure is persisted.
+
+    Returns ``(remaining_lockout_seconds, failure_count)``. A positive
+    ``remaining_lockout_seconds`` means the client is currently locked out and
+    the attempt was not applied.
+    """
+
+    _ensure_database()
+    current_time = float(time.time() if now is None else now)
+    max_count = max(1, int(max_failures or 1))
+    lockout = max(1, int(lockout_seconds or 1))
+    max_size = max(1, int(max_entries or 1))
+    normalized_ip = _normalize_access_client_ip(client_ip)
+    with _connect() as conn:
+        with _transaction(conn):
+            _cleanup_expired_failure_rows_on_conn(conn, table, current_time, lockout)
+            row = conn.execute(
+                f"""
+                SELECT failure_count, first_failed_at, last_failed_at
+                FROM {table}
+                WHERE client_ip = ?
+                """,
+                (normalized_ip,),
+            ).fetchone()
+            if row:
+                elapsed = current_time - float(row["last_failed_at"] or 0)
+                count = int(row["failure_count"] or 0)
+                if elapsed < lockout and count >= max_count:
+                    return max(1, int(lockout - elapsed)), count
+                if correct:
+                    conn.execute(
+                        f"DELETE FROM {table} WHERE client_ip = ?",
+                        (normalized_ip,),
+                    )
+                    return 0, 0
+                new_count = count + 1
+                first_failed_at = float(row["first_failed_at"] or current_time)
+            else:
+                if correct:
+                    return 0, 0
+                new_count = 1
+                first_failed_at = current_time
+            conn.execute(
+                f"""
+                INSERT INTO {table} (
+                    client_ip, failure_count, first_failed_at, last_failed_at
+                ) VALUES (?, ?, ?, ?)
+                ON CONFLICT(client_ip) DO UPDATE SET
+                    failure_count = excluded.failure_count,
+                    first_failed_at = excluded.first_failed_at,
+                    last_failed_at = excluded.last_failed_at
+                """,
+                (normalized_ip, new_count, first_failed_at, current_time),
+            )
+            overflow_row = conn.execute(
+                f"SELECT COUNT(*) - ? FROM {table}",
+                (max_size,),
+            ).fetchone()
+            overflow = max(0, int(overflow_row[0] or 0) if overflow_row else 0)
+            if overflow:
+                conn.execute(
+                    f"""
+                    DELETE FROM {table}
+                    WHERE client_ip IN (
+                        SELECT client_ip FROM {table}
+                        ORDER BY last_failed_at ASC, client_ip ASC LIMIT ?
+                    )
+                    """,
+                    (overflow,),
+                )
+            return 0, new_count
+
+
+def check_access_attempt(
+    client_ip: str,
+    *,
+    correct: bool,
+    max_failures: int,
+    lockout_seconds: int,
+    max_entries: int,
+    now: float | None = None,
+) -> tuple[int, int]:
+    """Atomically apply one access-key attempt and enforce the failure lockout."""
+
+    return _check_and_apply_access_attempt(
+        "access_failures",
+        client_ip,
+        correct=correct,
+        max_failures=max_failures,
+        lockout_seconds=lockout_seconds,
+        max_entries=max_entries,
+        now=now,
+    )
+
+
+def check_admin_attempt(
+    client_ip: str,
+    *,
+    correct: bool,
+    max_failures: int,
+    lockout_seconds: int,
+    max_entries: int,
+    now: float | None = None,
+) -> tuple[int, int]:
+    """Atomically apply one admin-key attempt and enforce the failure lockout."""
+
+    return _check_and_apply_access_attempt(
+        "admin_failures",
+        client_ip,
+        correct=correct,
+        max_failures=max_failures,
+        lockout_seconds=lockout_seconds,
+        max_entries=max_entries,
+        now=now,
+    )
+
+
 def get_admin_lockout(
     client_ip: str,
     *,

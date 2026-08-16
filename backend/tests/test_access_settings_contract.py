@@ -346,6 +346,67 @@ def test_access_failures_normalize_ipv6_and_lockout_reads_without_write_transact
     ]
 
 
+def test_access_attempt_lockout_is_atomic_under_concurrency(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    _configure_runtime(tmp_path, access_key="secret", allow_unauthenticated=False)
+    client_ip = "203.0.113.7"
+    max_failures = config.ACCESS_MAX_FAILURES
+
+    def attempt(_index):
+        return coordination_repo.check_access_attempt(
+            client_ip,
+            correct=False,
+            max_failures=max_failures,
+            lockout_seconds=300,
+            max_entries=100,
+        )
+
+    with ThreadPoolExecutor(max_workers=16) as executor:
+        results = list(executor.map(attempt, range(32)))
+
+    recorded = coordination_repo.list_access_failures()
+    assert len(recorded) == 1
+    assert recorded[0]["client_ip"] == client_ip
+    assert recorded[0]["failure_count"] == max_failures
+
+    locked = [remaining for remaining, _count in results if remaining > 0]
+    assert len(locked) == 32 - max_failures
+    assert all(remaining > 0 for remaining in locked)
+
+
+def test_access_attempt_success_clears_failures_atomically(tmp_path):
+    _configure_runtime(tmp_path, access_key="secret", allow_unauthenticated=False)
+    client_ip = "203.0.113.8"
+
+    for _ in range(config.ACCESS_MAX_FAILURES - 1):
+        remaining, _count = coordination_repo.check_access_attempt(
+            client_ip,
+            correct=False,
+            max_failures=config.ACCESS_MAX_FAILURES,
+            lockout_seconds=300,
+            max_entries=100,
+        )
+        assert remaining == 0
+
+    assert coordination_repo.get_access_lockout(
+        client_ip,
+        max_failures=config.ACCESS_MAX_FAILURES,
+        lockout_seconds=300,
+    ) == 0
+
+    remaining, count = coordination_repo.check_access_attempt(
+        client_ip,
+        correct=True,
+        max_failures=config.ACCESS_MAX_FAILURES,
+        lockout_seconds=300,
+        max_entries=100,
+    )
+    assert remaining == 0
+    assert count == 0
+    assert coordination_repo.list_access_failures() == []
+
+
 def test_session_pool_close_all_closes_retired_sessions(monkeypatch):
     created_sessions = []
 
