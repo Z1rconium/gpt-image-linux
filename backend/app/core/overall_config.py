@@ -114,7 +114,7 @@ OVERALL_CONFIG_REGISTRY: tuple[OverallConfigSpec, ...] = (
     _spec("ALLOWED_HOSTS", "string", "", "Access / Security", "Host / X-Forwarded-Host allowlist.", validator="host_or_origin_list", restart_required=True, startup_only=True),
     _spec("CSRF_ORIGIN_CHECK_ENABLED", "bool", "true", "Access / Security", "Reject unsafe requests without valid Origin, Referer, or same-origin fetch metadata.", restart_required=True),
     _spec("UPSTREAM_HOST_ALLOWLIST", "string", "", "Access / Security", "Upstream API host allowlist.", validator="host_list", restart_required=True, startup_only=True),
-    _spec("UPSTREAM_PROXY_HOST_ALLOWLIST", "string", "", "Access / Security", "SOCKS5 proxy host allowlist.", validator="host_list", restart_required=True, startup_only=True),
+    _spec("UPSTREAM_PROXY_HOST_ALLOWLIST", "string", "", "Access / Security", "Required host allowlist when using a SOCKS5 proxy.", validator="host_list", restart_required=True, startup_only=True),
     _spec("WEBHOOK_HOST_ALLOWLIST", "string", "", "Webhooks", "Webhook callback host allowlist.", validator="host_list", restart_required=True, startup_only=True),
     _spec("ALLOW_PLAINTEXT_SECRETS", "bool", "false", "Secret Persistence", "Deprecated; web-managed literal secrets are disabled.", restart_required=True, startup_only=True),
     _spec("WEBHOOK_SIGNING_SECRET", "secret", "", "Webhooks", "Webhook signing secret.", secret=True, restart_required=True, startup_only=True),

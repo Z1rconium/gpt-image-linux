@@ -45,7 +45,6 @@ from ..repositories.coordination import (
     cleanup_expired_gallery_jobs,
     cleanup_stale_gallery_jobs,
     count_active_gallery_jobs,
-    create_gallery_job,
     delete_gallery_job,
     get_gallery_job,
     get_gallery_jobs_updated_at_edges,
@@ -1006,30 +1005,30 @@ def _build_gallery_export_job(
     }
 
 
-def _create_gallery_sync_job(total_count: int, payload: dict | None = None) -> dict:
+def _build_gallery_sync_job(total_count: int, payload: dict | None = None) -> dict:
     job_id = os.urandom(16).hex()
     now = utc_now()
-    return create_gallery_job(
-        job_id=job_id,
-        kind="sync",
-        status="queued",
-        stage="queued",
-        message="Queued R2 gallery sync",
-        progress=0,
-        created_at=now,
-        updated_at=now,
-        error=None,
-        total_count=total_count,
-        compared_count=0,
-        uploaded_count=0,
-        pending_upload_count=0,
-        skipped_existing_count=0,
-        missing_local_count=0,
-        failed_count=0,
-        bytes_total=0,
-        bytes_uploaded=0,
-        payload=payload or {},
-    )
+    return {
+        "job_id": job_id,
+        "kind": "sync",
+        "status": "queued",
+        "stage": "queued",
+        "message": "Queued R2 gallery sync",
+        "progress": 0,
+        "created_at": now,
+        "updated_at": now,
+        "error": None,
+        "total_count": total_count,
+        "compared_count": 0,
+        "uploaded_count": 0,
+        "pending_upload_count": 0,
+        "skipped_existing_count": 0,
+        "missing_local_count": 0,
+        "failed_count": 0,
+        "bytes_total": 0,
+        "bytes_uploaded": 0,
+        "payload": payload or {},
+    }
 
 
 def _build_gallery_import_job(
@@ -1323,17 +1322,29 @@ async def _create_reserved_gallery_export_job(
         return job
 
 
+async def _reserve_gallery_sync_job_capacity(
+    total_count: int,
+    payload: dict | None = None,
+) -> dict | None:
+    return await asyncio.to_thread(
+        reserve_gallery_job_capacity,
+        job=_build_gallery_sync_job(total_count, payload),
+        counted_kinds=("sync",),
+        max_active=MAX_ACTIVE_SYNC_JOBS,
+    )
+
+
 async def _create_reserved_gallery_sync_job(
     total_count: int,
     payload: dict | None = None,
 ) -> dict:
-    active_count = await asyncio.to_thread(count_active_gallery_jobs, "sync")
-    if active_count >= MAX_ACTIVE_SYNC_JOBS:
+    job = await _reserve_gallery_sync_job_capacity(total_count, payload)
+    if not job:
         raise HTTPException(
             status_code=429,
             detail="A gallery R2 sync job is already queued or running.",
         )
-    return await asyncio.to_thread(_create_gallery_sync_job, total_count, payload)
+    return job
 
 
 async def _create_reserved_gallery_import_job(

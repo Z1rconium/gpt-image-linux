@@ -51,3 +51,8 @@ def _is_private(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
 def create_safe_connector(**kwargs: Any) -> aiohttp.TCPConnector:
     """Create a TCPConnector that blocks private/internal IP connections."""
     return aiohttp.TCPConnector(resolver=_SSRFGuardResolver(), **kwargs)
+
+
+def create_safe_resolver() -> _SSRFGuardResolver:
+    """Create the SSRF-filtering resolver for non-aiohttp transports."""
+    return _SSRFGuardResolver()

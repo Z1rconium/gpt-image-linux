@@ -1,10 +1,13 @@
 import asyncio
 import aiohttp
 import logging
+import socket
+from contextlib import suppress
 from typing import Any
 
 from ..core import settings as config
-from ..core.safe_connector import create_safe_connector
+from ..core import validators as ssrf
+from ..core.safe_connector import create_safe_connector, create_safe_resolver
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +67,10 @@ def _build_socks5_connector(socks5_proxy: str | None):
     proxy_url = str(socks5_proxy or "").strip()
     if not proxy_url:
         return None
+    proxy_url = ssrf.validate_socks5_proxy_url(
+        proxy_url,
+        config.UPSTREAM_PROXY_HOST_ALLOWLIST,
+    )
     try:
         from aiohttp_socks import ProxyConnector
     except ImportError as e:
@@ -71,8 +78,63 @@ def _build_socks5_connector(socks5_proxy: str | None):
             "SOCKS5 proxy support requires aiohttp-socks. "
             "Install backend requirements and restart the server."
         ) from e
-    return ProxyConnector.from_url(
+
+    class SafeSocks5Connector(ProxyConnector):
+        """Bind SOCKS CONNECT to a locally resolved public IP."""
+
+        async def _connect_via_proxy(
+            self,
+            host: str,
+            port: int,
+            ssl=None,
+            timeout: float | None = None,
+        ):
+            from aiohttp_socks.connector import Proxy, _ResponseHandler
+
+            resolver = create_safe_resolver()
+            try:
+                addresses = await resolver.resolve(host, port, socket.AF_UNSPEC)
+            finally:
+                await resolver.close()
+            if not addresses:
+                raise ValueError(f"DNS resolution returned no public addresses for: {host}")
+            destination_ip = str(addresses[0]["host"])
+
+            proxy = Proxy(
+                proxy_type=self._proxy_type,
+                host=self._proxy_host,
+                port=self._proxy_port,
+                username=self._proxy_username,
+                password=self._proxy_password,
+                rdns=False,
+                proxy_ssl=self._proxy_ssl,
+            )
+            stream = await proxy.connect(
+                dest_host=destination_ip,
+                dest_port=port,
+                dest_ssl=None,
+                timeout=timeout,
+            )
+            try:
+                if ssl is not None:
+                    stream = await stream.start_tls(
+                        hostname=host,
+                        ssl_context=ssl,
+                    )
+
+                transport = stream.writer.transport
+                protocol = _ResponseHandler(loop=self._loop, writer=stream.writer)
+                transport.set_protocol(protocol)
+                protocol.connection_made(transport)
+                return transport, protocol
+            except BaseException:
+                with suppress(Exception):
+                    await stream.close()
+                raise
+
+    return SafeSocks5Connector.from_url(
         proxy_url,
+        rdns=False,
         limit=config.AIOHTTP_CONNECTION_LIMIT,
         limit_per_host=config.AIOHTTP_CONNECTION_LIMIT_PER_HOST,
     )

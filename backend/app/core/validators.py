@@ -513,6 +513,23 @@ def normalize_socks5_proxy_url(url: str | None) -> str:
     return urlunsplit(("socks5", parsed.netloc, "", "", ""))
 
 
+def validate_socks5_proxy_url(url: str | None, allowlist: str) -> str:
+    normalized = normalize_socks5_proxy_url(url)
+    if not normalized:
+        return ""
+
+    hostname = (urlsplit(normalized).hostname or "").lower().rstrip(".")
+    allowed_hosts = _parse_host_allowlist(allowlist)
+    if not allowed_hosts:
+        raise ValueError("SOCKS5 proxy requires a non-empty startup host allowlist")
+    if hostname not in allowed_hosts:
+        raise ValueError(
+            f"SOCKS5 proxy hostname '{hostname}' is not in the allowlist. "
+            f"Allowed: {', '.join(allowed_hosts)}"
+        )
+    return normalized
+
+
 def mask_socks5_proxy_url(url: str | None) -> str:
     value = str(url or "").strip()
     if not value:

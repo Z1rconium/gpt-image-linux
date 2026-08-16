@@ -63,7 +63,14 @@ class PreparedUpstreamRequest:
             allow_redirects=False,
             **kwargs,
         ) as resp:
-            if not self.socks5_proxy:
+            if self.socks5_proxy:
+                # A SOCKS tunnel exposes the trusted proxy as the socket peer.
+                # SafeSocks5Connector binds the locally validated target IP.
+                ssrf.validate_socks5_proxy_url(
+                    self.socks5_proxy,
+                    config.UPSTREAM_PROXY_HOST_ALLOWLIST,
+                )
+            else:
                 ssrf.validate_response_peer_ip(resp, "Upstream API")
             yield resp
 
@@ -77,7 +84,6 @@ async def _prepare_upstream_request(
     json_content_type: bool = True,
 ) -> PreparedUpstreamRequest:
     upstream_url = build_upstream_url(api_url, api_path)
-    await _warn_if_socks5_upstream_resolves_private(upstream_url, socks5_proxy)
     await ssrf.validate_upstream_url_async(upstream_url, config.UPSTREAM_HOST_ALLOWLIST)
 
     headers = {

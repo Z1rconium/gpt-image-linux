@@ -2,6 +2,7 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
+from fastapi import HTTPException
 
 from backend.tests.support.contract import *  # noqa: F403
 from backend.app.api import body_limit, middleware as api_middleware
@@ -111,6 +112,37 @@ def test_upload_reservations_are_atomic_per_ip_and_global(tmp_path):
             )
         )
     assert sorted(result[0] for result in results) == [False, True]
+
+
+def test_gallery_sync_job_capacity_reservation_is_atomic(tmp_path, monkeypatch):
+    _configure_runtime(tmp_path)
+
+    def reserve(identifier: str):
+        return coordination_repo.reserve_gallery_job_capacity(
+            job={
+                "job_id": identifier,
+                "kind": "sync",
+                "status": "queued",
+                "payload": {},
+            },
+            counted_kinds=("sync",),
+            max_active=1,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(reserve, ("sync-worker-a", "sync-worker-b")))
+
+    assert sorted(result is not None for result in results) == [False, True]
+    assert coordination_repo.count_active_gallery_jobs("sync") == 1
+
+    monkeypatch.setattr(
+        gallery_jobs,
+        "count_active_gallery_jobs",
+        lambda kind: (_ for _ in ()).throw(AssertionError("non-atomic capacity check")),
+    )
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(gallery_jobs._create_reserved_gallery_sync_job(1, {}))
+    assert exc_info.value.status_code == 429
 
 
 def test_upload_reservation_expiry_and_import_rate_events(tmp_path):

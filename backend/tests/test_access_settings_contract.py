@@ -386,6 +386,7 @@ def test_session_pool_passes_connector_limits(monkeypatch):
     socks_connector_kwargs = {}
     config.AIOHTTP_CONNECTION_LIMIT = 77
     config.AIOHTTP_CONNECTION_LIMIT_PER_HOST = 9
+    config.UPSTREAM_PROXY_HOST_ALLOWLIST = "proxy"
 
     class FakeSession:
         def __init__(self, timeout=None, connector=None):
@@ -418,18 +419,145 @@ def test_session_pool_passes_connector_limits(monkeypatch):
 
     pool = session_pool.SessionPool()
     safe_session = pool.get()
-    socks_session = pool.get(socks5_proxy="socks5://proxy")
+    socks_session = pool.get(socks5_proxy="socks5://proxy:1080")
 
     assert safe_session.connector == "safe-connector"
     assert safe_connector_kwargs == {"limit": 77, "limit_per_host": 9}
     assert socks_session.connector == "socks-connector"
     assert socks_connector_kwargs == {
-        "proxy_url": "socks5://proxy",
+        "proxy_url": "socks5://proxy:1080",
+        "rdns": False,
         "limit": 77,
         "limit_per_host": 9,
     }
 
     asyncio.run(pool.close_all())
+
+
+def test_socks5_connector_requires_trusted_proxy_allowlist(tmp_path):
+    _configure_runtime(tmp_path)
+    config.UPSTREAM_PROXY_HOST_ALLOWLIST = "trusted-proxy.example"
+
+    with pytest.raises(ValueError, match="not in the allowlist"):
+        session_pool._build_socks5_connector("socks5://untrusted-proxy.example:1080")
+
+
+def test_socks5_connector_binds_safe_local_dns_ip_and_preserves_tls_hostname(
+    tmp_path,
+    monkeypatch,
+):
+    _configure_runtime(tmp_path)
+    config.UPSTREAM_PROXY_HOST_ALLOWLIST = "127.0.0.1"
+    events: dict[str, object] = {}
+
+    class FakeResolver:
+        async def resolve(self, host, port, family):
+            events["resolve"] = (host, port, family)
+            return [{"host": "93.184.216.34", "port": port}]
+
+        async def close(self):
+            events["resolver_closed"] = True
+
+    class FakeTransport:
+        def set_protocol(self, protocol):
+            events["protocol"] = protocol
+
+    class FakeStream:
+        def __init__(self):
+            self.writer = types.SimpleNamespace(transport=FakeTransport())
+
+        async def start_tls(self, *, hostname, ssl_context):
+            events["tls"] = (hostname, ssl_context)
+            return self
+
+        async def close(self):
+            events["stream_closed"] = True
+
+    class FakeProxy:
+        def __init__(self, **kwargs):
+            events["proxy_init"] = kwargs
+
+        async def connect(self, **kwargs):
+            events["connect"] = kwargs
+            return FakeStream()
+
+    class FakeResponseHandler:
+        def __init__(self, *, loop, writer):
+            self.loop = loop
+            self.writer = writer
+
+        def connection_made(self, transport):
+            events["connection_made"] = transport
+
+    monkeypatch.setattr(session_pool, "create_safe_resolver", FakeResolver)
+    import aiohttp_socks.connector as socks_connector
+
+    monkeypatch.setattr(socks_connector, "Proxy", FakeProxy)
+    monkeypatch.setattr(socks_connector, "_ResponseHandler", FakeResponseHandler)
+
+    async def connect_once():
+        connector = session_pool._build_socks5_connector("socks5://127.0.0.1:1080")
+        ssl_context = object()
+        try:
+            await connector._connect_via_proxy(
+                "api.example.com",
+                443,
+                ssl=ssl_context,
+                timeout=5,
+            )
+        finally:
+            await connector.close()
+        return connector, ssl_context
+
+    connector, ssl_context = asyncio.run(connect_once())
+
+    assert connector._rdns is False
+    assert events["resolve"] == ("api.example.com", 443, session_pool.socket.AF_UNSPEC)
+    assert events["resolver_closed"] is True
+    assert events["proxy_init"]["rdns"] is False
+    assert events["connect"] == {
+        "dest_host": "93.184.216.34",
+        "dest_port": 443,
+        "dest_ssl": None,
+        "timeout": 5,
+    }
+    assert events["tls"] == ("api.example.com", ssl_context)
+    assert "connection_made" in events
+
+
+def test_socks5_connector_blocks_private_dns_rebinding_before_proxy_connect(
+    tmp_path,
+    monkeypatch,
+):
+    _configure_runtime(tmp_path)
+    config.UPSTREAM_PROXY_HOST_ALLOWLIST = "127.0.0.1"
+    from backend.app.core import safe_connector
+
+    async def private_resolution(self, host, port=0, family=0):
+        return [{"host": "10.0.0.5", "port": port}]
+
+    monkeypatch.setattr(
+        safe_connector.DefaultResolver,
+        "resolve",
+        private_resolution,
+    )
+    import aiohttp_socks.connector as socks_connector
+
+    class UnexpectedProxy:
+        def __init__(self, **kwargs):
+            raise AssertionError("proxy CONNECT must not start")
+
+    monkeypatch.setattr(socks_connector, "Proxy", UnexpectedProxy)
+
+    async def connect_once():
+        connector = session_pool._build_socks5_connector("socks5://127.0.0.1:1080")
+        try:
+            await connector._connect_via_proxy("api.example.com", 443, timeout=5)
+        finally:
+            await connector.close()
+
+    with pytest.raises(ValueError, match="private/internal"):
+        asyncio.run(connect_once())
 
 
 def test_ip_allowlist_blocks_api_but_not_health(tmp_path):

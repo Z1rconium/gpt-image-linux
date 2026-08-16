@@ -489,7 +489,7 @@ def test_image_url_download_rejects_private_peer_ip(client):
         asyncio.run(_download_with_fake_session(session, "https://example.com/image.png"))
 
 
-def test_socks5_upstream_private_dns_logs_trust_boundary_warning(tmp_path, monkeypatch, caplog):
+def test_socks5_upstream_private_dns_is_rejected_before_connection(tmp_path, monkeypatch):
     _configure_runtime(tmp_path)
     from backend.app.integrations.upstream import generation as upstream_client
     from backend.app.schemas.generation import GenerateRequest
@@ -500,7 +500,6 @@ def test_socks5_upstream_private_dns_logs_trust_boundary_warning(tmp_path, monke
         lambda hostname: (hostname, ["10.0.0.5"]),
     )
 
-    caplog.set_level(logging.WARNING, logger="backend.app.integrations.upstream.errors")
     with pytest.raises(ValueError, match="private/internal IP"):
         asyncio.run(
             ORIGINAL_CALL_IMAGE_GENERATION_API(
@@ -512,18 +511,11 @@ def test_socks5_upstream_private_dns_logs_trust_boundary_warning(tmp_path, monke
             )
         )
 
-    assert "SOCKS5 proxy is enabled" in caplog.text
-    assert "proxy is the trust boundary" in caplog.text
-
-
 def test_prepare_upstream_request_centralizes_security_headers_and_peer_check(tmp_path, monkeypatch):
     _configure_runtime(tmp_path)
     from backend.app.integrations.upstream import generation as upstream_client
 
     calls: list[tuple] = []
-
-    async def fake_warn(upstream_url, socks5_proxy):
-        calls.append(("warn", upstream_url, socks5_proxy))
 
     async def fake_validate(upstream_url, allowlist):
         calls.append(("validate_url", upstream_url, allowlist))
@@ -548,7 +540,6 @@ def test_prepare_upstream_request_centralizes_security_headers_and_peer_check(tm
             calls.append(("pool", timeout_kind, socks5_proxy))
             return FakeSession()
 
-    monkeypatch.setattr(upstream_client, "_warn_if_socks5_upstream_resolves_private", fake_warn)
     monkeypatch.setattr(upstream_client.ssrf, "validate_upstream_url_async", fake_validate)
     monkeypatch.setattr(upstream_client.ssrf, "validate_response_peer_ip", fake_peer)
     monkeypatch.setattr(upstream_client, "get_pool", lambda: FakePool())
@@ -574,7 +565,6 @@ def test_prepare_upstream_request_centralizes_security_headers_and_peer_check(tm
 
     asyncio.run(post_once())
 
-    assert ("warn", "https://api.example.com/v1/images/generations", None) in calls
     assert any(call[0] == "validate_url" for call in calls)
     assert ("pool", "upstream", None) in calls
     assert any(call[0] == "post" and call[2]["allow_redirects"] is False for call in calls)
