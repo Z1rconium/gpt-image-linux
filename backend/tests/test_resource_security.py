@@ -453,3 +453,103 @@ def test_webhook_shutdown_drops_without_logging_secrets(monkeypatch, caplog):
         assert "top-secret" not in caplog.text
 
     asyncio.run(scenario())
+
+
+def test_storage_path_validates_relative_paths():
+    from backend.app.core.validators import validate_storage_path
+
+    validate_storage_path("./images", "IMAGES_DIR")
+    validate_storage_path("./data", "DATA_DIR")
+
+
+def test_storage_path_validates_absolute_paths():
+    from backend.app.core.validators import validate_storage_path
+
+    assert validate_storage_path("/app/images", "IMAGES_DIR").is_absolute()
+
+
+def test_storage_path_rejects_dot_dot():
+    from backend.app.core.validators import validate_storage_path
+
+    with pytest.raises(ValueError, match="traversal"):
+        validate_storage_path("./images/../etc", "IMAGES_DIR")
+
+    with pytest.raises(ValueError, match="traversal"):
+        validate_storage_path("../../etc", "DATA_DIR")
+
+
+def test_storage_path_rejects_root():
+    from backend.app.core.validators import validate_storage_path
+
+    with pytest.raises(ValueError, match="system directory"):
+        validate_storage_path("/", "IMAGES_DIR")
+
+
+def test_storage_path_rejects_system_directories():
+    from backend.app.core.validators import validate_storage_path
+
+    for forbidden in ("/etc", "/etc/images", "/usr/share/data", "/var/lib/app", "/proc/data"):
+        with pytest.raises(ValueError, match="system directory"):
+            validate_storage_path(forbidden, "IMAGES_DIR")
+
+
+def test_storage_path_rejects_empty():
+    from backend.app.core.validators import validate_storage_path
+
+    with pytest.raises(ValueError, match="must not be empty"):
+        validate_storage_path("", "IMAGES_DIR")
+
+    with pytest.raises(ValueError, match="must not be empty"):
+        validate_storage_path("   ", "DATA_DIR")
+
+
+def test_settings_validates_all_storage_paths(monkeypatch):
+    from backend.app.core import settings as config
+    from backend.app.core import validators
+
+    validated = []
+    monkeypatch.setattr(
+        validators,
+        "validate_storage_path",
+        lambda raw_path, name: validated.append((name, raw_path)),
+    )
+
+    config._validate_storage_paths()
+
+    assert [name for name, _ in validated] == [
+        "IMAGES_DIR",
+        "THUMBNAILS_DIR",
+        "DATA_DIR",
+        "DATABASE_FILE",
+        "LOG_DIR",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("name", "dangerous_path"),
+    (
+        ("IMAGES_DIR", "/etc/images"),
+        ("THUMBNAILS_DIR", "/var/thumbs"),
+        ("DATA_DIR", "/usr/data"),
+        ("DATABASE_FILE", "/root/app.sqlite3"),
+        ("LOG_DIR", "/proc/logs"),
+    ),
+)
+def test_ensure_directories_validates_storage_paths(
+    tmp_path,
+    monkeypatch,
+    name,
+    dangerous_path,
+):
+    from backend.app.repositories import db as db_repo
+    from backend.app.core import settings as config
+
+    monkeypatch.setattr(config, "IMAGES_DIR", str(tmp_path / "images"))
+    monkeypatch.setattr(config, "THUMBNAILS_DIR", str(tmp_path / "thumbs"))
+    monkeypatch.setattr(config, "DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setattr(config, "DATABASE_FILE", str(tmp_path / "data" / "app.sqlite3"))
+    monkeypatch.setattr(config, "LOG_DIR", str(tmp_path / "logs"))
+    monkeypatch.setattr(config, name, dangerous_path)
+
+    with pytest.raises(ValueError, match="system directory"):
+        db_repo._ensure_directories()

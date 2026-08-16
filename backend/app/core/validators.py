@@ -2,6 +2,7 @@ import asyncio
 import ipaddress
 import re
 import socket
+from pathlib import Path
 from urllib.parse import urlparse, urlsplit, urlunsplit
 
 from . import settings as config
@@ -558,3 +559,60 @@ def mask_socks5_proxy_url(url: str | None) -> str:
         user_info += "@"
 
     return f"socks5://{user_info}{host}:{port}"
+
+
+FORBIDDEN_STORAGE_PREFIXES: tuple[str, ...] = (
+    "/bin",
+    "/boot",
+    "/dev",
+    "/etc",
+    "/lib",
+    "/lib32",
+    "/lib64",
+    "/proc",
+    "/root",
+    "/run",
+    "/sbin",
+    "/sys",
+    "/usr",
+    "/var",
+)
+
+
+def validate_storage_path(raw_path: str, name: str) -> Path:
+    if not raw_path or not str(raw_path).strip():
+        raise ValueError(f"{name} must not be empty")
+
+    path_obj = Path(str(raw_path).strip())
+
+    if ".." in path_obj.parts:
+        raise ValueError(
+            f"{name} contains '..' traversal components: {str(raw_path)!r}"
+        )
+
+    def _is_forbidden(candidate: str) -> bool:
+        if candidate == "/":
+            return True
+        for forbidden in FORBIDDEN_STORAGE_PREFIXES:
+            if candidate == forbidden or candidate.startswith(forbidden + "/"):
+                return True
+        return False
+
+    if path_obj.is_absolute():
+        raw_str = str(path_obj)
+        if _is_forbidden(raw_str):
+            raise ValueError(
+                f"{name} points to system directory '{raw_str}'. "
+                "Storage paths must not be within system directories."
+            )
+
+    resolved = path_obj.resolve()
+    resolved_str = str(resolved)
+
+    if _is_forbidden(resolved_str):
+        raise ValueError(
+            f"{name} resolves to system directory '{resolved_str}'. "
+            "Storage paths must not be within system directories."
+        )
+
+    return resolved

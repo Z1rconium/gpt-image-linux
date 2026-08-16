@@ -244,3 +244,19 @@ R2_SYNC_CONCURRENCY = max(1, int(os.getenv("R2_SYNC_CONCURRENCY", "4")))
 
 # ── NodeImage gallery upload ────────────────────────────────────
 NODEIMAGE_API_KEY = os.getenv("NODEIMAGE_API_KEY", "").strip()
+
+
+def _validate_storage_paths() -> None:
+    from .validators import validate_storage_path
+
+    for name, raw_path in (
+        ("IMAGES_DIR", IMAGES_DIR),
+        ("THUMBNAILS_DIR", THUMBNAILS_DIR),
+        ("DATA_DIR", DATA_DIR),
+        ("DATABASE_FILE", DATABASE_FILE),
+        ("LOG_DIR", LOG_DIR),
+    ):
+        validate_storage_path(raw_path, name)
+
+
+_validate_storage_paths()

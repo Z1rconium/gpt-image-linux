@@ -837,6 +837,17 @@ def _load_nodeimage_settings_from_conn(conn: sqlite3.Connection) -> dict:
 
 def _ensure_directories():
     global _initialized_storage_paths
+    from ..core.validators import validate_storage_path
+
+    for name, raw_path in (
+        ("IMAGES_DIR", config.IMAGES_DIR),
+        ("THUMBNAILS_DIR", config.THUMBNAILS_DIR),
+        ("DATA_DIR", config.DATA_DIR),
+        ("DATABASE_FILE", config.DATABASE_FILE),
+        ("LOG_DIR", config.LOG_DIR),
+    ):
+        validate_storage_path(raw_path, name)
+
     storage_paths = (
         Path(config.IMAGES_DIR).resolve(),
         Path(config.THUMBNAILS_DIR).resolve(),
