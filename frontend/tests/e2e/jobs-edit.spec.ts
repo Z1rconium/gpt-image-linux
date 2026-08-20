@@ -306,7 +306,9 @@ test('successful jobs refresh page one lightly after the current job event strea
   await page.getByRole('textbox', { name: 'Prompt', exact: true }).fill('light refresh prompt');
   await page.getByRole('button', { name: 'Generate', exact: true }).click();
 
-  await expect(page.getByRole('img', { name: 'Generated preview' })).toBeVisible();
+  const preview = page.locator('section').filter({ has: page.getByRole('heading', { name: 'Preview' }) });
+  await expect(preview.getByRole('img', { name: 'Generated preview' })).toBeVisible();
+  await expect(preview.getByText('1.00s', { exact: true })).toBeVisible();
   await expect.poll(() => galleryRefreshes.length).toBe(1);
   expect(galleryRefreshes[0]).toMatchObject({
     page: 1,

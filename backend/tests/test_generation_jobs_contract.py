@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from backend.tests.support.contract import *  # noqa: F403
 
 def test_generate_and_sse_contract(client):
@@ -18,12 +20,16 @@ def test_generate_and_sse_contract(client):
     job = _wait_for_job(client, job_id)
     assert job["status"] == "success"
     assert job["image_url"].startswith("/api/image/")
+    gallery_entry = gallery_queries.get_gallery_entry(job["image_id"])
+    assert gallery_entry is not None
+    assert job["duration"] == gallery_entry.duration
 
     events = client.get(f"/api/generate/{job_id}/events")
     assert events.status_code == 200
     assert events.headers["content-type"].startswith("text/event-stream")
     assert "event: job" in events.text
     assert job_id in events.text
+    assert f'"duration":"{job["duration"]}"' in events.text
 
 
 def test_global_jobs_feed_receives_tracked_job_updates(client):
@@ -322,6 +328,16 @@ def test_multi_image_job_publishes_and_persists_incremental_results(client, monk
     assert job["success_count"] == 2
     assert job["failure_count"] == 0
     aggregate = image_jobs_repo.aggregate_image_job_units(job_id)
+    unit_starts = [
+        datetime.fromisoformat(unit["started_at"].replace("Z", "+00:00"))
+        for unit in aggregate["units"]
+    ]
+    unit_completions = [
+        datetime.fromisoformat(unit["completed_at"].replace("Z", "+00:00"))
+        for unit in aggregate["units"]
+    ]
+    expected_duration = (max(unit_completions) - min(unit_starts)).total_seconds()
+    assert job["duration"] == f"{expected_duration:.2f}s"
     expected_image_ids = [
         image["image_id"]
         for unit in aggregate["units"]

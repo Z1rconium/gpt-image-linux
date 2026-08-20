@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import time
+from datetime import datetime
 
 from ..api.app_state import app
 from ..api.presets import (
@@ -38,6 +39,46 @@ from .job_queue import (
 
 logger = logging.getLogger(__name__)
 
+
+def _aggregate_image_job_duration(units: list[dict]) -> str | None:
+    durations: list[tuple[float, str]] = []
+    started_at: list[datetime] = []
+    completed_at: list[datetime] = []
+    for unit in units:
+        duration = str(unit.get("duration") or "").strip()
+        if duration.endswith("s"):
+            try:
+                seconds = float(duration[:-1])
+            except ValueError:
+                pass
+            else:
+                if seconds >= 0:
+                    durations.append((seconds, duration))
+        try:
+            unit_started_at = datetime.fromisoformat(
+                str(unit["started_at"]).replace("Z", "+00:00")
+            )
+            unit_completed_at = datetime.fromisoformat(
+                str(unit["completed_at"]).replace("Z", "+00:00")
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+        started_at.append(unit_started_at)
+        completed_at.append(unit_completed_at)
+
+    if len(units) == 1 and durations:
+        return durations[0][1]
+    if started_at and completed_at:
+        try:
+            seconds = (max(completed_at) - min(started_at)).total_seconds()
+        except TypeError:
+            pass
+        else:
+            if seconds >= 0:
+                return f"{seconds:.2f}s"
+    return max(durations, default=None, key=lambda item: item[0])[1] if durations else None
+
+
 async def aggregate_parent_image_job(
     parent_job_id: str,
     *,
@@ -68,6 +109,9 @@ async def aggregate_parent_image_job(
         failures = aggregate.get("failures") or []
         first_image = images[0] if images else {}
         completed_at = str(first_image.get("completed_at") or beijing_now())
+        terminal_update = {
+            "duration": _aggregate_image_job_duration(aggregate.get("units") or []),
+        }
         if images:
             message = (
                 "Image edit completed"
@@ -98,6 +142,7 @@ async def aggregate_parent_image_job(
                 "api_preset_name": parent.get("api_preset_name"),
                 "stage_timings": aggregate.get("stage_timings") or {},
                 "completed_at": completed_at,
+                **terminal_update,
                 **count_update,
             }
             if failures:
@@ -115,6 +160,7 @@ async def aggregate_parent_image_job(
                 "operation": operation,
                 "completed_at": completed_at,
                 "error": cancel_message,
+                **terminal_update,
                 **count_update,
             }
         else:
@@ -133,6 +179,7 @@ async def aggregate_parent_image_job(
                 "completed_at": completed_at,
                 "error": error_message,
                 "stage_timings": aggregate.get("stage_timings") or {},
+                **terminal_update,
                 **count_update,
             }
         job = await store_generate_job_async(parent_job_id, update)
