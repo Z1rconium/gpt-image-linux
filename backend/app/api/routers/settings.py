@@ -153,7 +153,7 @@ def _serialize_overall_config(
 ) -> OverallConfigResponse:
     items: list[OverallConfigItem] = []
     for spec in overall_config.OVERALL_CONFIG_REGISTRY:
-        if spec.exposed_in_settings:
+        if spec.exposed_in_settings or not spec.exposed_in_overall_config:
             continue
         row = rows.get(spec.name, {})
         raw_value, source = overall_config.effective_value(spec, row)
@@ -208,7 +208,7 @@ async def update_overall_config(req: OverallConfigUpdateRequest):
             raise HTTPException(status_code=422, detail=f"Duplicate config name: {item.name}")
         seen_names.add(item.name)
         spec = overall_config.OVERALL_CONFIG_BY_NAME.get(item.name)
-        if spec is None or spec.exposed_in_settings:
+        if spec is None or spec.exposed_in_settings or not spec.exposed_in_overall_config:
             raise HTTPException(status_code=422, detail=f"Unknown config name: {item.name}")
         if spec.startup_only:
             raise HTTPException(

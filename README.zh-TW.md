@@ -347,7 +347,7 @@ Overall Config 會將 Override 持久化至 SQLite。部分設定可熱更新；
 | `GET` | `/api/image/{filename}` | 提供通過授權的圖片位元組。 |
 | `GET` | `/api/thumb/{filename}` | 提供已生成的 Gallery 縮圖。 |
 | `GET` | `/api/download/{filename}` | 下載單張 Gallery 圖片。 |
-| `GET` | `/api/download-all` | 串流匯出 Gallery ZIP。 |
+| `GET` | `/api/download-all?export_job_id=` | 通過直接匯出任務串流匯出 Gallery ZIP。 |
 | `POST` | `/api/import` | 匯入 Gallery ZIP；`async_job=true` 會建立匯入工作。 |
 | `GET` | `/api/metrics`, `/api/metrics/prometheus` | 設定 `ENABLE_METRICS=true` 時可用。 |
 

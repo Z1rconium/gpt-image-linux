@@ -320,7 +320,10 @@ def test_download_all_skips_polluted_gallery_filename(client):
         image_bytes=None,
     )
 
-    archive = client.get("/api/download-all")
+    created = client.post("/api/gallery/direct-export-jobs")
+    assert created.status_code == 202
+    job = created.json()
+    archive = client.get(job["download_url"])
 
     assert archive.status_code == 200
     with zipfile.ZipFile(io.BytesIO(archive.content)) as zf:

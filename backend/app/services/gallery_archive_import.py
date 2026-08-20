@@ -74,6 +74,7 @@ def validate_import_zip_infos(zf: zipfile.ZipFile) -> ImportZipManifest:
 
     names: set[str] = set()
     total_uncompressed = 0
+    total_compressed = 0
     metadata_info: zipfile.ZipInfo | None = None
     metadata_ndjson_info: zipfile.ZipInfo | None = None
     for info in file_infos:
@@ -90,6 +91,7 @@ def validate_import_zip_infos(zf: zipfile.ZipFile) -> ImportZipManifest:
                 raise HTTPException(status_code=400, detail="Imported image is too large")
 
         total_uncompressed += info.file_size
+        total_compressed += info.compress_size
         if total_uncompressed > import_max_uncompressed_bytes():
             raise HTTPException(
                 status_code=400,
@@ -107,6 +109,12 @@ def validate_import_zip_infos(zf: zipfile.ZipFile) -> ImportZipManifest:
                 detail="Import archive compression ratio exceeds limit",
             )
         names.add(info.filename)
+
+    if total_compressed > 0 and total_uncompressed / total_compressed > config.IMPORT_MAX_COMPRESSION_RATIO:
+        raise HTTPException(
+            status_code=400,
+            detail="Import archive aggregate compression ratio exceeds limit",
+        )
 
     if metadata_info is None and metadata_ndjson_info is None:
         raise HTTPException(status_code=400, detail="metadata.json is required")

@@ -394,58 +394,54 @@ async def request_gallery_nodeimage_upload_cancellation(job_id: str):
 
 
 @router.get("/api/download-all")
-async def download_all_images(export_job_id: str | None = Query(default=None)):
+async def download_all_images(export_job_id: str = Query(...)):
     gallery_count = await asyncio.to_thread(get_gallery_count)
-    direct_job = None
-    if export_job_id:
-        direct_job = await asyncio.to_thread(
-            get_gallery_job,
-            "export_direct",
-            export_job_id,
-        )
-        if not direct_job:
-            raise HTTPException(status_code=404, detail="Direct gallery export job not found")
-        if direct_job.get("status") != "running" or direct_job.get("stage") != "queued":
-            raise HTTPException(status_code=409, detail="Direct gallery export job is already active or finished")
+    direct_job = await asyncio.to_thread(
+        get_gallery_job,
+        "export_direct",
+        export_job_id,
+    )
+    if not direct_job:
+        raise HTTPException(status_code=404, detail="Direct gallery export job not found")
+    if direct_job.get("status") != "running" or direct_job.get("stage") != "queued":
+        raise HTTPException(status_code=409, detail="Direct gallery export job is already active or finished")
 
     if gallery_count == 0:
-        if direct_job:
-            await asyncio.to_thread(
-                update_gallery_job,
-                export_job_id,
-                {
-                    "status": "error",
-                    "stage": "error",
-                    "message": "No images in gallery",
-                    "error": "No images in gallery",
-                    "completed_at": utc_now(),
-                    "lease_owner": None,
-                    "lease_expires_at": None,
-                },
-            )
-        raise HTTPException(status_code=404, detail="No images in gallery")
-
-    if direct_job:
-        updated_direct_job = await asyncio.to_thread(
+        await asyncio.to_thread(
             update_gallery_job,
             export_job_id,
             {
-                "status": "running",
-                "stage": "preparing",
-                "message": "Preparing gallery ZIP entries",
-                "progress": 0,
-                "requested_count": gallery_count,
-                "started_at": utc_now(),
-                "lease_expires_at": _direct_export_slot_expires_at(),
-                "error": None,
+                "status": "error",
+                "stage": "error",
+                "message": "No images in gallery",
+                "error": "No images in gallery",
+                "completed_at": utc_now(),
+                "lease_owner": None,
+                "lease_expires_at": None,
             },
         )
-        direct_job = updated_direct_job or direct_job
+        raise HTTPException(status_code=404, detail="No images in gallery")
+
+    updated_direct_job = await asyncio.to_thread(
+        update_gallery_job,
+        export_job_id,
+        {
+            "status": "running",
+            "stage": "preparing",
+            "message": "Preparing gallery ZIP entries",
+            "progress": 0,
+            "requested_count": gallery_count,
+            "started_at": utc_now(),
+            "lease_expires_at": _direct_export_slot_expires_at(),
+            "error": None,
+        },
+    )
+    direct_job = updated_direct_job or direct_job
 
     return await _gallery_zip_response(
         iter_gallery_export_rows(),
         "gpt-images",
-        reserve_export_slot=not bool(direct_job),
+        reserve_export_slot=False,
         direct_export_job=direct_job,
         requested_count=gallery_count,
     )

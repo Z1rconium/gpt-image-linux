@@ -211,15 +211,15 @@ def test_access_token_signature_requires_configured_secret(monkeypatch):
         auth_security.create_access_token()
 
 
-def test_allow_unauthenticated_startup_logs_warning(tmp_path, caplog):
+def test_allow_unauthenticated_startup_logs_error(tmp_path, caplog):
     _configure_runtime(tmp_path, access_key="", allow_unauthenticated=True)
 
-    caplog.set_level(logging.WARNING, logger="backend.app.api.app_state")
+    caplog.set_level(logging.ERROR, logger="backend.app.api.app_state")
     with _test_client():
         pass
 
     assert "ALLOW_UNAUTHENTICATED=true" in caplog.text
-    assert "without access-key authentication" in caplog.text
+    assert "without authentication" in caplog.text
 
 
 def test_access_key_startup_has_no_admin_key_warning(tmp_path, caplog):
@@ -2148,23 +2148,13 @@ def test_overall_config_syncs_env_and_hot_override(client, monkeypatch):
     assert item["value"] is False
 
 
-def test_overall_config_startup_secret_cannot_be_overridden(client):
+def test_overall_config_startup_only_cannot_be_overridden(client):
     response = client.put(
         "/api/settings/overall-config",
         json={"updates": [{"name": "WEBHOOK_SIGNING_SECRET", "value": "super-secret"}]},
     )
     assert response.status_code == 422
-    assert "process startup" in response.text
-
-    config.ALLOW_PLAINTEXT_SECRETS = True
-    response = client.put(
-        "/api/settings/overall-config",
-        json={"updates": [{"name": "WEBHOOK_SIGNING_SECRET", "value": "super-secret"}]},
-    )
-    assert response.status_code == 422
-    assert "process startup" in response.text
-    rows = settings_repo.list_overall_config_values()
-    assert rows["WEBHOOK_SIGNING_SECRET"]["override_value"] is None
+    assert "Unknown" in response.text
 
 
 def test_overall_config_secret_env_value_is_not_persisted(client, monkeypatch):
@@ -2195,11 +2185,12 @@ def test_overall_config_validation_errors(client):
     )
     assert invalid_repo.status_code == 422
 
-    invalid_proxy = client.put(
+    hidden_config = client.put(
         "/api/settings/overall-config",
         json={"updates": [{"name": "TRUST_PROXY_HEADERS", "value": True}]},
     )
-    assert invalid_proxy.status_code == 422
+    assert hidden_config.status_code == 422
+    assert "Unknown" in hidden_config.text
 
 
 def test_overall_config_restart_and_build_only_badges(client):
@@ -2208,13 +2199,13 @@ def test_overall_config_restart_and_build_only_badges(client):
         json={"updates": [{"name": "IP_ALLOWLIST", "value": "192.0.2.1"}]},
     )
     assert startup_only.status_code == 422
-    assert "process startup" in startup_only.text
+    assert "Unknown" in startup_only.text
 
     response = client.put(
         "/api/settings/overall-config",
         json={
             "updates": [
-                {"name": "ACCESS_KEY_COOKIE_NAME", "value": "custom_access"},
+                {"name": "APP_VERSION", "value": "v2.0.0"},
                 {"name": "PYTHON_BASE_IMAGE", "value": "python:3.12-slim"},
             ]
         },
@@ -2222,13 +2213,11 @@ def test_overall_config_restart_and_build_only_badges(client):
     assert response.status_code == 200
     body = response.json()
     assert set(body["restart_required_names"]) == {
-        "ACCESS_KEY_COOKIE_NAME",
+        "APP_VERSION",
         "PYTHON_BASE_IMAGE",
     }
     items = {item["name"]: item for item in body["items"]}
-    assert items["ACCESS_KEY_COOKIE_NAME"]["restart_required"] is True
-    assert items["IP_ALLOWLIST"]["restart_required"] is True
-    assert items["IP_ALLOWLIST"]["startup_only"] is True
+    assert items["APP_VERSION"]["restart_required"] is True
     assert items["PYTHON_BASE_IMAGE"]["build_only"] is True
 
 

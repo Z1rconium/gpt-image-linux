@@ -75,6 +75,7 @@ async def unlock_access(req: AccessRequest, request: Request, response: Response
         httponly=True,
         samesite="lax",
         secure=config.ACCESS_COOKIE_SECURE,
+        path="/",
     )
     return AccessStatusResponse(
         authenticated=True,

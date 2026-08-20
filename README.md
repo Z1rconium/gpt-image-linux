@@ -351,7 +351,7 @@ Key backend routes:
 | `GET` | `/api/image/{filename}` | Serve authorized image bytes. |
 | `GET` | `/api/thumb/{filename}` | Serve generated gallery thumbnail. |
 | `GET` | `/api/download/{filename}` | Download one gallery image. |
-| `GET` | `/api/download-all` | Stream gallery ZIP export. |
+| `GET` | `/api/download-all?export_job_id=` | Stream gallery ZIP export via direct export job. |
 | `POST` | `/api/import` | Import gallery ZIP archive; `async_job=true` creates an import job. |
 | `GET` | `/api/metrics`, `/api/metrics/prometheus` | Optional metrics when `ENABLE_METRICS=true`. |
 

@@ -55,7 +55,7 @@ def _compare_versions(a: str, b: str) -> int:
 async def _fetch_latest_release_version(repo: str) -> str | None:
     url = _LATEST_RELEASE_URL_TEMPLATE.format(repo=repo)
     try:
-        session = get_pool().get(timeout_kind=TIMEOUT_VERSION_CHECK)
+        session = get_pool().get(timeout_kind=TIMEOUT_VERSION_CHECK, socks5_proxy=config.DEFAULT_UPSTREAM_SOCKS5_PROXY)
         async with session.get(url, headers=_VERSION_CHECK_HEADERS) as response:
             if response.status != 200:
                 return None
@@ -75,7 +75,7 @@ async def _fetch_branch_version_text(repo: str) -> str | None:
         branch=config.VERSION_CHECK_BRANCH,
     )
     try:
-        session = get_pool().get(timeout_kind=TIMEOUT_VERSION_CHECK)
+        session = get_pool().get(timeout_kind=TIMEOUT_VERSION_CHECK, socks5_proxy=config.DEFAULT_UPSTREAM_SOCKS5_PROXY)
         async with session.get(url, headers=_VERSION_CHECK_HEADERS) as response:
             if response.status != 200:
                 return None

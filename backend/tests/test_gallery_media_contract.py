@@ -105,7 +105,10 @@ def test_gallery_image_download_and_zip(client, monkeypatch):
     assert download.headers.get("content-encoding") is None
     assert download.headers["cache-control"] == "private, max-age=31536000, immutable"
 
-    archive = client.get("/api/download-all")
+    created = client.post("/api/gallery/direct-export-jobs")
+    assert created.status_code == 202
+    job = created.json()
+    archive = client.get(job["download_url"])
     assert archive.status_code == 200
     assert archive.headers["content-type"].startswith("application/zip")
     assert archive.headers.get("content-encoding") != "gzip"
@@ -447,7 +450,10 @@ def test_download_all_deduplicates_shared_filenames(client):
     assert gallery_stats.status_code == 200
     assert gallery_stats.json()["total_bytes"] == len(PNG_BYTES)
 
-    archive = client.get("/api/download-all")
+    created = client.post("/api/gallery/direct-export-jobs")
+    assert created.status_code == 202
+    job = created.json()
+    archive = client.get(job["download_url"])
     assert archive.status_code == 200
     with zipfile.ZipFile(io.BytesIO(archive.content)) as zf:
         image_names = [n for n in zf.namelist() if n.startswith("images/")]
@@ -530,18 +536,12 @@ def test_gallery_direct_export_job_tracks_streaming_download(client):
     assert job["job_id"] in events.text
 
 
-def test_download_all_without_direct_job_keeps_legacy_streaming_behavior(client):
+def test_download_all_without_export_job_id_returns_422(client):
     _fake_gallery_entry("legacy-direct-export", "one", "1024x1024", "legacy-direct-export.png")
 
     archive = client.get("/api/download-all")
 
-    assert archive.status_code == 200
-    direct_job_id = archive.headers.get("x-gallery-export-job-id")
-    assert direct_job_id and direct_job_id.startswith("direct-")
-    assert coordination_repo.get_gallery_job("export_direct", direct_job_id) is None
-    with zipfile.ZipFile(io.BytesIO(archive.content)) as zf:
-        assert "images/legacy-direct-export.png" in zf.namelist()
-        assert "metadata.ndjson" in zf.namelist()
+    assert archive.status_code == 422
 
 
 def test_gallery_direct_export_jobs_count_against_export_capacity(client):

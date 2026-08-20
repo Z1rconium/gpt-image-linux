@@ -26,6 +26,7 @@ class OverallConfigSpec:
     description: str
     secret: bool = False
     exposed_in_settings: bool = False
+    exposed_in_overall_config: bool = True
     hot_reload: bool = True
     restart_required: bool = False
     build_only: bool = False
@@ -104,23 +105,23 @@ OVERALL_CONFIG_REGISTRY: tuple[OverallConfigSpec, ...] = (
     _spec("R2_SYNC_INTERVAL_HOURS", "int", "0", "R2 Backup", "Scheduled R2 sync interval in hours; 0 disables automatic sync.", exposed_in_settings=True, min_value=0),
     _spec("R2_SYNC_CONCURRENCY", "int", "4", "R2 Backup", "Concurrent R2 HEAD/upload workers.", min_value=1),
     _spec("NODEIMAGE_API_KEY", "secret", "", "NodeImage", "NodeImage API key.", secret=True, exposed_in_settings=True),
-    _spec("ACCESS_KEY", "secret", "", "Access / Security", "Access gate key.", secret=True, restart_required=True, startup_only=True),
-    _spec("ALLOW_UNAUTHENTICATED", "bool", "false", "Access / Security", "Allow startup without access key; logs a warning because non-health APIs are unauthenticated.", restart_required=True),
-    _spec("ACCESS_KEY_COOKIE_NAME", "string", "gpt_image_access", "Access / Security", "Access cookie name.", restart_required=True),
-    _spec("ACCESS_COOKIE_SECURE", "bool", "true", "Access / Security", "Set Secure on access cookie.", restart_required=True),
-    _spec("ACCESS_MAX_FAILURES", "int", "5", "Access / Security", "Failed access attempts before lockout.", min_value=1, restart_required=True),
-    _spec("ACCESS_LOCKOUT_SECONDS", "int", "300", "Access / Security", "Access lockout duration.", min_value=1, restart_required=True),
-    _spec("IP_ALLOWLIST", "string", "", "Access / Security", "Client IP/CIDR allowlist.", validator="ip_list", restart_required=True, startup_only=True),
-    _spec("TRUST_PROXY_HEADERS", "bool", "false", "Access / Security", "Trust reverse-proxy headers.", restart_required=True),
-    _spec("TRUSTED_PROXY_IPS", "string", "", "Access / Security", "Trusted reverse proxy IP/CIDR list.", validator="ip_list", restart_required=True, startup_only=True),
-    _spec("PUBLIC_ORIGIN", "string", "", "Access / Security", "Canonical browser origin.", validator="origin", restart_required=True, startup_only=True),
-    _spec("ALLOWED_HOSTS", "string", "", "Access / Security", "Host / X-Forwarded-Host allowlist.", validator="host_or_origin_list", restart_required=True, startup_only=True),
-    _spec("CSRF_ORIGIN_CHECK_ENABLED", "bool", "true", "Access / Security", "Reject unsafe requests without valid Origin, Referer, or same-origin fetch metadata.", restart_required=True),
-    _spec("UPSTREAM_HOST_ALLOWLIST", "string", "", "Access / Security", "Upstream API host allowlist.", validator="host_list", restart_required=True, startup_only=True),
-    _spec("UPSTREAM_PROXY_HOST_ALLOWLIST", "string", "", "Access / Security", "SOCKS5 proxy host allowlist.", validator="host_list", restart_required=True, startup_only=True),
-    _spec("WEBHOOK_HOST_ALLOWLIST", "string", "", "Webhooks", "Webhook callback host allowlist.", validator="host_list", restart_required=True, startup_only=True),
-    _spec("ALLOW_PLAINTEXT_SECRETS", "bool", "false", "Secret Persistence", "Deprecated; web-managed literal secrets are disabled.", restart_required=True, startup_only=True),
-    _spec("WEBHOOK_SIGNING_SECRET", "secret", "", "Webhooks", "Webhook signing secret.", secret=True, restart_required=True, startup_only=True),
+    _spec("ACCESS_KEY", "secret", "", "Access / Security", "Access gate key.", secret=True, restart_required=True, startup_only=True, exposed_in_overall_config=False),
+    _spec("ALLOW_UNAUTHENTICATED", "bool", "false", "Access / Security", "Allow startup without access key; logs a warning because non-health APIs are unauthenticated.", restart_required=True, exposed_in_overall_config=False),
+    _spec("ACCESS_KEY_COOKIE_NAME", "string", "__Host-gpt_image_access", "Access / Security", "Access cookie name.", restart_required=True, exposed_in_overall_config=False),
+    _spec("ACCESS_COOKIE_SECURE", "bool", "true", "Access / Security", "Set Secure on access cookie.", restart_required=True, exposed_in_overall_config=False),
+    _spec("ACCESS_MAX_FAILURES", "int", "5", "Access / Security", "Failed access attempts before lockout.", min_value=1, restart_required=True, exposed_in_overall_config=False),
+    _spec("ACCESS_LOCKOUT_SECONDS", "int", "300", "Access / Security", "Access lockout duration.", min_value=1, restart_required=True, exposed_in_overall_config=False),
+    _spec("IP_ALLOWLIST", "string", "", "Access / Security", "Client IP/CIDR allowlist.", validator="ip_list", restart_required=True, startup_only=True, exposed_in_overall_config=False),
+    _spec("TRUST_PROXY_HEADERS", "bool", "false", "Access / Security", "Trust reverse-proxy headers.", restart_required=True, exposed_in_overall_config=False),
+    _spec("TRUSTED_PROXY_IPS", "string", "", "Access / Security", "Trusted reverse proxy IP/CIDR list.", validator="ip_list", restart_required=True, startup_only=True, exposed_in_overall_config=False),
+    _spec("PUBLIC_ORIGIN", "string", "", "Access / Security", "Canonical browser origin.", validator="origin", restart_required=True, startup_only=True, exposed_in_overall_config=False),
+    _spec("ALLOWED_HOSTS", "string", "", "Access / Security", "Host / X-Forwarded-Host allowlist.", validator="host_or_origin_list", restart_required=True, startup_only=True, exposed_in_overall_config=False),
+    _spec("CSRF_ORIGIN_CHECK_ENABLED", "bool", "true", "Access / Security", "Reject unsafe requests without valid Origin, Referer, or same-origin fetch metadata.", restart_required=True, exposed_in_overall_config=False),
+    _spec("UPSTREAM_HOST_ALLOWLIST", "string", "", "Access / Security", "Upstream API host allowlist.", validator="host_list", restart_required=True, startup_only=True, exposed_in_overall_config=False),
+    _spec("UPSTREAM_PROXY_HOST_ALLOWLIST", "string", "", "Access / Security", "SOCKS5 proxy host allowlist.", validator="host_list", restart_required=True, startup_only=True, exposed_in_overall_config=False),
+    _spec("WEBHOOK_HOST_ALLOWLIST", "string", "", "Webhooks", "Webhook callback host allowlist.", validator="host_list", restart_required=True, startup_only=True, exposed_in_overall_config=False),
+    _spec("ALLOW_PLAINTEXT_SECRETS", "bool", "false", "Secret Persistence", "Deprecated; web-managed literal secrets are disabled.", restart_required=True, startup_only=True, exposed_in_overall_config=False),
+    _spec("WEBHOOK_SIGNING_SECRET", "secret", "", "Webhooks", "Webhook signing secret.", secret=True, restart_required=True, startup_only=True, exposed_in_overall_config=False),
     _spec("WEBHOOK_TIMEOUT_SECONDS", "float", "5", "Webhooks", "Webhook timeout per attempt.", min_value=0.1),
     _spec("WEBHOOK_MAX_ATTEMPTS", "int", "3", "Webhooks", "Webhook delivery attempts.", min_value=1),
     _spec("MAX_FILE_SIZE_MB", "int", "50", "Limits", "Max uploaded/downloaded image size.", min_value=1),
@@ -134,7 +135,7 @@ OVERALL_CONFIG_REGISTRY: tuple[OverallConfigSpec, ...] = (
     _spec("IMPORT_MAX_METADATA_BYTES", "int", "2097152", "Limits", "Max import metadata.json bytes.", min_value=1),
     _spec("IMPORT_MAX_ENTRIES", "int", "500", "Limits", "Max metadata image records in one import.", min_value=1),
     _spec("IMPORT_MAX_OUTPUT_MB", "int", "1024", "Limits", "Max total image bytes written by one import.", min_value=1),
-    _spec("IMPORT_MAX_COMPRESSION_RATIO", "float", "100", "Limits", "Max import compression ratio.", min_value=1),
+    _spec("IMPORT_MAX_COMPRESSION_RATIO", "float", "20", "Limits", "Max import per-file and aggregate compression ratio.", min_value=1),
     _spec("MAX_ACTIVE_GENERATE_JOBS", "int", "2", "Job Queue / SSE", "Concurrent generation/edit jobs.", restart_required=True, min_value=1),
     _spec("MAX_QUEUED_GENERATE_JOBS", "int", "20", "Job Queue / SSE", "Additional queued jobs before 429.", restart_required=True, min_value=0),
     _spec("MAX_PENDING_EDIT_SOURCE_MB", "int", "200", "Job Queue / SSE", "SQLite global pending edit source byte cap.", min_value=0),
@@ -344,6 +345,9 @@ def validate_effective_security(rows: dict[str, dict[str, Any]]) -> None:
         raise ValueError("TRUST_PROXY_HEADERS=true requires TRUSTED_PROXY_IPS")
     if not get_bool("ALLOW_UNAUTHENTICATED") and not get_string("ACCESS_KEY"):
         raise ValueError("ACCESS_KEY is required when ALLOW_UNAUTHENTICATED=false")
+    cookie_name = get_string("ACCESS_KEY_COOKIE_NAME")
+    if cookie_name.startswith("__Host-") and not get_bool("ACCESS_COOKIE_SECURE"):
+        raise ValueError("ACCESS_COOKIE_SECURE=true is required when ACCESS_KEY_COOKIE_NAME starts with __Host-")
 
 
 def normalize_secret_override(spec: OverallConfigSpec, value: str) -> str:

@@ -112,9 +112,11 @@ async def lifespan(app: FastAPI):
             "Public CDN media URLs require CDN_SIGNING_SECRET with at least 32 bytes"
         )
     if config.ALLOW_UNAUTHENTICATED and not config.ACCESS_KEY:
-        logger.warning(
-            "ALLOW_UNAUTHENTICATED=true and ACCESS_KEY is unset; all non-health API "
-            "routes are running without access-key authentication."
+        logger.error(
+            "SECURITY: ALLOW_UNAUTHENTICATED=true and ACCESS_KEY is unset. All "
+            "non-health API routes are running without authentication. Set "
+            "ACCESS_KEY and restart, or keep this deployment isolated from "
+            "untrusted networks."
         )
     auth.validate_proxy_config()
 
