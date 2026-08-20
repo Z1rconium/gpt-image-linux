@@ -192,6 +192,22 @@ sudo systemctl reload caddy
 
 Caddy automatic HTTPS requires the hostname to resolve to the server and inbound ports `80` and `443` to be reachable. When using a CDN proxy such as Cloudflare, ensure its edge certificate explicitly covers the complete hostname, especially for multi-label subdomains; otherwise browsers may report `ERR_SSL_VERSION_OR_CIPHER_MISMATCH` before traffic reaches Caddy. If Caddy runs in a container, `127.0.0.1` refers to that container, so use the application service name or another reachable container-network address instead.
 
+### Deployment Troubleshooting
+
+1. **Container exits on startup with `SecretRegistryError: credentials require a non-empty startup host allowlist`**
+   - **Cause**: `DEFAULT_API_KEY` is configured in `.env`, but `UPSTREAM_HOST_ALLOWLIST` is missing or empty.
+   - **Fix**: Add the raw hostname of `DEFAULT_API_URL` to `UPSTREAM_HOST_ALLOWLIST` in `.env` (e.g. `UPSTREAM_HOST_ALLOWLIST=api.openai.com` or `UPSTREAM_HOST_ALLOWLIST=cf.api.fan`).
+2. **Browser reports `400 Bad Request: Host is not allowed`**
+   - **Cause**: The incoming `Host` header does not match `ALLOWED_HOSTS` or `PUBLIC_ORIGIN` in `.env` (often due to domain typos or failing to recreate the container after editing `.env`).
+   - **Fix**: Ensure `PUBLIC_ORIGIN=https://panel.example.com` and `ALLOWED_HOSTS=panel.example.com` match the exact domain. Always run `docker compose up -d --force-recreate` after modifying `.env`.
+3. **Cannot log in or login loop under direct plain HTTP (no reverse proxy/SSL)**
+   - **Cause**: By default `ACCESS_COOKIE_SECURE=true` requires HTTPS; browsers reject storing or sending `Secure` cookies over plain HTTP.
+   - **Fix**: For direct HTTP testing, set `ACCESS_COOKIE_SECURE=false` in `.env`. Switch back to `true` once behind an HTTPS reverse proxy.
+4. **Clicking "Save Preset" in Web UI fails or drawer does not close**
+   - **Cause**:
+     - Saving literal plaintext API keys to SQLite via the UI is prohibited by default. Set `ALLOW_PLAINTEXT_SECRETS=true` in `.env` and restart the container if you need to paste raw API keys directly into Web Settings.
+     - If the preset API URL was modified, ensure its domain is also included in `UPSTREAM_HOST_ALLOWLIST`.
+
 ### Local Development
 
 Create a project-local Python 3.11+ virtual environment first. The `.venv` directory is local developer state and is not provided by the repository.

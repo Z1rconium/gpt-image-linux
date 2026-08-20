@@ -188,6 +188,22 @@ sudo systemctl reload caddy
 
 Caddy 自动 HTTPS 要求域名解析到服务器，并且入站 `80`、`443` 端口可访问。使用 Cloudflare 等 CDN 代理时，应确保边缘证书明确覆盖完整域名，特别是多级子域名；否则请求尚未到达 Caddy，浏览器就可能报告 `ERR_SSL_VERSION_OR_CIPHER_MISMATCH`。如果 Caddy 运行在容器内，`127.0.0.1` 指向 Caddy 容器自身，此时应改用应用服务名或其他可访问的容器网络地址。
 
+### 常见部署问题排查
+
+1. **容器启动闪退并报错 `SecretRegistryError: credentials require a non-empty startup host allowlist`**
+   - **原因**：在 `.env` 中配置了 `DEFAULT_API_KEY`，但未配置 `UPSTREAM_HOST_ALLOWLIST`。
+   - **解决**：在 `.env` 中将 `DEFAULT_API_URL` 对应的**纯域名**填入 `UPSTREAM_HOST_ALLOWLIST`（例如 `UPSTREAM_HOST_ALLOWLIST=api.openai.com` 或 `UPSTREAM_HOST_ALLOWLIST=cf.api.fan`）。
+2. **浏览器访问提示 `400 Bad Request: Host is not allowed`**
+   - **原因**：请求的 `Host` 头未在 `.env` 的 `ALLOWED_HOSTS` 或 `PUBLIC_ORIGIN` 白名单中（常见于域名拼写错误，或修改 `.env` 后未重新构建容器）。
+   - **解决**：检查 `.env` 中的 `PUBLIC_ORIGIN=https://panel.example.com` 和 `ALLOWED_HOSTS=panel.example.com` 拼写是否完全一致。修改 `.env` 后必须执行 `docker compose up -d --force-recreate` 重新创建容器生效。
+3. **直连 HTTP（无反代/未配 SSL）环境下无法登录或陷入登录循环**
+   - **原因**：默认 `ACCESS_COOKIE_SECURE=true` 要求必须走 HTTPS，在纯 HTTP 下浏览器会拒绝保存/携带 Secure Cookie。
+   - **解决**：纯 HTTP 直连测试时，在 `.env` 中设置 `ACCESS_COOKIE_SECURE=false`；部署 HTTPS 反代后再改为 `true`。
+4. **网页端点击「保存预设」无法保存、侧边栏不关闭**
+   - **原因**：
+     - 默认禁止直接在 Web 界面向数据库持久化明文 API Key。若要在网页端直接粘贴明文 Key，需在 `.env` 中设置 `ALLOW_PLAINTEXT_SECRETS=true` 并重启容器。
+     - 若修改了预设中的 API URL，新域名必须同时加入 `.env` 的 `UPSTREAM_HOST_ALLOWLIST` 白名单。
+
 ### 本地开发
 
 先使用本机的 Python 3.11+ 创建项目专用虚拟环境。`.venv` 属于本地开发环境，仓库不提供该目录。
