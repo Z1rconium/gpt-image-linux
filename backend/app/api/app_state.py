@@ -1,5 +1,4 @@
 import asyncio
-import hmac
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -106,21 +105,6 @@ async def lifespan(app: FastAPI):
             "ACCESS_KEY is required. Set ACCESS_KEY, or set "
             "ALLOW_UNAUTHENTICATED=true to explicitly run without authentication."
         )
-    admin_key = auth.configured_admin_key()
-    if not admin_key and not (
-        config.ALLOW_UNAUTHENTICATED and not config.ACCESS_KEY
-    ):
-        raise RuntimeError("ADMIN_KEY is required for Settings management step-up")
-    if (
-        config.ACCESS_KEY
-        and admin_key
-        and hmac.compare_digest(admin_key, config.ACCESS_KEY)
-    ):
-        logger.warning(
-            "ADMIN_KEY is equal to ACCESS_KEY; Settings management step-up is "
-            "not independent. Set a distinct ADMIN_KEY to enforce separate "
-            "admin verification."
-        )
     if (config.PUBLIC_IMAGE_BASE_URL or config.PUBLIC_THUMBNAIL_BASE_URL) and len(
         config.CDN_SIGNING_SECRET.encode("utf-8")
     ) < 32:
@@ -132,12 +116,6 @@ async def lifespan(app: FastAPI):
             "ALLOW_UNAUTHENTICATED=true and ACCESS_KEY is unset; all non-health API "
             "routes are running without access-key authentication."
         )
-        if not admin_key:
-            logger.warning(
-                "ADMIN_KEY is unset; Settings management step-up is not enforced "
-                "in unauthenticated mode."
-            )
-
     auth.validate_proxy_config()
 
     startup_maintenance_owner = f"startup-maintenance:{app.state.worker_id}"

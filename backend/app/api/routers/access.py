@@ -9,7 +9,7 @@ from ...repositories.coordination import (
     get_access_lockout,
     record_access_failure,
 )
-from ...schemas.access import AdminAccessRequest, AccessRequest, AccessStatusResponse
+from ...schemas.access import AccessRequest, AccessStatusResponse
 from ...services.blocking import run_db_operation
 
 
@@ -79,41 +79,4 @@ async def unlock_access(req: AccessRequest, request: Request, response: Response
     return AccessStatusResponse(
         authenticated=True,
         expires_at=expires_at.isoformat(),
-    )
-
-
-@router.get("/api/access/admin/status", response_model=AccessStatusResponse)
-async def get_admin_access_status(request: Request):
-    expires_at = auth.verify_admin_token(request.cookies.get(config.ADMIN_COOKIE_NAME))
-    return AccessStatusResponse(
-        authenticated=bool(expires_at),
-        expires_at=expires_at.isoformat() if expires_at else None,
-    )
-
-
-@router.post("/api/access/admin", response_model=AccessStatusResponse)
-async def unlock_admin_access(req: AdminAccessRequest, response: Response):
-    admin_key = auth.configured_admin_key()
-    if not admin_key or not hmac.compare_digest(req.admin_key, admin_key):
-        raise HTTPException(status_code=403, detail="Invalid admin key")
-    token, expires_at = auth.create_admin_token()
-    response.set_cookie(
-        key=config.ADMIN_COOKIE_NAME,
-        value=token,
-        max_age=config.ADMIN_SESSION_MINUTES * 60,
-        expires=config.ADMIN_SESSION_MINUTES * 60,
-        httponly=True,
-        samesite="strict",
-        secure=config.ACCESS_COOKIE_SECURE,
-    )
-    return AccessStatusResponse(authenticated=True, expires_at=expires_at.isoformat())
-
-
-@router.delete("/api/access/admin", status_code=204)
-async def lock_admin_access(response: Response):
-    response.delete_cookie(
-        config.ADMIN_COOKIE_NAME,
-        httponly=True,
-        samesite="strict",
-        secure=config.ACCESS_COOKIE_SECURE,
     )

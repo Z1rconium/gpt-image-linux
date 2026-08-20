@@ -47,7 +47,6 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
     snippetsPanel,
     type LazyPanel
   } from '$lib/features/workspace/panels';
-  import { createAdminGate } from '$lib/features/workspace/adminGate';
   import { createLightboxController } from '$lib/features/workspace/lightbox';
   import { installWorkspaceLifecycle } from '$lib/features/workspace/lifecycle';
   import { waitForGalleryAnalysis } from '$lib/features/workspace/gallery';
@@ -111,11 +110,6 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
     onAnalyzed: () => showToast($t.messages.aiAssistantGalleryAnalyzed),
     onError: showError
   });
-  const adminGate = createAdminGate({
-    openSettings: () => openUiPanel('settings', 'settingsOpen'),
-    fallbackError: () => $t.messages.requestFailed
-  });
-
   $: activeJobsCount = $jobsStore.jobs.length;
   $: optimizerSettings = $settingsStore.settings?.prompt_optimizer || null;
   $: promptOptimizerConfigAvailable = Boolean(
@@ -1098,7 +1092,6 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
 <a class="skip-link control-focus" href="#main-content">{$t.common.skipToMain}</a>
 
 <AccessGate visible={$accessStore.gateVisible} error={$accessStore.error} loading={$accessStore.loading} onUnlock={(key) => accessStore.unlockAccess(key, loadAuthenticatedData)} />
-<AccessGate visible={$adminGate.visible} error={$adminGate.error} loading={$adminGate.loading} onUnlock={adminGate.unlock} />
 <Header
   version={$versionStore.version}
   latestVersion={$versionStore.latestVersion}
@@ -1112,7 +1105,7 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
   onOpenPromptSnippets={openPromptSnippetsDrawer}
   onOpenImagePrompt={openImagePromptDialog}
   onOpenJobs={openJobsDrawer}
-  onOpenSettings={() => void adminGate.openSettingsSecure()}
+  onOpenSettings={() => void openUiPanel('settings', 'settingsOpen')}
   onPrefetchPromptSnippets={() => prefetchPanel('snippets')}
   onPrefetchImagePrompt={() => prefetchPanel('imagePrompt')}
   onPrefetchJobs={() => prefetchPanel('jobs')}

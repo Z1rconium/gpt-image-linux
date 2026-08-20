@@ -140,6 +140,47 @@ def test_access_cookie_and_status(tmp_path):
         assert version_after_unlock.status_code == 200
 
 
+def test_access_unlock_allows_settings_read_and_write_without_step_up(tmp_path):
+    _configure_runtime(tmp_path, access_key="secret", allow_unauthenticated=False)
+
+    with _test_client() as client:
+        assert client.get("/api/settings").status_code == 401
+
+        unlocked = client.post("/api/access", json={"access_key": "secret"})
+        assert unlocked.status_code == 200
+        assert set(client.cookies.keys()) == {config.ACCESS_KEY_COOKIE_NAME}
+
+        settings = client.get("/api/settings")
+        assert settings.status_code == 200
+        body = settings.json()
+
+        updated = client.post(
+            "/api/settings",
+            json={
+                "active_preset_id": body["active_preset_id"],
+                "preset_name": "Access-only settings",
+                "api_url": "https://api.example.com",
+                "api_key": "${TEST_OPENAI_API_KEY}",
+                "api_path": body["api_path"],
+            },
+        )
+        assert updated.status_code == 200
+        updated_body = updated.json()
+        active_preset = next(
+            preset
+            for preset in updated_body["presets"]
+            if preset["id"] == updated_body["active_preset_id"]
+        )
+        assert active_preset["name"] == "Access-only settings"
+
+
+def test_admin_access_routes_are_removed():
+    route_paths = {getattr(route, "path", None) for route in backend_main.app.routes}
+
+    assert "/api/access/admin" not in route_paths
+    assert "/api/access/admin/status" not in route_paths
+
+
 def test_access_denied_paths_return_auth_status_codes(tmp_path):
     _configure_runtime(tmp_path, access_key="secret", allow_unauthenticated=False)
 
@@ -181,15 +222,14 @@ def test_allow_unauthenticated_startup_logs_warning(tmp_path, caplog):
     assert "without access-key authentication" in caplog.text
 
 
-def test_admin_key_fallback_to_access_key_logs_warning(tmp_path, caplog):
+def test_access_key_startup_has_no_admin_key_warning(tmp_path, caplog):
     _configure_runtime(tmp_path, access_key="secret", allow_unauthenticated=False)
 
     caplog.set_level(logging.WARNING, logger="backend.app.api.app_state")
     with _test_client():
         pass
 
-    assert "ADMIN_KEY is equal to ACCESS_KEY" in caplog.text
-    assert "not independent" in caplog.text
+    assert "ADMIN_KEY" not in caplog.text
 
 
 def test_frontend_build_assets_are_available_before_access_unlock(tmp_path, monkeypatch):

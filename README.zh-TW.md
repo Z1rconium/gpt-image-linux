@@ -238,7 +238,6 @@ ALLOW_UNAUTHENTICATED=true .venv/bin/granian --interface asgi backend.app.main:a
 | 變數 | 用途 |
 | --- | --- |
 | `ACCESS_KEY` | 存取密鑰。除非清空該變數並設定 `ALLOW_UNAUTHENTICATED=true`，否則必填。 |
-| `ADMIN_KEY` | 設定管理的二次驗證密鑰。應設定不同的值；省略時會退回 `ACCESS_KEY`，並在啟動日誌中發出警告。 |
 | `DEFAULT_API_URL` | 預設上游 API base URL，可包含或省略 `/v1`。 |
 | `DEFAULT_API_KEY` | 預設上游 API key。Web Settings 建議使用 `${OPENAI_API_KEY}` 之類的 env ref。 |
 | `DEFAULT_API_PATH` | `/v1/images/generations`、`/v1/responses` 或 `/v1/chat/completions`。 |
@@ -304,7 +303,6 @@ Overall Config 會將 Override 持久化至 SQLite。部分設定可熱更新；
 | `GET` | `/health` | 健康檢查。 |
 | `GET` | `/api/access/status` | 讀取存取狀態。 |
 | `POST` | `/api/access` | 使用存取密鑰解鎖面板。 |
-| `GET/POST/DELETE` | `/api/access/admin`, `/api/access/admin/status` | 讀取、解鎖或清除受保護設定使用的管理員存取狀態。 |
 | `GET` | `/api/version`, `/api/version/latest` | 讀取目前版本與選用的最新 Release 資訊。 |
 | `GET/PUT` | `/api/settings/overall-config` | 讀取/儲存 Overall Config Override。 |
 | `GET/POST` | `/api/settings` | 讀取/儲存目前預設、提示詞最佳化器、R2 備份、Proxy 與 webhook 設定。 |

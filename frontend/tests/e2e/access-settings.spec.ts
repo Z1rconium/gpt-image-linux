@@ -24,6 +24,20 @@ test('access gate unlocks before loading the app', async ({ page }) => {
   await expect(page.getByRole('textbox', { name: 'Prompt', exact: true })).toBeVisible();
 });
 
+test('settings opens directly without admin access requests', async ({ page }) => {
+  const adminAccessRequests: string[] = [];
+  page.on('request', (request) => {
+    const pathname = new URL(request.url()).pathname;
+    if (pathname.startsWith('/api/access/admin')) adminAccessRequests.push(pathname);
+  });
+
+  await loadApp(page);
+  await page.getByRole('button', { name: 'Settings' }).click();
+
+  await expect(page.getByRole('dialog', { name: 'Settings' })).toBeVisible();
+  expect(adminAccessRequests).toEqual([]);
+});
+
 test('startup data and latest version requests do not wait for access or current version responses', async ({ page }) => {
   await mockApi(page);
 

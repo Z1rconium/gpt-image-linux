@@ -425,13 +425,13 @@ def test_active_secret_values_cache_reuses_registry_resolution(monkeypatch):
         secrets.configure_registry("{}")
 
 
-def test_active_secret_values_includes_admin_and_cdn_runtime_secrets(monkeypatch):
-    monkeypatch.setattr(config, "ADMIN_KEY", "admin-runtime-secret")
+def test_active_secret_values_includes_access_and_cdn_runtime_secrets(monkeypatch):
+    monkeypatch.setattr(config, "ACCESS_KEY", "access-runtime-secret")
     monkeypatch.setattr(config, "CDN_SIGNING_SECRET", "cdn-runtime-secret")
     secrets.invalidate_active_secret_values_cache()
     try:
         values = secrets.active_secret_values()
-        assert "admin-runtime-secret" in values
+        assert "access-runtime-secret" in values
         assert "cdn-runtime-secret" in values
     finally:
         secrets.invalidate_active_secret_values_cache()

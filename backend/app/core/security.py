@@ -2,7 +2,6 @@ import base64
 import hmac
 import ipaddress
 import json
-import secrets
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from typing import Optional
@@ -12,23 +11,12 @@ from fastapi import Request
 from . import settings as config
 
 
-def configured_admin_key() -> str:
-    return str(config.ADMIN_KEY or config.ACCESS_KEY or "").strip()
-
-
 def _signature_secret() -> bytes:
     key = config.ACCESS_KEY
     if not key:
         raise RuntimeError(
             "No signing secret available. Set ACCESS_KEY or DEFAULT_API_KEY."
         )
-    return key.encode("utf-8")
-
-
-def _admin_signature_secret() -> bytes:
-    key = configured_admin_key()
-    if not key:
-        raise RuntimeError("ADMIN_KEY is required for management sessions")
     return key.encode("utf-8")
 
 
@@ -80,52 +68,6 @@ def verify_access_token(token: Optional[str]) -> Optional[datetime]:
         return None
 
     if expires_at <= datetime.now(timezone.utc):
-        return None
-    return expires_at
-
-
-def create_admin_token() -> tuple[str, datetime]:
-    now = datetime.now(timezone.utc)
-    expires_at = now + timedelta(minutes=config.ADMIN_SESSION_MINUTES)
-    payload = {
-        "exp": int(expires_at.timestamp()),
-        "auth_time": int(now.timestamp()),
-        "scope": "admin",
-        "sid": secrets.token_urlsafe(18),
-    }
-    payload_part = _base64url_encode(
-        json.dumps(payload, separators=(",", ":")).encode("utf-8")
-    )
-    signature = hmac.new(
-        _admin_signature_secret(),
-        b"admin." + payload_part.encode("ascii"),
-        sha256,
-    ).digest()
-    return f"{payload_part}.{_base64url_encode(signature)}", expires_at
-
-
-def verify_admin_token(token: Optional[str]) -> Optional[datetime]:
-    if not token or "." not in token:
-        return None
-    payload_part, signature_part = token.split(".", 1)
-    expected = hmac.new(
-        _admin_signature_secret(),
-        b"admin." + payload_part.encode("ascii"),
-        sha256,
-    ).digest()
-    try:
-        actual = _base64url_decode(signature_part)
-        payload = json.loads(_base64url_decode(payload_part))
-        if payload.get("scope") != "admin" or not payload.get("sid"):
-            return None
-        expires_at = datetime.fromtimestamp(int(payload["exp"]), tz=timezone.utc)
-        auth_time = datetime.fromtimestamp(int(payload["auth_time"]), tz=timezone.utc)
-    except Exception:
-        return None
-    now = datetime.now(timezone.utc)
-    if not hmac.compare_digest(actual, expected) or expires_at <= now:
-        return None
-    if auth_time > now or (now - auth_time) > timedelta(minutes=config.ADMIN_SESSION_MINUTES):
         return None
     return expires_at
 

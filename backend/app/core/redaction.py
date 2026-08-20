@@ -10,7 +10,7 @@ _AUTH_RE = re.compile(
 _BEARER_RE = re.compile(r"(?i)\bbearer\s+[^\s,;\]}]+")
 _CREDENTIAL_RE = re.compile(
     r'''(?ix)
-    (["']?(?:api[_-]?key|access[_-]?key|secret(?:_access_key)?|token|password|passwd|admin[_-]?key)["']?
+    (["']?(?:api[_-]?key|access[_-]?key|secret(?:_access_key)?|token|password|passwd)["']?
     \s*[:=]\s*["']?)
     [^"',;\s}\]]+
     ''',
@@ -30,9 +30,6 @@ _REDACTION_HINTS = (
     "token",
     "password",
     "passwd",
-    "admin_key",
-    "adminkey",
-    "admin-key",
 )
 
 

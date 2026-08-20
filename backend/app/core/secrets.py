@@ -55,7 +55,6 @@ _registry_lock = RLock()
 _registry_generation = 0
 _ACTIVE_SECRET_CONFIG_NAMES = (
     "ACCESS_KEY",
-    "ADMIN_KEY",
     "CDN_SIGNING_SECRET",
     "WEBHOOK_SIGNING_SECRET",
     "DEFAULT_API_KEY",

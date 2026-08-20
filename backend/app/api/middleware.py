@@ -195,23 +195,6 @@ def _error_code_for_status(status_code: int) -> str:
     }.get(status_code, "internal_error" if status_code >= 500 else "request_rejected")
 
 
-def _requires_admin_session(request: Request) -> bool:
-    if (
-        config.ALLOW_UNAUTHENTICATED
-        and not config.ACCESS_KEY
-        and not auth.configured_admin_key()
-    ):
-        return False
-    path = request.url.path
-    if path == "/api/settings/overall-config":
-        return True
-    if path == "/api/prompt/optimizer-system-prompt":
-        return True
-    if path in {"/api/prompt/optimizer-health", "/api/assistant/health"}:
-        return True
-    return path.startswith("/api/settings") and request.method.upper() not in {"GET", "HEAD"}
-
-
 def normalize_origin(value: str | None) -> str | None:
     if not value:
         return None
@@ -511,16 +494,6 @@ def register_middleware(app):
                     401,
                     "authentication_required",
                     "Access key required",
-                )
-
-        if _requires_admin_session(request):
-            admin_token = request.cookies.get(config.ADMIN_COOKIE_NAME)
-            if not auth.verify_admin_token(admin_token):
-                return error_response(
-                    request,
-                    403,
-                    "admin_reauth_required",
-                    "Admin re-authentication required",
                 )
 
         try:

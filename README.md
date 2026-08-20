@@ -242,7 +242,6 @@ Most runtime options live in `.env.example`. API presets, prompt optimizer, R2 b
 | Variable | Purpose |
 | --- | --- |
 | `ACCESS_KEY` | Access gate key. Required unless it is unset and `ALLOW_UNAUTHENTICATED=true`. |
-| `ADMIN_KEY` | Settings management step-up key. Set a distinct value; if omitted it falls back to `ACCESS_KEY` and startup logs a warning. |
 | `DEFAULT_API_URL` | Default upstream API base URL; may omit or include `/v1`. |
 | `DEFAULT_API_KEY` | Default upstream API key. Prefer env refs such as `${OPENAI_API_KEY}` in Web Settings. |
 | `DEFAULT_API_PATH` | `/v1/images/generations`, `/v1/responses`, or `/v1/chat/completions`. |
@@ -308,7 +307,6 @@ Key backend routes:
 | `GET` | `/health` | Health check. |
 | `GET` | `/api/access/status` | Read access state. |
 | `POST` | `/api/access` | Unlock the panel with the access key. |
-| `GET/POST/DELETE` | `/api/access/admin`, `/api/access/admin/status` | Read, unlock, or clear the admin access state used by protected settings. |
 | `GET` | `/api/version`, `/api/version/latest` | Read current version and optional latest release information. |
 | `GET/PUT` | `/api/settings/overall-config` | Read/save Overall Config overrides. |
 | `GET/POST` | `/api/settings` | Read/save active preset, prompt optimizer, R2 backup, proxy, and webhook settings. |
