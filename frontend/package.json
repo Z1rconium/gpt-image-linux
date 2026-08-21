@@ -17,6 +17,7 @@
     "@sveltejs/vite-plugin-svelte": "^5.1.1",
     "@types/node": "^25.6.2",
     "autoprefixer": "^10.4.21",
+    "lucide-svelte": "1.0.1",
     "postcss": "^8.5.25",
     "svelte": "^5.38.0",
     "svelte-check": "^4.3.1",

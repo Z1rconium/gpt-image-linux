@@ -20,10 +20,11 @@
 
   $: promptLen = form.prompt.length;
   $: promptOnlyMode = form.apiPath === '/v1/responses' || form.apiPath === '/v1/chat/completions';
+  $: parameterControlsDisabled = (promptOnlyMode && !hasEditSource) || loading;
   $: modeLabel = form.apiPath === '/v1/chat/completions' ? $t.promptForm.chatCompletionsMode : $t.promptForm.responsesMode;
   $: disabledModeLabel =
     form.apiPath === '/v1/chat/completions' ? $t.promptForm.disabledForChatCompletions : $t.promptForm.disabledForResponses;
-  $: compressionPlaceholder = promptOnlyMode
+  $: compressionPlaceholder = promptOnlyMode && !hasEditSource
     ? disabledModeLabel
     : form.outputFormat === 'png'
       ? $t.promptForm.disabledForPng
@@ -60,7 +61,7 @@
         <button
           type="button"
           disabled={optimizeDisabled}
-          class="control-focus rounded-lg border border-emerald-500/40 px-3 py-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-500/10 disabled:cursor-not-allowed disabled:border-stone-300 disabled:text-stone-400 disabled:opacity-60 dark:text-emerald-200 dark:disabled:border-zinc-700 dark:disabled:text-zinc-500"
+          class="control-focus rounded-lg border border-emerald-500/40 px-3 py-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-500/10 disabled:cursor-not-allowed disabled:border-stone-300 disabled:text-emerald-700 disabled:opacity-60 dark:text-emerald-200 dark:disabled:border-zinc-700 dark:disabled:text-emerald-200"
           title={optimizerEnabled ? $t.promptForm.optimize : $t.promptForm.optimizerUnavailable}
           on:click={onOptimize}
         >
@@ -107,17 +108,17 @@
       <span class="mb-1.5 block text-xs font-medium text-stone-600 dark:text-zinc-400">{$t.common.size}</span>
       <button
         type="button"
-        disabled={promptOnlyMode || loading}
+        disabled={parameterControlsDisabled}
         class="control-focus w-full rounded-lg border border-stone-200 bg-stone-50 px-3 py-2.5 text-left font-mono text-sm text-stone-900 hover:bg-stone-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-100 dark:hover:bg-zinc-900"
         on:click={onOpenSize}
       >
-        {promptOnlyMode ? disabledModeLabel : form.size}
+        {promptOnlyMode && !hasEditSource ? disabledModeLabel : form.size}
       </button>
     </label>
 
     <label class="block">
       <span class="mb-1.5 block text-xs font-medium text-stone-600 dark:text-zinc-400">{$t.promptForm.quality}</span>
-      <select bind:value={form.quality} disabled={promptOnlyMode || loading} class="control-focus form-select focus:border-emerald-500">
+      <select bind:value={form.quality} disabled={parameterControlsDisabled} class="control-focus form-select focus:border-emerald-500">
         <option value="auto">auto</option>
         <option value="low">low</option>
         <option value="medium">medium</option>
@@ -129,7 +130,7 @@
       <span class="mb-1.5 block text-xs font-medium text-stone-600 dark:text-zinc-400">{$t.promptForm.quantity}</span>
       <input
         bind:value={form.quantity}
-        disabled={promptOnlyMode || loading}
+        disabled={parameterControlsDisabled}
         type="text"
         inputmode="numeric"
         pattern="[0-9]*"
@@ -140,7 +141,7 @@
 
     <label class="block">
       <span class="mb-1.5 block text-xs font-medium text-stone-600 dark:text-zinc-400">{$t.promptForm.format}</span>
-      <select bind:value={form.outputFormat} disabled={promptOnlyMode || loading} class="control-focus form-select focus:border-emerald-500">
+      <select bind:value={form.outputFormat} disabled={parameterControlsDisabled} class="control-focus form-select focus:border-emerald-500">
         <option value="png">png</option>
         <option value="jpeg">jpeg</option>
         <option value="webp">webp</option>
@@ -149,12 +150,12 @@
 
     <label class="block">
       <span class="mb-1.5 block text-xs font-medium text-stone-600 dark:text-zinc-400">{$t.promptForm.compression}</span>
-      <input bind:value={form.outputCompression} disabled={promptOnlyMode || loading || form.outputFormat === 'png'} type="number" min="0" max="100" placeholder={compressionPlaceholder} class="control-focus w-full rounded-lg border border-stone-200 bg-stone-50 px-3 py-2.5 text-sm text-stone-900 focus:border-emerald-500 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-100" on:input={clampCompression} />
+      <input bind:value={form.outputCompression} disabled={parameterControlsDisabled || form.outputFormat === 'png'} type="number" min="0" max="100" placeholder={compressionPlaceholder} class="control-focus w-full rounded-lg border border-stone-200 bg-stone-50 px-3 py-2.5 text-sm text-stone-900 focus:border-emerald-500 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-100" on:input={clampCompression} />
     </label>
 
     <label class="block">
       <span class="mb-1.5 block text-xs font-medium text-stone-600 dark:text-zinc-400">{$t.promptForm.responseFormat}</span>
-      <select bind:value={form.responseFormat} disabled={promptOnlyMode || loading} class="control-focus form-select focus:border-emerald-500">
+      <select bind:value={form.responseFormat} disabled={parameterControlsDisabled} class="control-focus form-select focus:border-emerald-500">
         {#each RESPONSE_FORMAT_OPTIONS as responseFormat}
           <option value={responseFormat}>{responseFormat || $t.promptForm.defaultResponseFormat}</option>
         {/each}

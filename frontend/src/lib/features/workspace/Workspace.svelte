@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import AccessGate from '$lib/components/AccessGate.svelte';
   import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
+  import EditGalleryDialog from '$lib/components/EditGalleryDialog.svelte';
   import EditSourcePicker from '$lib/components/EditSourcePicker.svelte';
   import GalleryGrid from '$lib/components/GalleryGrid.svelte';
   import NodeImageResultDialog from '$lib/components/NodeImageResultDialog.svelte';
@@ -32,7 +33,7 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
   import { toastStore, uiStore, type ToastOptions } from '$lib/stores/ui';
   import { versionStore } from '$lib/stores/version';
   import { extractImageFilesFromClipboard } from '$lib/utils/clipboard';
-  import { copyText, displayImageSize, imageUrl } from '$lib/utils/format';
+  import { copyText, imageUrl } from '$lib/utils/format';
   import { canPrefetchNonCritical } from '$lib/utils/network';
   import { buildPromptOptimizeRequest } from '$lib/utils/promptOptimizer';
   import {
@@ -58,6 +59,7 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
   } from '$lib/features/workspace/prompt';
   import { createUrlSyncScheduler, readPageUrl, writePageUrl, type JobsTab } from '$lib/utils/pageUrlSync';
   import {
+    galleryEntryToEditForm,
     galleryEntryToPromptForm,
     galleryEntryToPromptOnly,
     jobToPromptForm,
@@ -69,6 +71,8 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
   let jobsTab: JobsTab = 'running';
   let form: PromptFormState = { ...initialPromptFormState };
   let editPicker: EditSourcePicker;
+  let galleryEditImage: GalleryEntry | null = null;
+  let galleryEditDialogOpen = false;
   let editPreviewUrl = '';
   let editPreviewLabel = '';
   let lastActivePresetId = '';
@@ -260,6 +264,7 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
       $confirmStore.request ||
         $uiStore.editPreviewOpen ||
         $uiStore.sizeDialogOpen ||
+        galleryEditDialogOpen ||
         $uiStore.promptSnippetsOpen ||
         $uiStore.imagePromptOpen ||
         $uiStore.jobsOpen ||
@@ -763,19 +768,50 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
     previewStore.clearPreview(jobsStore.closeActiveJobSource);
   }
 
-  function prepareGalleryImageForEdit(image: GalleryEntry) {
+  function openGalleryEditDialog(image: GalleryEntry) {
+    galleryEditImage = image;
+    galleryEditDialogOpen = true;
+  }
+
+  function closeGalleryEditDialog() {
+    galleryEditDialogOpen = false;
+    galleryEditImage = null;
+  }
+
+  function focusPromptAfterGalleryEdit() {
+    if (typeof window === 'undefined') return;
+    window.setTimeout(() => {
+      const prompt = document.getElementById('prompt');
+      if (!(prompt instanceof HTMLElement)) return;
+      prompt.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      prompt.focus();
+    }, 0);
+  }
+
+  function applyGalleryEditChoice(reusePrompt: boolean) {
+    const image = galleryEditImage;
+    if (!image) return;
     const nextLabel = $t.messages.galleryEditLabel(image.filename);
     if (!editSourceStore.setGallerySource(image.id, nextLabel, imageUrl(image.filename, image.image_url), nextLabel, previewStore.setError)) {
       showToast($t.messages.editSourceLimit(MAX_EDIT_SOURCE_IMAGES), 'error');
+      closeGalleryEditDialog();
       return;
     }
-    form = { ...form, size: displayImageSize(image) };
+    const nextForm = galleryEntryToEditForm(image, lastActivePresetDefaultModel, form.apiPath);
+    form = reusePrompt ? nextForm : { ...nextForm, prompt: '' };
+    closeGalleryEditDialog();
     closeLightbox();
+    focusPromptAfterGalleryEdit();
     showToast($t.messages.galleryImageReady);
   }
 
   function handleEditFile(event: Event) {
     editSourceStore.handleFile(event, previewStore.setError);
+  }
+
+  function handleEditFiles(files: File[]) {
+    const addedCount = editSourceStore.addFiles(files, previewStore.setError);
+    if (addedCount > 0) showToast($t.messages.editSourceFromDropAdded);
   }
 
   async function openEditPreview(sourceId: string) {
@@ -805,6 +841,16 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
     editSourceStore.clear();
     editPicker?.reset();
     closeEditPreview();
+  }
+
+  function removeEditSource(sourceId: string) {
+    const upload = $editSourceStore.files.find((source) => source.id === sourceId);
+    const isGallery = $editSourceStore.selectedGalleryImageId === sourceId;
+    const label = upload?.label || (isGallery ? $editSourceStore.galleryLabel || $editSourceStore.galleryPreviewLabel : '');
+    const previewUrl = upload?.previewUrl || (isGallery ? $editSourceStore.galleryPreviewUrl : '');
+    if (!editSourceStore.remove(sourceId)) return;
+    if (previewUrl && editPreviewUrl === previewUrl) closeEditPreview();
+    showToast($t.messages.editSourceRemoved(label));
   }
 
   async function batchFavoriteGallery(favorite: boolean) {
@@ -1028,6 +1074,7 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
       $uiStore.promptSnippetsOpen ||
       $uiStore.imagePromptOpen ||
       $uiStore.sizeDialogOpen ||
+      galleryEditDialogOpen ||
       Boolean($lightboxStore.image);
 
     const paste = (event: ClipboardEvent) => {
@@ -1235,6 +1282,7 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
               {
                 id: $editSourceStore.selectedGalleryImageId,
                 label: $editSourceStore.galleryLabel || $editSourceStore.galleryPreviewLabel,
+                previewUrl: $editSourceStore.galleryPreviewUrl,
                 kind: 'gallery' as const
               }
             ]
@@ -1242,11 +1290,14 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
         ...$editSourceStore.files.map((source) => ({
           id: source.id,
           label: source.label,
+          previewUrl: source.previewUrl,
           kind: 'upload' as const
         }))
       ]}
       onChange={handleEditFile}
+      onDropFiles={handleEditFiles}
       onPreview={openEditPreview}
+      onRemove={removeEditSource}
       onClear={clearEditSource}
     />
   </PromptForm>
@@ -1297,7 +1348,7 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
     onExport={exportArchive}
     onSync={syncGallery}
     onOpen={openLightbox}
-    onEdit={prepareGalleryImageForEdit}
+    onEdit={openGalleryEditDialog}
     onUsePrompt={useGalleryPrompt}
     onUseAll={useGalleryParams}
     onNodeImageUpload={uploadGalleryImageToNodeImage}
@@ -1337,7 +1388,7 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
   open={Boolean($lightboxStore.image)}
   image={$lightboxStore.image}
   onClose={closeLightbox}
-  onEdit={prepareGalleryImageForEdit}
+  onEdit={openGalleryEditDialog}
   onFavorite={toggleFavorite}
   onDelete={deleteImage}
   onCopyPrompt={copyPrompt}
@@ -1366,6 +1417,13 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
   onClose={closeEditPreview}
 />
 {/if}
+
+<EditGalleryDialog
+  open={galleryEditDialogOpen}
+  image={galleryEditImage}
+  onChoose={applyGalleryEditChoice}
+  onClose={closeGalleryEditDialog}
+/>
 
 {#if $sizePanel.component}
   <svelte:component this={$sizePanel.component} open={$uiStore.sizeDialogOpen} value={form.size} onApply={(nextSize: string) => (form = { ...form, size: nextSize })} onClose={() => closeUiPanel('size', 'sizeDialogOpen')} />

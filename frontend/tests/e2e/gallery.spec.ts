@@ -26,6 +26,9 @@ test('generation, gallery edit source, batch favorite, and lightbox flows work w
   await expect(page.getByRole('img', { name: 'Generated preview' })).toBeVisible();
 
   await page.locator('.gallery-card').first().getByRole('button', { name: 'Edit' }).click();
+  const editDialog = page.getByRole('dialog', { name: 'Edit this image' });
+  await expect(editDialog).toBeVisible();
+  await editDialog.getByRole('button', { name: 'Clear prompt and describe changes', exact: true }).click();
   await expect(page.getByRole('status')).toContainText('Gallery image ready for edits');
   await page.getByRole('textbox', { name: 'Prompt', exact: true }).fill('browser edit prompt');
   await page.getByRole('button', { name: 'Edits' }).click();
@@ -63,6 +66,58 @@ test('generation, gallery edit source, batch favorite, and lightbox flows work w
   await expect(lightbox).toBeVisible();
   await page.keyboard.press('Escape');
   await expect(lightbox).toBeHidden();
+});
+
+test('gallery edit choice loads compatible parameters without changing the active API path', async ({ page }) => {
+  await loadApp(page);
+
+  await page.getByLabel('API path').selectOption('/v1/responses');
+  await page.locator('.gallery-card').first().getByRole('button', { name: 'Edit' }).click();
+  const editDialog = page.getByRole('dialog', { name: 'Edit this image' });
+  await editDialog.getByRole('button', { name: 'Keep original prompt', exact: true }).click();
+
+  await expect(page.getByRole('textbox', { name: 'Prompt', exact: true })).toHaveValue('First gallery image');
+  await expect(page.getByLabel('API path')).toHaveValue('/v1/responses');
+  await expect(page.getByRole('textbox', { name: 'Model' })).toHaveValue('gpt-image-2');
+  const promptForm = page.locator('section.app-surface').first();
+  const sizeButton = promptForm.locator('button').filter({ hasText: '1024x1024' });
+  await expect(sizeButton).toBeEnabled();
+  await expect(promptForm.locator('select').nth(1)).toHaveValue('high');
+  await expect(promptForm.locator('select').nth(2)).toHaveValue('webp');
+  await expect(promptForm.getByLabel('Compression')).toHaveValue('80');
+  await expect(promptForm.getByLabel('Quantity')).toHaveValue('2');
+  await expect(promptForm.locator('select').nth(3)).toHaveValue('url');
+  await expect(page.getByRole('button', { name: 'Preview Gallery: img-1.png' })).toBeVisible();
+});
+
+test('clearing the gallery prompt focuses the prompt field and cancel preserves form state', async ({ page }) => {
+  await loadApp(page);
+
+  const prompt = page.getByRole('textbox', { name: 'Prompt', exact: true });
+  await prompt.fill('keep this prompt');
+  await page.locator('.gallery-card').first().getByRole('button', { name: 'Edit' }).click();
+  const editDialog = page.getByRole('dialog', { name: 'Edit this image' });
+  await editDialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(prompt).toHaveValue('keep this prompt');
+  await expect(page.getByRole('button', { name: 'Preview Gallery: img-1.png' })).toHaveCount(0);
+
+  await page.locator('.gallery-card').first().getByRole('button', { name: 'Edit' }).click();
+  await page.getByRole('dialog', { name: 'Edit this image' }).getByRole('button', { name: 'Clear prompt and describe changes', exact: true }).click();
+  await expect(prompt).toHaveValue('');
+  await expect(prompt).toBeFocused();
+});
+
+test('lightbox edit entry uses the same gallery edit choice flow', async ({ page }) => {
+  await loadApp(page);
+
+  await page.getByRole('img', { name: 'First gallery image' }).click();
+  const lightbox = page.getByRole('dialog', { name: 'Image Details' });
+  await lightbox.getByRole('button', { name: 'Edit', exact: true }).click();
+  const editDialog = page.getByRole('dialog', { name: 'Edit this image' });
+  await editDialog.getByRole('button', { name: 'Keep original prompt', exact: true }).click();
+
+  await expect(lightbox).toBeHidden();
+  await expect(page.getByRole('button', { name: 'Preview Gallery: img-1.png' })).toBeVisible();
 });
 
 test('gallery uploads single and selected images to NodeImage and copies result links', async ({ page, context }) => {

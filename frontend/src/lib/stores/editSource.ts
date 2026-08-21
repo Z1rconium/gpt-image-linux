@@ -141,6 +141,28 @@ function createEditSourceStore() {
         };
       });
     },
+    remove(sourceId: string) {
+      const upload = state.files.find((source) => source.id === sourceId);
+      if (upload) {
+        URL.revokeObjectURL(upload.previewUrl);
+        update((source) => ({
+          ...source,
+          files: source.files.filter((item) => item.id !== sourceId)
+        }));
+        return true;
+      }
+      if (state.selectedGalleryImageId === sourceId) {
+        update((source) => ({
+          ...source,
+          selectedGalleryImageId: '',
+          galleryLabel: '',
+          galleryPreviewUrl: '',
+          galleryPreviewLabel: ''
+        }));
+        return true;
+      }
+      return false;
+    },
     cleanup() {
       revokeEditSourceUrls(state);
     }

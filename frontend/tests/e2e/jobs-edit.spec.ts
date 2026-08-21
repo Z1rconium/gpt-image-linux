@@ -34,6 +34,25 @@ async function dispatchImagePaste(page: Page, targetSelector: string, fileNames:
   );
 }
 
+async function dispatchImageDrop(page: Page, targetSelector: string, files: Array<{ name: string; type: string }>) {
+  return page.evaluate(
+    ({ selector, fileSpecs }) => {
+      const target = document.querySelector(selector);
+      if (!target) throw new Error(`Drop target not found: ${selector}`);
+
+      const dataTransfer = new DataTransfer();
+      fileSpecs.forEach(({ name, type }) => {
+        dataTransfer.items.add(new File(['dropped file'], name, { type }));
+      });
+      ['dragenter', 'dragover'].forEach((type) => {
+        target.dispatchEvent(new DragEvent(type, { dataTransfer, bubbles: true, cancelable: true }));
+      });
+      return target.dispatchEvent(new DragEvent('drop', { dataTransfer, bubbles: true, cancelable: true }));
+    },
+    { selector: targetSelector, fileSpecs: files }
+  );
+}
+
 type EventSourceScenario = {
   globalJobs?: unknown[];
   perJobModes?: Record<string, 'terminal' | 'disconnect' | 'hold' | 'delayed' | 'sequence'>;
@@ -478,11 +497,14 @@ test('uploaded edit sources route to edits and clearing restores generation', as
 
   const upload = page.getByLabel('Upload edit image');
   await upload.setInputFiles([{ name: 'first.png', mimeType: 'image/png', buffer: PNG_BYTES }]);
-  await expect(page.getByRole('button', { name: /Upload · first\.png/ })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Preview first.png' })).toBeVisible();
+  await expect(page.getByText('Reference images 1/16')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Clear edit sources' })).toHaveCount(0);
 
   await upload.setInputFiles([{ name: 'second.png', mimeType: 'image/png', buffer: PNG_BYTES }]);
-  await expect(page.getByRole('button', { name: /Upload · first\.png/ })).toBeVisible();
-  await expect(page.getByRole('button', { name: /Upload · second\.png/ })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Preview first.png' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Preview second.png' })).toBeVisible();
+  await expect(page.getByText('Reference images 2/16')).toBeVisible();
 
   await page.getByRole('textbox', { name: 'Prompt', exact: true }).fill('browser upload edit prompt');
   const editRequestPromise = page.waitForRequest((request) => new URL(request.url()).pathname === '/api/edits');
@@ -494,8 +516,8 @@ test('uploaded edit sources route to edits and clearing restores generation', as
   expect(body).toContain('filename="second.png"');
 
   await page.getByRole('button', { name: 'Clear edit sources' }).click();
-  await expect(page.getByRole('button', { name: /Upload · first\.png/ })).toBeHidden();
-  await expect(page.getByRole('button', { name: /Upload · second\.png/ })).toBeHidden();
+  await expect(page.getByRole('button', { name: 'Preview first.png' })).toBeHidden();
+  await expect(page.getByRole('button', { name: 'Preview second.png' })).toBeHidden();
   await expect(page.getByRole('button', { name: 'Generate', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Edits', exact: true })).toHaveCount(0);
 
@@ -512,19 +534,99 @@ test('uploaded edit sources route to edits and clearing restores generation', as
   expect(submitRequest.postDataJSON()).toMatchObject({ prompt: 'browser upload edit prompt' });
 });
 
+test('reference thumbnails preview and remove one source without changing file order', async ({ page }) => {
+  await loadApp(page);
+
+  await page.getByLabel('Upload edit image').setInputFiles([
+    { name: 'first.png', mimeType: 'image/png', buffer: PNG_BYTES },
+    { name: 'middle.png', mimeType: 'image/png', buffer: PNG_BYTES },
+    { name: 'last-with-a-very-long-reference-image-filename.png', mimeType: 'image/png', buffer: PNG_BYTES }
+  ]);
+  const firstPreview = page.getByRole('button', { name: 'Preview first.png' });
+  await firstPreview.focus();
+  await page.keyboard.press('Enter');
+  await expect(page.getByRole('dialog', { name: 'Edit Source Preview' })).toBeVisible();
+  await page.keyboard.press('Escape');
+
+  const removeMiddle = page.getByRole('button', { name: 'Remove middle.png' });
+  await removeMiddle.focus();
+  await page.keyboard.press('Enter');
+  await expect(page.getByRole('dialog', { name: 'Edit Source Preview' })).toHaveCount(0);
+  await expect(page.getByRole('status')).toContainText('middle.png removed');
+  await expect(page.getByText('Reference images 2/16')).toBeVisible();
+
+  await page.getByRole('textbox', { name: 'Prompt', exact: true }).fill('remove a middle reference');
+  const editRequestPromise = page.waitForRequest((request) => new URL(request.url()).pathname === '/api/edits');
+  await page.getByRole('button', { name: 'Edits' }).click();
+  const body = (await editRequestPromise).postDataBuffer()?.toString('latin1') || '';
+  expect(body).toContain('filename="first.png"');
+  expect(body).not.toContain('filename="middle.png"');
+  expect(body).toContain('filename="last-with-a-very-long-reference-image-filename.png"');
+
+  await page.getByRole('button', { name: 'Remove first.png' }).click();
+  await page.getByRole('button', { name: 'Remove last-with-a-very-long-reference-image-filename.png' }).click();
+  await expect(page.getByRole('button', { name: 'Generate', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Edits', exact: true })).toHaveCount(0);
+});
+
 test('pasted clipboard images become edit sources outside editable controls', async ({ page }) => {
   await loadApp(page);
 
   const bodyPasteDefaultAllowed = await dispatchImagePaste(page, 'body', ['clipboard.png']);
   expect(bodyPasteDefaultAllowed).toBe(false);
-  await expect(page.getByRole('button', { name: /Upload · clipboard\.png/ })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Preview clipboard.png' })).toBeVisible();
   await expect(page.getByRole('status')).toContainText('Reference image added from clipboard');
 
   const prompt = page.getByRole('textbox', { name: 'Prompt', exact: true });
   await prompt.focus();
   const promptPasteDefaultAllowed = await dispatchImagePaste(page, '#prompt', ['prompt.png']);
   expect(promptPasteDefaultAllowed).toBe(true);
-  await expect(page.getByRole('button', { name: /Upload · prompt\.png/ })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Preview prompt.png' })).toHaveCount(0);
+});
+
+test('dragged image files become edit sources and prompt drops remain native', async ({ page }) => {
+  await loadApp(page);
+
+  const dropzone = '[aria-label="Edit image upload area"]';
+  await page.evaluate((selector) => {
+    const target = document.querySelector(selector);
+    if (!target) throw new Error('Drop target not found');
+    const dataTransfer = new DataTransfer();
+    dataTransfer.items.add(new File(['dragging'], 'dragging.png', { type: 'image/png' }));
+    target.dispatchEvent(new DragEvent('dragenter', { dataTransfer, bubbles: true, cancelable: true }));
+    target.dispatchEvent(new DragEvent('dragover', { dataTransfer, bubbles: true, cancelable: true }));
+  }, dropzone);
+  await expect(page.locator(dropzone)).toHaveAttribute('data-dragging', 'true');
+  await expect(page.getByText('Release to add image files')).toBeVisible();
+
+  const defaultAllowed = await dispatchImageDrop(page, dropzone, [{ name: 'dropped.png', type: 'image/png' }]);
+  expect(defaultAllowed).toBe(false);
+  await expect(page.locator(dropzone)).toHaveAttribute('data-dragging', 'false');
+  await expect(page.getByRole('button', { name: 'Preview dropped.png' })).toBeVisible();
+  await expect(page.getByRole('status')).toContainText('Reference image added from drag and drop');
+
+  const prompt = page.getByRole('textbox', { name: 'Prompt', exact: true });
+  const promptDropAllowed = await dispatchImageDrop(page, '#prompt', [{ name: 'prompt-drop.png', type: 'image/png' }]);
+  expect(promptDropAllowed).toBe(true);
+  await expect(page.getByRole('button', { name: 'Preview prompt-drop.png' })).toHaveCount(0);
+});
+
+test('dragging a non-image file reports the existing image validation error', async ({ page }) => {
+  await loadApp(page);
+
+  await dispatchImageDrop(page, '[aria-label="Edit image upload area"]', [{ name: 'notes.txt', type: 'text/plain' }]);
+  await expect(page.getByText('Please upload an image file')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Preview notes.txt' })).toHaveCount(0);
+});
+
+test('dragging past the edit source limit keeps the first 16 files', async ({ page }) => {
+  await loadApp(page);
+
+  const files = Array.from({ length: 17 }, (_, index) => ({ name: `dropped-${index + 1}.png`, type: 'image/png' }));
+  await dispatchImageDrop(page, '[aria-label="Edit image upload area"]', files);
+  await expect(page.getByRole('button', { name: /^Preview dropped-\d+\.png$/ })).toHaveCount(16);
+  await expect(page.getByText('Reference images 16/16')).toBeVisible();
+  await expect(page.getByText('Some selected files were skipped because the edit source limit is 16')).toBeVisible();
 });
 
 test('clipboard paste at the edit source limit reports an error without a success toast', async ({ page }) => {
@@ -532,14 +634,14 @@ test('clipboard paste at the edit source limit reports an error without a succes
 
   const fileNames = Array.from({ length: 16 }, (_, index) => `clipboard-${index + 1}.png`);
   await dispatchImagePaste(page, 'body', fileNames);
-  await expect(page.getByRole('button', { name: /^Upload · clipboard-\d+\.png$/ })).toHaveCount(16);
+  await expect(page.getByRole('button', { name: /^Preview clipboard-\d+\.png$/ })).toHaveCount(16);
   await expect(page.getByRole('status')).toContainText('Reference image added from clipboard');
   await expect(page.getByRole('status')).toHaveCount(0, { timeout: 4_000 });
 
   const fullPasteDefaultAllowed = await dispatchImagePaste(page, 'body', ['clipboard-17.png']);
   expect(fullPasteDefaultAllowed).toBe(false);
   await expect(page.getByText('At most 16 edit source images are supported')).toBeVisible();
-  await expect(page.getByRole('button', { name: /Upload · clipboard-17\.png/ })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Preview clipboard-17.png' })).toHaveCount(0);
   await expect(page.getByRole('status')).toHaveCount(0);
 });
 
@@ -559,8 +661,9 @@ test('gallery edit source can be combined with uploaded references', async ({ pa
 
   await page.getByLabel('Upload edit image').setInputFiles([{ name: 'extra.png', mimeType: 'image/png', buffer: PNG_BYTES }]);
   await page.locator('.gallery-card').first().getByRole('button', { name: 'Edit' }).click();
-  await expect(page.getByRole('button', { name: /Gallery · Gallery: img-1\.png/ })).toBeVisible();
-  await expect(page.getByRole('button', { name: /Upload · extra\.png/ })).toBeVisible();
+  await page.getByRole('dialog', { name: 'Edit this image' }).getByRole('button', { name: 'Keep original prompt', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Preview Gallery: img-1.png' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Preview extra.png' })).toBeVisible();
 
   await page.getByRole('textbox', { name: 'Prompt', exact: true }).fill('browser edit prompt');
   const editRequestPromise = page.waitForRequest((request) => new URL(request.url()).pathname === '/api/edits/from-gallery/img-1');
@@ -568,6 +671,29 @@ test('gallery edit source can be combined with uploaded references', async ({ pa
   const editRequest = await editRequestPromise;
   const body = editRequest.postDataBuffer()?.toString('latin1') || '';
   expect(body).toContain('filename="extra.png"');
+});
+
+test('upload and gallery references can be removed independently', async ({ page }) => {
+  await loadApp(page);
+
+  const upload = page.getByLabel('Upload edit image');
+  await upload.setInputFiles([{ name: 'upload-one.png', mimeType: 'image/png', buffer: PNG_BYTES }]);
+  await page.locator('.gallery-card').first().getByRole('button', { name: 'Edit' }).click();
+  await page.getByRole('dialog', { name: 'Edit this image' }).getByRole('button', { name: 'Keep original prompt', exact: true }).click();
+
+  await page.getByRole('button', { name: 'Remove upload-one.png' }).click();
+  await expect(page.getByRole('button', { name: 'Preview Gallery: img-1.png' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Edits', exact: true })).toBeVisible();
+
+  await upload.setInputFiles([{ name: 'upload-two.png', mimeType: 'image/png', buffer: PNG_BYTES }]);
+  await page.getByRole('button', { name: 'Remove Gallery: img-1.png' }).click();
+  await expect(page.getByRole('button', { name: 'Preview upload-two.png' })).toBeVisible();
+  await page.getByRole('textbox', { name: 'Prompt', exact: true }).fill('keep the upload source');
+  const requestPromise = page.waitForRequest((request) => new URL(request.url()).pathname === '/api/edits');
+  await page.getByRole('button', { name: 'Edits', exact: true }).click();
+  const request = await requestPromise;
+  expect(new URL(request.url()).pathname).toBe('/api/edits');
+  expect(request.postDataBuffer()?.toString('latin1') || '').toContain('filename="upload-two.png"');
 });
 
 test('job drawer open baseline with 500 running rows', async ({ page }) => {

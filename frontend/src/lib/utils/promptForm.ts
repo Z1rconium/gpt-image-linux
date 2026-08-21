@@ -2,6 +2,7 @@ import type { ApiPath, ResponseFormatDefault } from '$lib/api/types/common';
 import type { GalleryEntry } from '$lib/api/types/gallery';
 import type { GenerateJobStatus } from '$lib/api/types/jobs';
 import { DEFAULT_PROMPT_MODEL, DEFAULT_QUANTITY, initialPromptFormState, type PromptFormState } from '$lib/stores/preview';
+import { displayImageSize } from '$lib/utils/format';
 
 const GENERATION_API_PATHS: ApiPath[] = ['/v1/images/generations', '/v1/responses', '/v1/chat/completions'];
 export const RESPONSE_FORMAT_OPTIONS: ResponseFormatDefault[] = ['', 'url', 'b64_json'];
@@ -64,6 +65,25 @@ export function galleryEntryToPromptForm(
     prompt: image.prompt || '',
     apiPath: normalizeApiPath(image.api_path, currentApiPath),
     size: image.size || initialPromptFormState.size,
+    model: image.model || fallbackModel || initialPromptFormState.model,
+    quality: normalizeJobQuality(image.quality),
+    outputFormat: normalizeJobOutputFormat(image.output_format),
+    outputCompression: image.output_compression === null || image.output_compression === undefined ? '' : String(image.output_compression),
+    quantity: clampQuantity(image.n),
+    responseFormat: normalizeJobResponseFormat(image.response_format)
+  };
+}
+
+export function galleryEntryToEditForm(
+  image: GalleryEntry,
+  fallbackModel = DEFAULT_PROMPT_MODEL,
+  currentApiPath: ApiPath = initialPromptFormState.apiPath
+): PromptFormState {
+  const size = image.size || displayImageSize(image);
+  return {
+    prompt: image.prompt || '',
+    apiPath: currentApiPath,
+    size: size === '-' ? initialPromptFormState.size : size,
     model: image.model || fallbackModel || initialPromptFormState.model,
     quality: normalizeJobQuality(image.quality),
     outputFormat: normalizeJobOutputFormat(image.output_format),
