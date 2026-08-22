@@ -164,20 +164,21 @@
 
   </div>
 
-  <div class="mt-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+  <div class="mt-5">
     <slot name="edit-source" />
-    <div class="flex gap-2">
-      <button
-        type="button"
-        disabled={loading || editPlanning || !editPlannerEnabled || !form.prompt.trim()}
-        class="ui-button-secondary px-4"
-        on:click={onPlanEdit}
-      >
-        {editPlanning ? $t.promptForm.planningEdit : $t.promptForm.planEdit}
-      </button>
-      <button type="button" disabled={loading} class="ui-button-primary px-4" on:click={onSubmit}>
-        {hasEditSource ? $t.promptForm.edits : $t.promptForm.generate}
-      </button>
-    </div>
+  </div>
+
+  <div class="mt-5 flex justify-end gap-2">
+    <button
+      type="button"
+      disabled={loading || editPlanning || !editPlannerEnabled || !form.prompt.trim()}
+      class="ui-button-secondary px-4"
+      on:click={onPlanEdit}
+    >
+      {editPlanning ? $t.promptForm.planningEdit : $t.promptForm.planEdit}
+    </button>
+    <button type="button" disabled={loading} class="ui-button-primary px-4" on:click={onSubmit}>
+      {hasEditSource ? $t.promptForm.edits : $t.promptForm.generate}
+    </button>
   </div>
 </section>

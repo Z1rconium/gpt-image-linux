@@ -57,20 +57,24 @@
   }
 </script>
 
-<div
-  class={`min-w-0 rounded-lg border border-dashed p-2 transition-colors ${
-    isDraggingFiles
-      ? 'cursor-copy border-emerald-500 bg-emerald-500/10'
-      : 'border-stone-300 bg-stone-50/60 dark:border-zinc-700 dark:bg-zinc-950/40'
-  }`}
-  data-dragging={isDraggingFiles}
-  role="group"
-  aria-label={$t.promptForm.editSourceDropLabel}
-  on:dragenter={handleDragEnter}
-  on:dragover={handleDragOver}
-  on:dragleave={handleDragLeave}
-  on:drop={handleDrop}
->
+<div>
+  <p class="mb-1.5 text-xs font-medium text-stone-600 dark:text-zinc-400">
+    {$t.promptForm.editSourceDropLabel}
+  </p>
+  <div
+    class={`min-w-0 rounded-lg border-2 border-dashed p-2 transition-colors ${
+      isDraggingFiles
+        ? 'cursor-copy border-emerald-500 bg-emerald-500/10'
+        : 'border-stone-400 bg-stone-50/60 dark:border-zinc-500 dark:bg-zinc-950/40'
+    }`}
+    data-dragging={isDraggingFiles}
+    role="group"
+    aria-label={$t.promptForm.editSourceDropLabel}
+    on:dragenter={handleDragEnter}
+    on:dragover={handleDragOver}
+    on:dragleave={handleDragLeave}
+    on:drop={handleDrop}
+  >
   <input
     bind:this={input}
     type="file"
@@ -145,4 +149,5 @@
       {/each}
     </ul>
   {/if}
+  </div>
 </div>
