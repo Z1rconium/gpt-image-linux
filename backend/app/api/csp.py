@@ -13,6 +13,8 @@ def build_content_security_policy(script_nonce: str | None = None) -> str:
         script_sources.append(nonce_source)
         script_elem_sources.append(nonce_source)
 
+    turnstile = "https://challenges.cloudflare.com"
+
     return "; ".join(
         [
             "default-src 'self'",
@@ -20,14 +22,15 @@ def build_content_security_policy(script_nonce: str | None = None) -> str:
             "object-src 'none'",
             "frame-ancestors 'none'",
             "form-action 'self'",
-            f"script-src {' '.join(script_sources)}",
-            f"script-src-elem {' '.join(script_elem_sources)}",
+            f"script-src {' '.join([*script_sources, turnstile])}",
+            f"script-src-elem {' '.join([*script_elem_sources, turnstile])}",
             "script-src-attr 'none'",
             "style-src 'self'",
             "style-src-attr 'unsafe-inline'",
             "img-src 'self' data: blob:",
             "font-src 'self' data:",
-            "connect-src 'self'",
+            f"connect-src 'self' {turnstile}",
+            f"frame-src {turnstile}",
         ]
     )
 

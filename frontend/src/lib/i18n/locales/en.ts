@@ -95,7 +95,9 @@ const en = {
     placeholder: 'Enter access key',
     unlock: 'Unlock',
     unlocking: 'Unlocking...',
-    required: 'Please enter the access key'
+    required: 'Please enter the access key',
+    turnstileRequired: 'Please complete the human verification first',
+    turnstileUnavailable: 'Human verification failed to load. Refresh the page and try again.'
   },
   settings: {
     title: 'Settings',

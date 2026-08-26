@@ -120,7 +120,7 @@ ACCESS_COOKIE_SECURE=false docker-compose up -d --force-recreate
 
 Open `http://127.0.0.1:9090`.
 
-This local HTTP example requires `ACCESS_COOKIE_SECURE=false`; keep it `true` when serving the panel over HTTPS. By default, `ACCESS_KEY` is required. For local-only testing, unset `ACCESS_KEY` and set `ALLOW_UNAUTHENTICATED=true`; this makes every non-health API route accessible.
+This local HTTP example requires `ACCESS_COOKIE_SECURE=false`; keep it `true` when serving the panel over HTTPS. By default, `ACCESS_KEY` is required. For local-only testing, unset `ACCESS_KEY` and set `ALLOW_UNAUTHENTICATED=true`; this makes every non-health API route accessible. To additionally protect the unlock flow with Cloudflare Turnstile, set `TURNSTILE_ENABLED=true` plus your `TURNSTILE_SITE_KEY` / `TURNSTILE_SECRET_KEY` from the Cloudflare dashboard; the verification widget then appears below the Unlock button and a valid token is required for every access-key login.
 
 ### Docker
 
@@ -242,6 +242,7 @@ Most runtime options live in `.env.example`. API presets, prompt optimizer, R2 b
 | Variable | Purpose |
 | --- | --- |
 | `ACCESS_KEY` | Access gate key. Required unless it is unset and `ALLOW_UNAUTHENTICATED=true`. |
+| `TURNSTILE_ENABLED` / `TURNSTILE_SITE_KEY` / `TURNSTILE_SECRET_KEY` | Optional Cloudflare Turnstile human verification on the access gate. When enabled, unlocking requires a valid Turnstile token in addition to `ACCESS_KEY`; the site key is exposed via `/api/access/status` for the login widget. |
 | `DEFAULT_API_URL` | Default upstream API base URL; may omit or include `/v1`. |
 | `DEFAULT_API_KEY` | Default upstream API key. Prefer env refs such as `${OPENAI_API_KEY}` in Web Settings. |
 | `DEFAULT_API_PATH` | `/v1/images/generations`, `/v1/responses`, or `/v1/chat/completions`. |

@@ -1,3 +1,9 @@
+import urllib.parse
+
+import httpx
+
+from backend.app.integrations import turnstile as turnstile_client
+from backend.app.integrations.turnstile import TurnstileVerification
 from backend.tests.support.contract import *  # noqa: F403
 
 def test_health_and_version(client):
@@ -99,7 +105,9 @@ def test_frontend_index_uses_csp_nonce(tmp_path, monkeypatch):
     nonce = re.search(r'<script nonce="([^"]+)">', resp.text).group(1)
     csp = resp.headers["content-security-policy"]
     assert f"'nonce-{nonce}'" in csp
-    assert f"script-src-elem 'self' 'nonce-{nonce}'" in csp
+    assert (
+        f"script-src-elem 'self' 'nonce-{nonce}' https://challenges.cloudflare.com" in csp
+    )
     assert "script-src-attr 'none'" in csp
     assert "'unsafe-inline'" not in csp.split("script-src-elem", 1)[1].split(";", 1)[0]
     assert "style-src 'self'" in csp
@@ -138,6 +146,129 @@ def test_access_cookie_and_status(tmp_path):
 
         version_after_unlock = client.get("/api/version")
         assert version_after_unlock.status_code == 200
+
+
+def test_access_turnstile_disabled_reports_off_and_unlocks_without_token(tmp_path):
+    _configure_runtime(tmp_path, access_key="secret", allow_unauthenticated=False)
+    with _test_client() as client:
+        status = client.get("/api/access/status")
+        assert status.status_code == 200
+        body = status.json()
+        assert body["turnstile_enabled"] is False
+        assert body["turnstile_site_key"] is None
+
+        unlocked = client.post("/api/access", json={"access_key": "secret"})
+        assert unlocked.status_code == 200
+        assert unlocked.json()["authenticated"] is True
+
+
+def test_access_turnstile_enabled_requires_valid_token(tmp_path, monkeypatch):
+    _configure_runtime(tmp_path, access_key="secret", allow_unauthenticated=False)
+    monkeypatch.setattr(config, "TURNSTILE_ENABLED", True)
+    monkeypatch.setattr(config, "TURNSTILE_SITE_KEY", "test-site-key")
+    monkeypatch.setattr(config, "TURNSTILE_SECRET_KEY", "test-secret-key")
+
+    with _test_client() as client:
+        status = client.get("/api/access/status")
+        assert status.status_code == 200
+        body = status.json()
+        assert body["turnstile_enabled"] is True
+        assert body["turnstile_site_key"] == "test-site-key"
+
+        missing = client.post("/api/access", json={"access_key": "secret"})
+        assert missing.status_code == 400
+        assert missing.json()["detail"] == "Human verification required"
+
+        async def failing_verify(token: str, client_ip: str | None = None):
+            return TurnstileVerification(ok=False, error_codes=("invalid-input-response",))
+
+        monkeypatch.setattr(access_router, "verify_turnstile_token", failing_verify)
+        rejected = client.post(
+            "/api/access",
+            json={"access_key": "secret", "turnstile_token": "bad-token"},
+        )
+        assert rejected.status_code == 401
+        assert rejected.json()["detail"] == "Human verification failed"
+
+        seen_tokens = []
+
+        async def passing_verify(token: str, client_ip: str | None = None):
+            seen_tokens.append(token)
+            return TurnstileVerification(ok=True)
+
+        monkeypatch.setattr(access_router, "verify_turnstile_token", passing_verify)
+        ok = client.post(
+            "/api/access",
+            json={"access_key": "secret", "turnstile_token": "good-token"},
+        )
+        assert ok.status_code == 200
+        assert ok.json()["authenticated"] is True
+        assert "gpt_image_access=" in ok.headers["set-cookie"]
+        assert seen_tokens == ["good-token"]
+
+
+def test_turnstile_verify_sends_secret_response_and_remoteip(monkeypatch):
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        form = urllib.parse.parse_qs(request.content.decode())
+        captured.update({key: values[0] for key, values in form.items()})
+        return httpx.Response(200, json={"success": True})
+
+    real_client = httpx.AsyncClient
+
+    def fake_async_client(**kwargs):
+        kwargs.pop("transport", None)
+        return real_client(transport=httpx.MockTransport(handler), **kwargs)
+
+    monkeypatch.setattr(turnstile_client, "httpx", types.SimpleNamespace(AsyncClient=fake_async_client))
+    monkeypatch.setattr(config, "TURNSTILE_SECRET_KEY", "unit-secret")
+
+    result = asyncio.run(turnstile_client.verify_turnstile_token("unit-token", "203.0.113.7"))
+
+    assert result.ok is True
+    assert result.error_codes == ()
+    assert captured["secret"] == "unit-secret"
+    assert captured["response"] == "unit-token"
+    assert captured["remoteip"] == "203.0.113.7"
+
+
+def test_turnstile_verify_failure_payload_reports_error_codes(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"success": False, "error-codes": ["invalid-input-response"]},
+        )
+
+    real_client = httpx.AsyncClient
+
+    def fake_async_client(**kwargs):
+        kwargs.pop("transport", None)
+        return real_client(transport=httpx.MockTransport(handler), **kwargs)
+
+    monkeypatch.setattr(turnstile_client, "httpx", types.SimpleNamespace(AsyncClient=fake_async_client))
+
+    result = asyncio.run(turnstile_client.verify_turnstile_token("bad"))
+
+    assert result.ok is False
+    assert result.error_codes == ("invalid-input-response",)
+
+
+def test_turnstile_verify_network_error_is_rejected(monkeypatch):
+    def failing_async_client(*args, **kwargs):
+        raise OSError("network unreachable")
+
+    monkeypatch.setattr(
+        turnstile_client,
+        "httpx",
+        types.SimpleNamespace(AsyncClient=failing_async_client, HTTPError=httpx.HTTPError),
+    )
+
+    result = asyncio.run(turnstile_client.verify_turnstile_token("tok"))
+
+    assert result.ok is False
+    assert len(result.error_codes) == 1
+    assert result.error_codes[0].startswith("verification_request_failed:")
 
 
 def test_access_unlock_allows_settings_read_and_write_without_step_up(tmp_path):

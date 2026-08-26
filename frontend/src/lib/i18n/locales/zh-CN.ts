@@ -97,7 +97,9 @@ const zh: Translation = {
     placeholder: '输入访问密钥',
     unlock: '解锁',
     unlocking: '解锁中...',
-    required: '请输入访问密钥'
+    required: '请输入访问密钥',
+    turnstileRequired: '请先完成人机验证',
+    turnstileUnavailable: '人机验证组件加载失败，请刷新页面后重试。'
   },
   settings: {
     title: '设置',

@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException, Request, Response
 
 from ...core import security as auth
 from ...core import settings as config
+from ...integrations.turnstile import turnstile_active, verify_turnstile_token
 from ...repositories.coordination import (
     clear_access_failure,
     get_access_lockout,
@@ -28,6 +29,8 @@ async def get_access_status(request: Request):
     return AccessStatusResponse(
         authenticated=bool(expires_at),
         expires_at=expires_at.isoformat() if expires_at else None,
+        turnstile_enabled=turnstile_active(),
+        turnstile_site_key=config.TURNSTILE_SITE_KEY if turnstile_active() else None,
     )
 
 
@@ -49,6 +52,24 @@ async def unlock_access(req: AccessRequest, request: Request, response: Response
             status_code=429,
             detail=f"Too many failed attempts. Try again in {remaining} seconds.",
         )
+
+    if turnstile_active():
+        token = req.turnstile_token.strip()
+        if not token:
+            raise HTTPException(
+                status_code=400,
+                detail="Human verification required",
+            )
+        verification = await verify_turnstile_token(token, client_ip)
+        if not verification.ok:
+            await run_db_operation(
+                record_access_failure,
+                client_ip,
+                lockout_seconds=config.ACCESS_LOCKOUT_SECONDS,
+                max_entries=_ACCESS_FAILURES_MAX_SIZE,
+                metric_name="record_access_failure",
+            )
+            raise HTTPException(status_code=401, detail="Human verification failed")
 
     if not hmac.compare_digest(req.access_key, config.ACCESS_KEY):
         await run_db_operation(

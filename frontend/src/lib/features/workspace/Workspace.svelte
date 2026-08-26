@@ -1156,7 +1156,14 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
 
 <a class="skip-link control-focus" href="#main-content">{$t.common.skipToMain}</a>
 
-<AccessGate visible={$accessStore.gateVisible} error={$accessStore.error} loading={$accessStore.loading} onUnlock={(key) => accessStore.unlockAccess(key, loadAuthenticatedData)} />
+<AccessGate
+  visible={$accessStore.gateVisible}
+  error={$accessStore.error}
+  loading={$accessStore.loading}
+  turnstileEnabled={$accessStore.turnstileEnabled}
+  turnstileSiteKey={$accessStore.turnstileSiteKey}
+  onUnlock={(key, token) => accessStore.unlockAccess(key, token, loadAuthenticatedData)}
+/>
 <Header
   version={$versionStore.version}
   latestVersion={$versionStore.latestVersion}
