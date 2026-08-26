@@ -1,6 +1,5 @@
 import { get } from 'svelte/store';
 import { apiFetch } from '$lib/api/client';
-import { openJsonEventSource } from '$lib/api/events';
 import { t } from '$lib/i18n';
 import { confirmStore } from '$lib/stores/confirm';
 import type { ToastOptions, ToastVariant } from '$lib/stores/ui';
@@ -18,9 +17,9 @@ import type {
 } from '$lib/api/types/gallery';
 import type { GalleryLoadOptions, GalleryNavigation, GalleryOperationStatus, GalleryState } from '$lib/stores/gallery';
 import { nodeImageResult, type NodeImageResultItem } from '$lib/stores/nodeImage';
+import { abortError, waitForGalleryJob } from '$lib/stores/galleryJobEvents';
 
 const STREAMING_ZIP_DOWNLOAD_BYTES_THRESHOLD = 64 * 1024 * 1024;
-const GALLERY_JOB_EVENT_NETWORK_TIMEOUT_MS = 30_000;
 const NODE_IMAGE_CANCEL_POLL_INTERVAL_MS = 250;
 const NODE_IMAGE_UPLOAD_TERMINAL_STATUSES = ['success', 'partial_failure', 'cancelled', 'error'];
 
@@ -37,14 +36,6 @@ export type GalleryActionDeps = {
   setOperationStatus: (operationStatus: GalleryOperationStatus | null) => void;
   clearPendingSingleDeletes: () => void;
   registerAbortController: (controller: AbortController) => () => void;
-};
-
-export type GalleryWaitOptions = {
-  eventsUrl: string;
-  eventNames: string[];
-  signal?: AbortSignal;
-  terminalStatuses?: string[];
-  resolveErrorStatuses?: boolean;
 };
 
 function downloadBlob(blob: Blob, filename: string) {
@@ -197,10 +188,6 @@ async function refreshGalleryPageBestEffort(
   }
 }
 
-function abortError() {
-  return new DOMException('Gallery operation cancelled', 'AbortError');
-}
-
 function waitForAbortableDelay(delayMs: number, signal?: AbortSignal) {
   return new Promise<void>((resolve, reject) => {
     if (signal?.aborted) {
@@ -221,74 +208,6 @@ function waitForAbortableDelay(delayMs: number, signal?: AbortSignal) {
 
 function isAbortError(error: unknown) {
   return error instanceof Error && error.name === 'AbortError';
-}
-
-function networkTimeoutError() {
-  return new Error(get(t).messages.requestFailed);
-}
-
-export function waitForGalleryJob<T extends { status: string; error?: string | null; message?: string | null }>(
-  options: GalleryWaitOptions,
-  onJob: (job: T) => void
-): Promise<T> {
-  return new Promise((resolve, reject) => {
-    const terminalStatuses = new Set(options.terminalStatuses || ['success', 'error']);
-    let settled = false;
-    let source: EventSource | null = null;
-    let networkTimer: ReturnType<typeof setTimeout> | null = null;
-
-    const clearNetworkTimer = () => {
-      if (networkTimer) clearTimeout(networkTimer);
-      networkTimer = null;
-    };
-
-    const settle = (callback: () => void) => {
-      if (settled) return;
-      settled = true;
-      clearNetworkTimer();
-      source?.close();
-      options.signal?.removeEventListener('abort', handleAbort);
-      callback();
-    };
-
-    const handleAbort = () => {
-      settle(() => reject(abortError()));
-    };
-
-    if (options.signal?.aborted) {
-      reject(abortError());
-      return;
-    }
-
-    options.signal?.addEventListener('abort', handleAbort, { once: true });
-    source = openJsonEventSource<T>(
-      options.eventsUrl,
-      {
-        onEvent: ({ data }) => {
-          clearNetworkTimer();
-          onJob(data);
-          if (terminalStatuses.has(data.status) && (data.status !== 'error' || options.resolveErrorStatuses)) {
-            settle(() => resolve(data));
-          } else if (data.status === 'error') {
-            settle(() => reject(new Error(data.error || data.message || get(t).messages.requestFailed)));
-          }
-        },
-        onNetworkError: () => {
-          if (settled || networkTimer) return;
-          networkTimer = setTimeout(() => {
-            settle(() => reject(networkTimeoutError()));
-          }, GALLERY_JOB_EVENT_NETWORK_TIMEOUT_MS);
-        },
-        onError: (error) => {
-          settle(() => reject(error instanceof Error ? error : new Error(get(t).messages.requestFailed)));
-        }
-      },
-      options.eventNames
-    );
-    source.onopen = () => {
-      clearNetworkTimer();
-    };
-  });
 }
 
 function waitForGalleryExportJob(

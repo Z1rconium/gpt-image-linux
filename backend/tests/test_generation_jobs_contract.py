@@ -1675,3 +1675,56 @@ def test_chat_completions_request_uses_prompt_and_model(tmp_path):
         "messages": [{"role": "user", "content": "hello"}],
         "stream": False,
     }
+
+
+def test_background_auto_omitted_from_upstream_params(tmp_path):
+    """background='auto' (default) should not be forwarded to upstream."""
+    _configure_runtime(tmp_path)
+    from backend.app.integrations.upstream import generation as upstream_client_module
+    from backend.app.schemas.generation import GenerateRequest
+
+    payload = GenerateRequest(prompt="test", background="auto")
+    request_data = upstream_client_module._build_image_params(payload)
+
+    assert "background" not in request_data
+
+
+def test_background_transparent_forwarded_to_upstream_params(tmp_path):
+    """background='transparent' should be forwarded to upstream."""
+    _configure_runtime(tmp_path)
+    from backend.app.integrations.upstream import generation as upstream_client_module
+    from backend.app.schemas.generation import GenerateRequest
+
+    payload = GenerateRequest(prompt="test", output_format="png", background="transparent")
+    request_data = upstream_client_module._build_image_params(payload)
+
+    assert request_data["background"] == "transparent"
+
+
+def test_background_opaque_forwarded_to_upstream_params(tmp_path):
+    """background='opaque' should be forwarded to upstream."""
+    _configure_runtime(tmp_path)
+    from backend.app.integrations.upstream import generation as upstream_client_module
+    from backend.app.schemas.generation import GenerateRequest
+
+    payload = GenerateRequest(prompt="test", background="opaque")
+    request_data = upstream_client_module._build_image_params(payload)
+
+    assert request_data["background"] == "opaque"
+
+
+def test_background_transparent_with_jpeg_forces_png(tmp_path):
+    """background='transparent' + output_format='jpeg' should be coerced to 'png'."""
+    _configure_runtime(tmp_path)
+    from backend.app.schemas.generation import GenerateRequest
+
+    payload = GenerateRequest(
+        prompt="test",
+        output_format="jpeg",
+        output_compression=80,
+        background="transparent",
+    )
+
+    assert payload.output_format == "png"
+    assert payload.output_compression is None
+    assert payload.background == "transparent"

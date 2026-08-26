@@ -41,6 +41,7 @@
   }
 
   $: if (form.outputFormat === 'png' && form.outputCompression !== '') form = { ...form, outputCompression: '' };
+  $: if (form.background === 'transparent' && form.outputFormat === 'jpeg') form = { ...form, outputFormat: 'png', outputCompression: '' };
 </script>
 
 <section class="app-surface p-4 sm:p-5">
@@ -89,96 +90,155 @@
     <PromptHelperPanel onAppend={onAppendPromptTag} />
   </div>
 
-  <div class="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-    <label class="block">
-      <span class="mb-1.5 block text-xs font-medium text-stone-600 dark:text-zinc-400">{$t.promptForm.apiPath}</span>
-      <select bind:value={form.apiPath} disabled={loading} class="control-focus form-select font-mono focus:border-emerald-500">
-        <option value="/v1/images/generations">/v1/images/generations</option>
-        <option value="/v1/responses">/v1/responses</option>
-        <option value="/v1/chat/completions">/v1/chat/completions</option>
-      </select>
-    </label>
+  <!-- Parameters Section: Grouped for Visual Balance & Clarity -->
+  <div class="mt-5 space-y-3">
+    <!-- Block 1: Core Generation Parameters (4 columns, balanced 100%) -->
+    <div class="rounded-xl border border-stone-200/80 bg-stone-50/50 p-3.5 dark:border-zinc-800/80 dark:bg-zinc-950/40">
+      <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <label class="block">
+          <span class="mb-1.5 block text-xs font-medium text-stone-600 dark:text-zinc-400">{$t.common.model}</span>
+          <input
+            bind:value={form.model}
+            disabled={loading}
+            class="control-focus h-10 w-full rounded-lg border border-stone-200 bg-white px-3 font-mono text-sm text-stone-900 focus:border-emerald-500 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-100"
+          />
+        </label>
 
-    <label class="block">
-      <span class="mb-1.5 block text-xs font-medium text-stone-600 dark:text-zinc-400">{$t.common.model}</span>
-      <input bind:value={form.model} class="control-focus w-full rounded-lg border border-stone-200 bg-stone-50 px-3 py-2.5 font-mono text-sm text-stone-900 focus:border-emerald-500 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-100" />
-    </label>
+        <label class="block">
+          <span class="mb-1.5 block text-xs font-medium text-stone-600 dark:text-zinc-400">{$t.common.size}</span>
+          <button
+            type="button"
+            disabled={parameterControlsDisabled}
+            class="control-focus flex h-10 w-full items-center justify-between rounded-lg border border-stone-200 bg-white px-3 text-left font-mono text-sm text-stone-900 hover:bg-stone-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-100 dark:hover:bg-zinc-800"
+            on:click={onOpenSize}
+          >
+            <span class="truncate">{promptOnlyMode && !hasEditSource ? disabledModeLabel : form.size}</span>
+            <span class="ml-1 text-xs text-stone-400 dark:text-zinc-500">⚙</span>
+          </button>
+        </label>
 
-    <label class="block">
-      <span class="mb-1.5 block text-xs font-medium text-stone-600 dark:text-zinc-400">{$t.common.size}</span>
-      <button
-        type="button"
-        disabled={parameterControlsDisabled}
-        class="control-focus w-full rounded-lg border border-stone-200 bg-stone-50 px-3 py-2.5 text-left font-mono text-sm text-stone-900 hover:bg-stone-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-100 dark:hover:bg-zinc-900"
-        on:click={onOpenSize}
-      >
-        {promptOnlyMode && !hasEditSource ? disabledModeLabel : form.size}
-      </button>
-    </label>
+        <label class="block">
+          <span class="mb-1.5 block text-xs font-medium text-stone-600 dark:text-zinc-400">{$t.promptForm.quality}</span>
+          <select bind:value={form.quality} disabled={parameterControlsDisabled} class="control-focus form-select !bg-white focus:border-emerald-500 dark:!bg-zinc-900">
+            <option value="auto">auto</option>
+            <option value="low">low</option>
+            <option value="medium">medium</option>
+            <option value="high">high</option>
+          </select>
+        </label>
 
-    <label class="block">
-      <span class="mb-1.5 block text-xs font-medium text-stone-600 dark:text-zinc-400">{$t.promptForm.quality}</span>
-      <select bind:value={form.quality} disabled={parameterControlsDisabled} class="control-focus form-select focus:border-emerald-500">
-        <option value="auto">auto</option>
-        <option value="low">low</option>
-        <option value="medium">medium</option>
-        <option value="high">high</option>
-      </select>
-    </label>
+        <label class="block">
+          <span class="mb-1.5 block text-xs font-medium text-stone-600 dark:text-zinc-400">{$t.promptForm.quantity}</span>
+          <input
+            bind:value={form.quantity}
+            disabled={parameterControlsDisabled}
+            type="text"
+            inputmode="numeric"
+            pattern="[0-9]*"
+            class="control-focus h-10 w-full rounded-lg border border-stone-200 bg-white px-3 text-sm text-stone-900 focus:border-emerald-500 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-100"
+            on:input={handleQuantityInput}
+          />
+        </label>
+      </div>
+    </div>
 
-    <label class="block">
-      <span class="mb-1.5 block text-xs font-medium text-stone-600 dark:text-zinc-400">{$t.promptForm.quantity}</span>
-      <input
-        bind:value={form.quantity}
-        disabled={parameterControlsDisabled}
-        type="text"
-        inputmode="numeric"
-        pattern="[0-9]*"
-        class="control-focus w-full rounded-lg border border-stone-200 bg-stone-50 px-3 py-2.5 text-sm text-stone-900 focus:border-emerald-500 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-100"
-        on:input={handleQuantityInput}
-      />
-    </label>
+    <!-- Block 2: Output Style & Protocol Dual Cards (7:5 split on desktop, balanced and aligned) -->
+    <div class="grid gap-3 lg:grid-cols-12">
+      <!-- Output Settings (3 columns: Format, Compression, Background) -->
+      <div class="rounded-xl border border-stone-200/80 bg-stone-50/50 p-3.5 lg:col-span-7 dark:border-zinc-800/80 dark:bg-zinc-950/40">
+        <div class="grid gap-3 sm:grid-cols-3">
+          <label class="block">
+            <span class="mb-1.5 block text-xs font-medium text-stone-600 dark:text-zinc-400">{$t.promptForm.format}</span>
+            <select bind:value={form.outputFormat} disabled={parameterControlsDisabled} class="control-focus form-select !bg-white focus:border-emerald-500 dark:!bg-zinc-900">
+              <option value="png">png</option>
+              <option value="jpeg">jpeg</option>
+              <option value="webp">webp</option>
+            </select>
+          </label>
 
-    <label class="block">
-      <span class="mb-1.5 block text-xs font-medium text-stone-600 dark:text-zinc-400">{$t.promptForm.format}</span>
-      <select bind:value={form.outputFormat} disabled={parameterControlsDisabled} class="control-focus form-select focus:border-emerald-500">
-        <option value="png">png</option>
-        <option value="jpeg">jpeg</option>
-        <option value="webp">webp</option>
-      </select>
-    </label>
+          <label class="block">
+            <span class="mb-1.5 block text-xs font-medium text-stone-600 dark:text-zinc-400">{$t.promptForm.compression}</span>
+            <input
+              bind:value={form.outputCompression}
+              disabled={parameterControlsDisabled || form.outputFormat === 'png'}
+              type="number"
+              min="0"
+              max="100"
+              placeholder={compressionPlaceholder}
+              class="control-focus h-10 w-full rounded-lg border border-stone-200 bg-white px-3 text-sm text-stone-900 focus:border-emerald-500 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-100"
+              on:input={clampCompression}
+            />
+          </label>
 
-    <label class="block">
-      <span class="mb-1.5 block text-xs font-medium text-stone-600 dark:text-zinc-400">{$t.promptForm.compression}</span>
-      <input bind:value={form.outputCompression} disabled={parameterControlsDisabled || form.outputFormat === 'png'} type="number" min="0" max="100" placeholder={compressionPlaceholder} class="control-focus w-full rounded-lg border border-stone-200 bg-stone-50 px-3 py-2.5 text-sm text-stone-900 focus:border-emerald-500 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-100" on:input={clampCompression} />
-    </label>
+          <label class="block">
+            <span class="mb-1.5 block text-xs font-medium text-stone-600 dark:text-zinc-400">{$t.promptForm.background}</span>
+            <select bind:value={form.background} disabled={parameterControlsDisabled} class="control-focus form-select !bg-white focus:border-emerald-500 dark:!bg-zinc-900">
+              <option value="auto">{$t.promptForm.backgroundAuto}</option>
+              <option value="opaque">{$t.promptForm.backgroundOpaque}</option>
+              <option value="transparent">{$t.promptForm.backgroundTransparent}</option>
+            </select>
+            {#if form.background === 'transparent' && form.outputFormat === 'jpeg'}
+              <p class="mt-1 text-xs text-amber-600 dark:text-amber-400">{$t.promptForm.backgroundTransparentNote}</p>
+            {/if}
+          </label>
+        </div>
+      </div>
 
-    <label class="block">
-      <span class="mb-1.5 block text-xs font-medium text-stone-600 dark:text-zinc-400">{$t.promptForm.responseFormat}</span>
-      <select bind:value={form.responseFormat} disabled={parameterControlsDisabled} class="control-focus form-select focus:border-emerald-500">
-        {#each RESPONSE_FORMAT_OPTIONS as responseFormat}
-          <option value={responseFormat}>{responseFormat || $t.promptForm.defaultResponseFormat}</option>
-        {/each}
-      </select>
-    </label>
+      <!-- Protocol Settings (2 columns: API Path, Response Format) -->
+      <div class="rounded-xl border border-stone-200/80 bg-stone-50/50 p-3.5 lg:col-span-5 dark:border-zinc-800/80 dark:bg-zinc-950/40">
+        <div class="grid gap-3 sm:grid-cols-2">
+          <label class="block">
+            <span class="mb-1.5 block text-xs font-medium text-stone-600 dark:text-zinc-400">{$t.promptForm.apiPath}</span>
+            <select bind:value={form.apiPath} disabled={loading} class="control-focus form-select !bg-white font-mono focus:border-emerald-500 dark:!bg-zinc-900">
+              <option value="/v1/images/generations">/v1/images/generations</option>
+              <option value="/v1/responses">/v1/responses</option>
+              <option value="/v1/chat/completions">/v1/chat/completions</option>
+            </select>
+          </label>
 
+          <label class="block">
+            <span class="mb-1.5 block text-xs font-medium text-stone-600 dark:text-zinc-400">{$t.promptForm.responseFormat}</span>
+            <select bind:value={form.responseFormat} disabled={parameterControlsDisabled} class="control-focus form-select !bg-white focus:border-emerald-500 dark:!bg-zinc-900">
+              {#each RESPONSE_FORMAT_OPTIONS as responseFormat}
+                <option value={responseFormat}>{responseFormat || $t.promptForm.defaultResponseFormat}</option>
+              {/each}
+            </select>
+          </label>
+        </div>
+      </div>
+    </div>
   </div>
 
-  <div class="mt-5">
+  <div class="mt-4">
     <slot name="edit-source" />
   </div>
 
-  <div class="mt-5 flex justify-end gap-2">
-    <button
-      type="button"
-      disabled={loading || editPlanning || !editPlannerEnabled || !form.prompt.trim()}
-      class="ui-button-secondary px-4"
-      on:click={onPlanEdit}
-    >
-      {editPlanning ? $t.promptForm.planningEdit : $t.promptForm.planEdit}
-    </button>
-    <button type="button" disabled={loading} class="ui-button-primary px-4" on:click={onSubmit}>
-      {hasEditSource ? $t.promptForm.edits : $t.promptForm.generate}
-    </button>
+  <div class="mt-5 flex flex-wrap items-center justify-between gap-3 border-t border-stone-200/80 pt-4 dark:border-zinc-800/80">
+    <div class="flex items-center gap-2 text-xs text-stone-500 dark:text-zinc-400">
+      {#if hasEditSource}
+        <span class="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/10 px-2.5 py-1 font-medium text-emerald-700 dark:text-emerald-300">
+          <span class="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
+          {$t.promptForm.edits}
+        </span>
+      {:else}
+        <span class="inline-flex items-center gap-1.5 rounded-full bg-stone-200/60 px-2.5 py-1 font-medium text-stone-600 dark:bg-zinc-800/80 dark:text-zinc-300">
+          {$t.promptForm.generate}
+        </span>
+      {/if}
+    </div>
+
+    <div class="flex items-center gap-2">
+      <button
+        type="button"
+        disabled={loading || editPlanning || !editPlannerEnabled || !form.prompt.trim()}
+        class="ui-button-secondary px-4"
+        on:click={onPlanEdit}
+      >
+        {editPlanning ? $t.promptForm.planningEdit : $t.promptForm.planEdit}
+      </button>
+      <button type="button" disabled={loading} class="ui-button-primary px-5 font-semibold shadow-sm" on:click={onSubmit}>
+        {hasEditSource ? $t.promptForm.edits : $t.promptForm.generate}
+      </button>
+    </div>
   </div>
 </section>

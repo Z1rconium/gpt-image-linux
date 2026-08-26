@@ -22,6 +22,7 @@ export type PromptFormState = {
   model: string;
   quality: GenerateRequestBody['quality'];
   outputFormat: GenerateRequestBody['output_format'];
+  background: 'auto' | 'opaque' | 'transparent';
   outputCompression: string;
   quantity: number | string;
   responseFormat: ResponseFormatDefault;
@@ -47,6 +48,7 @@ export const initialPromptFormState: PromptFormState = {
   model: DEFAULT_PROMPT_MODEL,
   quality: 'auto',
   outputFormat: 'png',
+  background: 'auto',
   outputCompression: '',
   quantity: DEFAULT_QUANTITY,
   responseFormat: 'url'
@@ -62,12 +64,18 @@ function buildRequestBody(form: PromptFormState): GenerateRequestBody {
     quality: form.quality,
     output_format: form.outputFormat,
     output_compression: null,
+    background: form.background,
     response_format: form.responseFormat ? (form.responseFormat as 'url' | 'b64_json') : null,
     api_path: form.apiPath
   };
 
   if (form.outputFormat !== 'png' && form.outputCompression !== '') {
     body.output_compression = Math.min(Math.max(Number(form.outputCompression), 0), 100);
+  }
+
+  if (body.background === 'transparent' && body.output_format === 'jpeg') {
+    body.output_format = 'png';
+    body.output_compression = null;
   }
 
   return body;
@@ -197,6 +205,7 @@ function createPreviewStore() {
       quantity: lastRequest.n,
       quality: lastRequest.quality,
       outputFormat: lastRequest.output_format,
+      background: (lastRequest.background as PromptFormState['background']) ?? 'auto',
       outputCompression: lastRequest.output_compression === null || lastRequest.output_compression === undefined ? '' : String(lastRequest.output_compression),
       responseFormat: lastRequest.response_format || ''
     });

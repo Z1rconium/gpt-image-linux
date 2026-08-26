@@ -87,6 +87,24 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
   const handledTerminalJobIds = new Set<string>();
   const panelFocusTargets: Partial<Record<LazyPanel, HTMLElement>> = {};
   $: hasEditSource = editSourceCount($editSourceStore) > 0;
+  $: editSources = [
+    ...($editSourceStore.selectedGalleryImageId
+      ? [
+          {
+            id: $editSourceStore.selectedGalleryImageId,
+            label: $editSourceStore.galleryLabel || $editSourceStore.galleryPreviewLabel,
+            previewUrl: $editSourceStore.galleryPreviewUrl,
+            kind: 'gallery' as const
+          }
+        ]
+      : []),
+    ...$editSourceStore.files.map((source) => ({
+      id: source.id,
+      label: source.label,
+      previewUrl: source.previewUrl,
+      kind: 'upload' as const
+    }))
+  ];
   const urlSync = createUrlSyncScheduler((mode) => {
     writePageUrl(
       {
@@ -1276,24 +1294,7 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
     <EditSourcePicker
       slot="edit-source"
       bind:this={editPicker}
-      sources={[
-        ...($editSourceStore.selectedGalleryImageId
-          ? [
-              {
-                id: $editSourceStore.selectedGalleryImageId,
-                label: $editSourceStore.galleryLabel || $editSourceStore.galleryPreviewLabel,
-                previewUrl: $editSourceStore.galleryPreviewUrl,
-                kind: 'gallery' as const
-              }
-            ]
-          : []),
-        ...$editSourceStore.files.map((source) => ({
-          id: source.id,
-          label: source.label,
-          previewUrl: source.previewUrl,
-          kind: 'upload' as const
-        }))
-      ]}
+      sources={editSources}
       onChange={handleEditFile}
       onDropFiles={handleEditFiles}
       onPreview={openEditPreview}

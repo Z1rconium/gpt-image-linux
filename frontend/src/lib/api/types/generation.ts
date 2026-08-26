@@ -8,6 +8,7 @@ export type GenerateRequestBody = {
   quality: 'auto' | 'low' | 'medium' | 'high';
   output_format: 'png' | 'jpeg' | 'webp';
   output_compression?: number | null;
+  background?: 'auto' | 'opaque' | 'transparent';
   response_format?: 'url' | 'b64_json' | null;
   api_path?: ApiPath | null;
 };

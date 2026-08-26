@@ -82,11 +82,12 @@ test('gallery edit choice loads compatible parameters without changing the activ
   const promptForm = page.locator('section.app-surface').first();
   const sizeButton = promptForm.locator('button').filter({ hasText: '1024x1024' });
   await expect(sizeButton).toBeEnabled();
-  await expect(promptForm.locator('select').nth(1)).toHaveValue('high');
-  await expect(promptForm.locator('select').nth(2)).toHaveValue('webp');
+  await expect(promptForm.getByLabel(/^Quality/)).toHaveValue('high');
+  await expect(promptForm.getByLabel(/^Format\s/)).toHaveValue('webp');
+  await expect(promptForm.getByLabel(/^Background/)).toHaveValue('auto');
   await expect(promptForm.getByLabel('Compression')).toHaveValue('80');
   await expect(promptForm.getByLabel('Quantity')).toHaveValue('2');
-  await expect(promptForm.locator('select').nth(3)).toHaveValue('url');
+  await expect(promptForm.getByLabel(/^Response format/)).toHaveValue('url');
   await expect(page.getByRole('button', { name: 'Preview Gallery: img-1.png' })).toBeVisible();
 });
 

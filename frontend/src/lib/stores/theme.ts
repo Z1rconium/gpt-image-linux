@@ -6,15 +6,19 @@ export type Theme = 'light' | 'dark';
 const STORAGE_KEY = 'gpt-image-panel-theme';
 const MEDIA_QUERY = '(prefers-color-scheme: dark)';
 
-const theme = writable<Theme>('dark');
+// The inline script in app.html already detected the system theme and applied
+// it to the DOM before hydration, so seed the store from the DOM to avoid a
+// flash of the wrong theme between first store read and init().
+function initialTheme(): Theme {
+  if (!browser) return 'dark';
+  const fromDom = document.documentElement.dataset.theme;
+  return fromDom === 'light' || fromDom === 'dark' ? fromDom : 'dark';
+}
+
+const theme = writable<Theme>(initialTheme());
 
 let mediaQueryList: MediaQueryList | null = null;
 let mediaListener: ((event: MediaQueryListEvent) => void) | null = null;
-
-function systemTheme(): Theme {
-  if (!browser) return 'dark';
-  return window.matchMedia(MEDIA_QUERY).matches ? 'dark' : 'light';
-}
 
 function applyTheme(nextTheme: Theme) {
   if (!browser) return;
@@ -48,7 +52,13 @@ function init() {
   } catch {
     // Theme synchronization still works when storage is unavailable.
   }
-  setTheme(systemTheme());
+
+  // Fallback for environments where the app.html inline script did not run.
+  if (!document.documentElement.dataset.theme) {
+    setTheme(window.matchMedia(MEDIA_QUERY).matches ? 'dark' : 'light');
+  } else {
+    theme.set(initialTheme());
+  }
 
   mediaQueryList = window.matchMedia(MEDIA_QUERY);
   mediaListener = (event) => {

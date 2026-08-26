@@ -21,6 +21,11 @@ function normalizeJobOutputFormat(value: string | null | undefined): PromptFormS
   return initialPromptFormState.outputFormat;
 }
 
+function normalizeBackground(value: string | null | undefined): PromptFormState['background'] {
+  if (value === 'opaque' || value === 'transparent') return value;
+  return 'auto';
+}
+
 export function normalizeResponseFormat(value: string | null | undefined, fallback: ResponseFormatDefault = ''): ResponseFormatDefault {
   return RESPONSE_FORMAT_OPTIONS.includes(value as ResponseFormatDefault) ? (value as ResponseFormatDefault) : fallback;
 }
@@ -50,6 +55,7 @@ export function jobToPromptForm(job: GenerateJobStatus, fallbackModel = DEFAULT_
     model: job.model || fallbackModel || initialPromptFormState.model,
     quality: normalizeJobQuality(job.quality),
     outputFormat: normalizeJobOutputFormat(job.output_format),
+    background: normalizeBackground(job.background),
     outputCompression: job.output_compression === null || job.output_compression === undefined ? '' : String(job.output_compression),
     quantity: clampQuantity(job.n),
     responseFormat: normalizeJobResponseFormat(job.response_format)
@@ -68,6 +74,7 @@ export function galleryEntryToPromptForm(
     model: image.model || fallbackModel || initialPromptFormState.model,
     quality: normalizeJobQuality(image.quality),
     outputFormat: normalizeJobOutputFormat(image.output_format),
+    background: normalizeBackground(image.background),
     outputCompression: image.output_compression === null || image.output_compression === undefined ? '' : String(image.output_compression),
     quantity: clampQuantity(image.n),
     responseFormat: normalizeJobResponseFormat(image.response_format)
@@ -87,6 +94,7 @@ export function galleryEntryToEditForm(
     model: image.model || fallbackModel || initialPromptFormState.model,
     quality: normalizeJobQuality(image.quality),
     outputFormat: normalizeJobOutputFormat(image.output_format),
+    background: normalizeBackground(image.background),
     outputCompression: image.output_compression === null || image.output_compression === undefined ? '' : String(image.output_compression),
     quantity: clampQuantity(image.n),
     responseFormat: normalizeJobResponseFormat(image.response_format)

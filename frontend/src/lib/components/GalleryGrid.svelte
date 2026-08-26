@@ -4,6 +4,7 @@
   import GalleryPagination from '$lib/components/gallery/GalleryPagination.svelte';
   import { t } from '$lib/i18n';
   import type { GalleryFilters, GalleryOperationStatus } from '$lib/stores/gallery';
+  import { CloudUpload, Download, FileText, Pencil, SlidersHorizontal, Star, Trash2, X } from 'lucide-svelte';
   import { displayImageSize, formatBytes, thumbnailUrl } from '$lib/utils/format';
 
   export let gallery: GalleryResponse | null = null;
@@ -211,7 +212,7 @@
               disabled={operationStatus.cancelPending}
               on:click={() => void operationStatus.cancel?.()}
             >
-              <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" /></svg>
+              <X class="h-3.5 w-3.5" aria-hidden="true" />
               {$t.gallery.cancelOperation}
             </button>
           {/if}
@@ -302,7 +303,7 @@
                   title={$t.common.usePrompt}
                   on:click={(event) => handleGalleryAction(event, () => onUsePrompt(image))}
                 >
-                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4h10a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z"/><path d="M8 8h8M8 12h8M8 16h5"/></svg>
+                  <FileText aria-hidden="true" />
                 </button>
                 <button
                   type="button"
@@ -311,7 +312,7 @@
                   title={$t.common.useAllParams}
                   on:click={(event) => handleGalleryAction(event, () => onUseAll(image))}
                 >
-                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></svg>
+                  <SlidersHorizontal aria-hidden="true" />
                 </button>
                 <button
                   type="button"
@@ -321,7 +322,7 @@
                   title={image.favorite ? $t.common.unfavorite : $t.common.favorite}
                   on:click={(event) => handleGalleryAction(event, () => onFavorite(image))}
                 >
-                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9L12 3Z"/></svg>
+                  <Star aria-hidden="true" />
                 </button>
                 <button
                   type="button"
@@ -330,7 +331,7 @@
                   title={$t.common.edit}
                   on:click={(event) => handleGalleryAction(event, () => onEdit(image))}
                 >
-                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4l10.5-10.5a2.1 2.1 0 0 0-3-3L5 17v3Z"/><path d="m14 7 3 3"/></svg>
+                  <Pencil aria-hidden="true" />
                 </button>
                 <a
                   href={`/api/download/${encodeURIComponent(image.filename)}`}
@@ -339,7 +340,7 @@
                   title={$t.common.download}
                   on:click|stopPropagation
                 >
-                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v10"/><path d="m8 10 4 4 4-4"/><path d="M5 20h14"/></svg>
+                  <Download aria-hidden="true" />
                 </a>
                 {#if canNodeImageUpload}
                   <button
@@ -350,7 +351,7 @@
                     title={$t.gallery.uploadToNodeImage}
                     on:click={(event) => handleGalleryAction(event, () => onNodeImageUpload(image))}
                   >
-                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 16l-4-4-4 4"/><path d="M12 12v9"/><path d="M20.4 17.5a5 5 0 0 0-2.6-9.4A7 7 0 0 0 4.3 10.3 4 4 0 0 0 5 18h2"/></svg>
+                    <CloudUpload aria-hidden="true" />
                   </button>
                 {/if}
                 <button
@@ -360,7 +361,7 @@
                   title={$t.common.delete}
                   on:click={(event) => handleGalleryAction(event, () => onDelete(image))}
                 >
-                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16"/><path d="M9 7V5h6v2"/><path d="M7 7l1 13h8l1-13"/><path d="M10 11v5M14 11v5"/></svg>
+                  <Trash2 aria-hidden="true" />
                 </button>
               </div>
             </div>

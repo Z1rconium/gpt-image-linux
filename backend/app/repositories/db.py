@@ -92,6 +92,7 @@ GALLERY_COLUMNS = (
     "quality",
     "output_format",
     "output_compression",
+    "background",
     "response_format",
     "n",
     "api_path",
@@ -129,6 +130,7 @@ GENERATE_JOB_COLUMNS = (
     "quality",
     "output_format",
     "output_compression",
+    "background",
     "response_format",
     "n",
     "completed_count",
@@ -1185,6 +1187,7 @@ def _ensure_database():
                     quality TEXT,
                     output_format TEXT,
                     output_compression INTEGER,
+                    background TEXT,
                     response_format TEXT,
                     n INTEGER,
                     completed_count INTEGER,
@@ -1273,6 +1276,7 @@ def _ensure_database():
                     quality TEXT,
                     output_format TEXT,
                     output_compression INTEGER,
+                    background TEXT,
                     response_format TEXT,
                     n INTEGER,
                     api_path TEXT,
@@ -1905,6 +1909,16 @@ def _migration_gallery_ai_metadata_schema(conn: sqlite3.Connection):
     )
 
 
+def _migration_background_column(conn: sqlite3.Connection):
+    columns_gallery = _table_columns(conn, "gallery_entries")
+    if "background" not in columns_gallery:
+        conn.execute("ALTER TABLE gallery_entries ADD COLUMN background TEXT")
+
+    columns_jobs = _table_columns(conn, "generate_jobs")
+    if "background" not in columns_jobs:
+        conn.execute("ALTER TABLE generate_jobs ADD COLUMN background TEXT")
+
+
 SCHEMA_MIGRATIONS = (
     (1, "baseline_legacy_schema", _migration_baseline_legacy_schema),
     (2, "gallery_filter_options", _migration_gallery_filter_options),
@@ -1921,6 +1935,7 @@ SCHEMA_MIGRATIONS = (
     (13, "prompt_snippets_schema", _migration_prompt_snippets_schema),
     (14, "gallery_ai_metadata_schema", _migration_gallery_ai_metadata_schema),
     (15, "generate_job_counts", _migration_generate_job_counts),
+    (16, "background_column", _migration_background_column),
 )
 
 

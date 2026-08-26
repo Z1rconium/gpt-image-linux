@@ -261,7 +261,7 @@ def test_schema_migrations_are_recorded_and_idempotent(tmp_path):
         anchor_table = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE name = 'gallery_page_anchors'"
         ).fetchone()
-    assert [row["version"] for row in versions] == list(range(1, 16))
+    assert [row["version"] for row in versions] == list(range(1, len(db_repo.SCHEMA_MIGRATIONS) + 1))
     assert gallery_version["value"] == 0
     assert anchor_table is not None
 
@@ -341,6 +341,41 @@ def test_generate_job_count_migration_preserves_legacy_rows_as_null():
     assert row["failure_count"] is None
 
 
+def test_background_column_migration_adds_column_idempotently():
+    with sqlite3.connect(":memory:") as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            """
+            CREATE TABLE gallery_entries (
+                id TEXT PRIMARY KEY,
+                prompt TEXT NOT NULL,
+                size TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE generate_jobs (
+                job_id TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+
+        db_repo._migration_background_column(conn)
+        assert "background" in db_repo._table_columns(conn, "gallery_entries")
+        assert "background" in db_repo._table_columns(conn, "generate_jobs")
+
+        # Calling again should be idempotent without error
+        db_repo._migration_background_column(conn)
+        assert "background" in db_repo._table_columns(conn, "gallery_entries")
+        assert "background" in db_repo._table_columns(conn, "generate_jobs")
+
+
 def test_schema_migrations_upgrade_legacy_gallery_schema(tmp_path):
     _configure_runtime(tmp_path)
     db_path = Path(config.DATABASE_FILE)
@@ -390,8 +425,8 @@ def test_schema_migrations_upgrade_legacy_gallery_schema(tmp_path):
             "SELECT favorite, sort_seq, bytes, thumbnail_filename, completed_at, sha256 FROM gallery_entries WHERE id = 'legacy-1'"
         ).fetchone()
 
-    assert versions == list(range(1, 16))
-    assert {"favorite", "sort_seq", "bytes", "thumbnail_filename", "completed_at", "sha256"}.issubset(gallery_columns)
+    assert versions == list(range(1, len(db_repo.SCHEMA_MIGRATIONS) + 1))
+    assert {"favorite", "sort_seq", "bytes", "thumbnail_filename", "completed_at", "sha256", "background"}.issubset(gallery_columns)
     assert {"default_model", "default_response_format"}.issubset(preset_columns)
     assert row["favorite"] == 0
     assert row["sort_seq"] is not None

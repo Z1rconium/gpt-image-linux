@@ -264,6 +264,8 @@ def _build_image_params(payload: GenerateRequest) -> dict[str, Any]:
         request_data["response_format"] = payload.response_format
     if payload.output_format != "png" and payload.output_compression is not None:
         request_data["output_compression"] = payload.output_compression
+    if payload.background != "auto":
+        request_data["background"] = payload.background
     return request_data
 
 
@@ -277,6 +279,7 @@ def build_gallery_metadata(
         "quality": payload.quality,
         "output_format": payload.output_format,
         "output_compression": payload.output_compression,
+        "background": payload.background,
         "response_format": payload.response_format,
         "n": payload.n,
         "api_path": api_path,

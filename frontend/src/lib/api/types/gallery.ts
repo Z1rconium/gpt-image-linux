@@ -22,6 +22,7 @@ export type GalleryEntry = {
   quality?: string | null;
   output_format?: string | null;
   output_compression?: number | null;
+  background?: string | null;
   response_format?: string | null;
   n?: number | null;
   api_path?: string | null;

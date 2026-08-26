@@ -40,6 +40,7 @@ class GenerateRequest(StrictRequestModel):
     quality: Literal["auto", "low", "medium", "high"] = "auto"
     output_format: Literal["png", "jpeg", "webp"] = "png"
     output_compression: Optional[int] = Field(default=None, ge=0, le=100)
+    background: Literal["auto", "opaque", "transparent"] = "auto"
     response_format: Optional[Literal["url", "b64_json"]] = None
     webhook_url: Optional[str] = Field(default=None, max_length=2048)
     api_path: Optional[ApiPath] = None
@@ -61,6 +62,9 @@ class GenerateRequest(StrictRequestModel):
             self.output_compression = None
         elif self.output_compression is None:
             self.output_compression = 100
+        if self.background == "transparent" and self.output_format == "jpeg":
+            self.output_format = "png"
+            self.output_compression = None
         return self
 
 
@@ -101,6 +105,7 @@ class GenerateJobStatus(GenerateJobResponse):
     quality: Optional[str] = None
     output_format: Optional[str] = None
     output_compression: Optional[int] = None
+    background: Optional[str] = None
     response_format: Optional[str] = None
     n: Optional[int] = None
     completed_count: Optional[int] = Field(default=None, ge=0)

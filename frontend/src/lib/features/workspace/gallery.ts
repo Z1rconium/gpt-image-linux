@@ -1,7 +1,7 @@
 import { get } from 'svelte/store';
 import type { AssistantGalleryBatchJobStatus } from '$lib/api/types/assistant';
 import { t } from '$lib/i18n';
-import { waitForGalleryJob } from '$lib/stores/galleryDeferredActions';
+import { waitForGalleryJob } from '$lib/stores/galleryJobEvents';
 
 export async function waitForGalleryAnalysis(
   initialJob: AssistantGalleryBatchJobStatus,
