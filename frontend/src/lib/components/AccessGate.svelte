@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy } from 'svelte';
+  import { onDestroy, tick } from 'svelte';
   import { browser } from '$app/environment';
   import { dialog } from '$lib/actions/dialog';
   import { language, t, toggleLanguage } from '$lib/i18n';
@@ -101,7 +101,10 @@
   }
 
   $: if (visible && turnstileEnabled && turnstileSiteKey && browser) {
-    renderWidget();
+    // Wait for the conditional widget container to be mounted before rendering.
+    // Without this tick, the reactive block can run while widgetContainer is
+    // still null and never run again after bind:this completes.
+    void tick().then(() => renderWidget());
   }
 
   $: {
