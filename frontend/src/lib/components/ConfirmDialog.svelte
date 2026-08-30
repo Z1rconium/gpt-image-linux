@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { dialogIn, dialogOut, overlayIn, overlayOut } from '$lib/motion';
   import { confirmStore, type ConfirmRequest } from '$lib/stores/confirm';
   import { dialog } from '$lib/actions/dialog';
 
@@ -20,10 +21,10 @@
 </script>
 
 {#if request}
-  <div class="mobile-dialog-root fixed inset-0 z-[95] flex items-center justify-center bg-black/60 p-4">
+  <div class="mobile-dialog-root fixed inset-0 z-[95] flex items-center justify-center bg-black/60 p-4" in:overlayIn out:overlayOut>
     <button class="absolute inset-0" type="button" tabindex="-1" aria-label={request.closeLabel} on:click={() => confirmStore.cancel()}></button>
     <div
-      class="mobile-dvh-dialog fade-in relative flex w-full max-w-md flex-col overflow-hidden rounded-2xl border border-stone-200 bg-white shadow-2xl shadow-stone-300/50 dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-none"
+      class="mobile-dvh-dialog overlay-panel relative flex w-full max-w-md flex-col overflow-hidden rounded-2xl border border-stone-200 bg-white dark:border-zinc-800 dark:bg-zinc-900" in:dialogIn out:dialogOut
       role="dialog"
       aria-modal="true"
       aria-labelledby="confirm-dialog-title"

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { dialogIn, dialogOut, overlayIn, overlayOut } from '$lib/motion';
   import { dialog } from '$lib/actions/dialog';
   import { plainTextInput } from '$lib/actions/plainTextInput';
   import { t } from '$lib/i18n';
@@ -13,10 +14,10 @@
 </script>
 
     {#if systemPromptOpen}
-      <div class="mobile-dialog-root fixed inset-0 z-[70] flex items-center justify-center bg-black/70 p-4">
+      <div class="mobile-dialog-root fixed inset-0 z-[70] flex items-center justify-center bg-black/70 p-4" in:overlayIn out:overlayOut>
         <button class="absolute inset-0" type="button" tabindex="-1" aria-label={$t.settings.closeSystemPromptEditor} on:click={closeSystemPromptEditor}></button>
         <div
-          class="mobile-dvh-dialog fade-in relative flex max-h-[88vh] w-full max-w-3xl flex-col rounded-xl border border-stone-200 bg-white shadow-2xl shadow-stone-300/50 dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-none"
+          class="mobile-dvh-dialog overlay-panel relative flex max-h-[88vh] w-full max-w-3xl flex-col rounded-xl border border-stone-200 bg-white dark:border-zinc-800 dark:bg-zinc-900" in:dialogIn out:dialogOut
           aria-labelledby="system-prompt-dialog-title"
           use:dialog={{ open: systemPromptOpen, onClose: closeSystemPromptEditor }}
         >

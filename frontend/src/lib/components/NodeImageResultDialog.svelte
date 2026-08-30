@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { dialogIn, dialogOut, overlayIn, overlayOut } from '$lib/motion';
   import { onDestroy } from 'svelte';
   import { dialog } from '$lib/actions/dialog';
   import { t } from '$lib/i18n';
@@ -60,10 +61,10 @@
 </script>
 
 {#if $nodeImageResult}
-  <div class="mobile-dialog-root fixed inset-0 z-[80] flex items-center justify-center bg-stone-950/60 p-4 dark:bg-zinc-950/75">
+  <div class="mobile-dialog-root fixed inset-0 z-[80] flex items-center justify-center bg-stone-950/60 p-4 dark:bg-zinc-950/75" in:overlayIn out:overlayOut>
     <button class="absolute inset-0" type="button" tabindex="-1" aria-label={$t.gallery.closeNodeImageResults} on:click={close}></button>
     <div
-      class="mobile-dvh-dialog fade-in relative flex max-h-[88vh] w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-stone-200 bg-white shadow-2xl shadow-stone-300/50 dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-none"
+      class="mobile-dvh-dialog overlay-panel relative flex max-h-[88vh] w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-stone-200 bg-white dark:border-zinc-800 dark:bg-zinc-900" in:dialogIn out:dialogOut
       role="dialog"
       aria-modal="true"
       aria-labelledby="nodeimage-result-title"

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { overlayIn, overlayOut } from '$lib/motion';
   import type { ToastMessage } from '$lib/stores/ui';
 
   export let toast: ToastMessage | null = null;
@@ -22,8 +23,10 @@
 
 {#if toast?.message}
   <div
-    class={`fixed bottom-5 right-5 z-[90] flex max-w-[min(28rem,calc(100vw-2.5rem))] items-center gap-3 rounded-xl border px-4 py-3 text-sm shadow-2xl ${toastClass}`}
+    class={`fixed bottom-5 right-5 z-[90] flex max-w-[min(28rem,calc(100vw-2.5rem))] items-center gap-3 toast-panel rounded-xl border px-4 py-3 text-sm ${toastClass}`}
     {role}
+    in:overlayIn
+    out:overlayOut
     aria-live={ariaLive}
     aria-atomic="true"
   >

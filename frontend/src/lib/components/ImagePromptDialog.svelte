@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { dialogIn, dialogOut, overlayIn, overlayOut } from '$lib/motion';
   import { onDestroy } from 'svelte';
   import { dialog } from '$lib/actions/dialog';
   import type { AssistantImagePromptOptimizeResponse, AssistantImagePromptResponse } from '$lib/api/types/assistant';
@@ -241,7 +242,7 @@
 </script>
 
 {#if open}
-  <div class="mobile-dialog-root fixed inset-0 z-[85] flex items-center justify-center bg-black/75 p-4">
+  <div class="mobile-dialog-root fixed inset-0 z-[85] flex items-center justify-center bg-black/75 p-4" in:overlayIn out:overlayOut>
     <button class="absolute inset-0" type="button" tabindex="-1" aria-label={$t.imagePrompt.closeLabel} on:click={closeDialog}></button>
     <div
       data-testid="image-prompt-dialog"
@@ -249,7 +250,7 @@
       role="dialog"
       aria-modal="true"
       aria-busy={busy}
-      class="mobile-dvh-dialog relative flex max-h-[calc(100vh-32px)] w-full max-w-5xl flex-col overflow-hidden rounded-2xl border border-stone-200 bg-stone-50 shadow-2xl dark:border-zinc-800 dark:bg-zinc-950"
+      class="mobile-dvh-dialog overlay-panel relative flex max-h-[calc(100vh-32px)] w-full max-w-5xl flex-col overflow-hidden rounded-2xl border border-stone-200 bg-stone-50 dark:border-zinc-800 dark:bg-zinc-950" in:dialogIn out:dialogOut
       aria-labelledby="image-prompt-dialog-title"
       use:dialog={{ open, onClose: closeDialog }}
     >

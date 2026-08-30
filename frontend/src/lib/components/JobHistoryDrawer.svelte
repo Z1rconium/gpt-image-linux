@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { onDestroy, untrack } from 'svelte';
+  import { drawerIn, drawerOut, overlayIn, overlayOut } from '$lib/motion';
   import type { AssistantJobDiagnoseResponse } from '$lib/api/types/assistant';
   import type { GenerateJobStatus } from '$lib/api/types/jobs';
   import JobHistoryList from '$lib/components/JobHistoryList.svelte';
@@ -67,6 +69,43 @@
 
   let internalActiveTab = $state<JobsTab>('running');
 
+  // Remote work changes while you watch it; mark the rows that just moved.
+  const lastSeenStatus = new Map<string, string>();
+  const settleTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  let settledJobIds = $state(new Set<string>());
+
+  function markSettled(jobId: string) {
+    const next = new Set(settledJobIds);
+    next.add(jobId);
+    settledJobIds = next;
+    clearTimeout(settleTimers.get(jobId));
+    settleTimers.set(
+      jobId,
+      setTimeout(() => {
+        const after = new Set(settledJobIds);
+        after.delete(jobId);
+        settledJobIds = after;
+        settleTimers.delete(jobId);
+      }, 620)
+    );
+  }
+
+  $effect(() => {
+    const visible = jobs;
+    untrack(() => {
+      for (const job of visible) {
+        const previous = lastSeenStatus.get(job.job_id);
+        if (previous !== undefined && previous !== job.status) markSettled(job.job_id);
+        lastSeenStatus.set(job.job_id, job.status);
+      }
+    });
+  });
+
+  onDestroy(() => {
+    settleTimers.forEach((timer) => clearTimeout(timer));
+    settleTimers.clear();
+  });
+
   $effect(() => {
     if (!open && internalActiveTab !== 'running') internalActiveTab = 'running';
     else if (open && internalActiveTab !== activeTab) internalActiveTab = activeTab;
@@ -101,11 +140,11 @@
 </script>
 
 {#if open}
-  <div class="mobile-drawer-root fixed inset-0 z-50">
+  <div class="mobile-drawer-root fixed inset-0 z-50" in:overlayIn out:overlayOut>
     <button class="drawer-backdrop absolute inset-0" type="button" tabindex="-1" aria-label={$t.jobs.closeLabel} onclick={onClose}></button>
     <aside
       id="jobs-drawer"
-      class="mobile-drawer-panel fade-in absolute right-0 top-0 flex h-full w-full max-w-lg flex-col border-l border-stone-200 bg-white shadow-2xl shadow-stone-300/50 dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-none"
+      class="mobile-drawer-panel overlay-panel absolute right-0 top-0 flex h-full w-full max-w-lg flex-col border-l border-stone-200 bg-white dark:border-zinc-800 dark:bg-zinc-900" in:drawerIn out:drawerOut
       aria-labelledby="jobs-drawer-title"
       use:dialog={{ open, onClose }}
       use:swipeClose={{ enabled: open, onClose }}
@@ -170,7 +209,10 @@
         {:else}
           <div class="space-y-3">
             {#each jobs as job (job.job_id)}
-              <div class="flex gap-3 rounded-xl border border-stone-200 bg-stone-50/80 p-4 dark:border-zinc-800 dark:bg-zinc-950/45">
+              <div
+                class="flex gap-3 rounded-xl border border-stone-200 bg-stone-50/80 p-4 dark:border-zinc-800 dark:bg-zinc-950/45"
+                class:job-settled={settledJobIds.has(job.job_id)}
+              >
                 <input
                   type="checkbox"
                   class="control-focus mt-1 accent-emerald-500"

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { dialogIn, dialogOut, overlayIn, overlayOut } from '$lib/motion';
 import type { AssistantGalleryMetadataResponse } from '$lib/api/types/assistant';
 import type { GalleryEntry } from '$lib/api/types/gallery';
   import { t } from '$lib/i18n';
@@ -107,10 +108,10 @@ import type { GalleryEntry } from '$lib/api/types/gallery';
 </script>
 
 {#if open && image}
-  <div class="mobile-lightbox-root fixed inset-0 z-[70] flex items-center justify-center bg-black/75 p-4">
+  <div class="mobile-lightbox-root fixed inset-0 z-[70] flex items-center justify-center bg-black/75 p-4" in:overlayIn out:overlayOut>
     <button class="absolute inset-0" type="button" tabindex="-1" aria-label={$t.lightbox.closeLabel} on:click={onClose}></button>
     <div
-      class="lightbox-shell relative"
+      class="lightbox-shell relative" in:dialogIn out:dialogOut
       aria-labelledby="lightbox-title"
       use:dialog={{ open, onClose }}
     >

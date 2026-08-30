@@ -66,6 +66,28 @@ spacing:
   lg: "16px"
   xl: "20px"
   2xl: "24px"
+elevation:
+  edge-light: "inset 0 -1px 0 rgba(28, 25, 23, 0.05)"
+  edge-dark: "inset 0 1px 0 rgba(255, 255, 255, 0.05)"
+  edge-accent: "inset 0 1px 0 rgba(255, 255, 255, 0.16)"
+  raised: "0 1px 1px rgba(28, 25, 23, 0.04), 0 1px 3px -1px rgba(28, 25, 23, 0.08)"
+  raised-hover: "0 1px 2px rgba(28, 25, 23, 0.05), 0 4px 10px -3px rgba(28, 25, 23, 0.1)"
+  lifted: "0 2px 4px -1px rgba(28, 25, 23, 0.06), 0 12px 28px -10px rgba(28, 25, 23, 0.18)"
+  overlay: "0 28px 90px rgba(15, 23, 42, 0.16)"
+  well: "inset 0 1px 2px rgba(28, 25, 23, 0.07)"
+  well-deep: "inset 0 2px 6px rgba(28, 25, 23, 0.1)"
+  press: "inset 0 1px 2px rgba(28, 25, 23, 0.12)"
+motion:
+  press: "90ms"
+  state: "160ms"
+  enter: "240ms"
+  signature: "380ms"
+  ease-standard: "cubic-bezier(0.2, 0, 0, 1)"
+  ease-exit: "cubic-bezier(0.4, 0, 1, 1)"
+  ease-quint: "cubic-bezier(0.22, 1, 0.36, 1)"
+  lift-hover: "-1px"
+  lift-press: "1px"
+  lift-card: "-2px"
 components:
   button-primary:
     backgroundColor: "{colors.operational-emerald}"
@@ -122,8 +144,8 @@ The interface is quiet, disciplined, and operator-focused. Density is welcome wh
 
 - Calm neutral surfaces in both light and dark themes.
 - Compact controls with stable 40px heights and 44px touch targets where icons stand alone.
-- Border-led hierarchy, with shadows reserved for overlays and meaningful lift.
-- Precise state feedback for remote and asynchronous work.
+- Depth under one overhead light: raised surfaces are actionable, recessed surfaces receive input.
+- Precise state feedback for remote and asynchronous work, including motion that reports causality.
 - Responsive structures that preserve workflow order from desktop to mobile.
 
 ## 2. Colors
@@ -179,18 +201,55 @@ The palette is a neutral control surface with one operational signal color and a
 
 ## 4. Elevation
 
-The system is flat by default. Borders and tonal layers define normal page hierarchy; shadows create structural separation only when an element leaves the document flow or responds to hover. Light mode uses soft ambient shadows for drawers, dialogs, toasts, and the image lightbox. Dark mode relies more heavily on tonal contrast and may suppress nonessential shadows.
+The interface is a machined console lit from directly above. Depth is a hairline affair: a 1px edge and a short shadow, never a diffuse halo, a gradient, or a glow. Light mode reads depth from the shadow beneath a surface and a faint dark line along its inner bottom edge; dark mode reads it from a faint white line along the inner top edge, with shadows recessed. Both themes express the same hierarchy.
+
+Depth carries meaning rather than decoration, in exactly two states:
+
+- **Raised means actionable.** Buttons, gallery cards, icon actions, panels, overlays.
+- **Recessed means it receives input or content.** Fields, selects, parameter groups, image wells, the preview stage.
+
+Disabled controls drop both: no edge, no shadow, so a dead control reads dead.
 
 ### Shadow Vocabulary
 
-- **Overlay Light** (\`0 28px 90px rgba(15, 23, 42, 0.16)\`): the large lightbox and major modal surfaces.
-- **Overlay Dark** (\`0 28px 90px rgba(0, 0, 0, 0.65)\`): the corresponding dark lightbox separation.
-- **Transient Panel** (\`0 12px 28px rgba(15, 23, 42, 0.16)\`): lazy-loading and compact transient status surfaces.
-- **Gallery Hover** (\`0 8px 30px rgba(0, 0, 0, 0.5)\`): image-card hover on fine pointers only, paired with a 2px upward translation.
+- **Edge** (\`inset 0 -1px 0 rgba(28, 25, 23, 0.05)\` light / \`inset 0 1px 0 rgba(255, 255, 255, 0.05)\` dark): the machined edge on every raised surface.
+- **Edge Accent** (\`inset 0 1px 0 rgba(255, 255, 255, 0.16)\`): the lit top edge of a filled emerald control. It replaces a gradient; it is not one.
+- **Raised** (\`--elev-1\`): panels, gallery cards, buttons, and icon actions at rest.
+- **Raised Hover** (\`--elev-2\`): a control under the pointer, paired with a 1px rise.
+- **Lifted** (\`--elev-3\`): gallery-card hover on fine pointers (paired with a 2px rise), toasts, and transient status panels.
+- **Overlay** (\`--elev-4\`): drawers, dialogs, and the image lightbox.
+- **Well** (\`inset 0 1px 2px\`): fields, selects, parameter groups, and image regions.
+- **Well Deep** (\`inset 0 2px 6px\`): the preview stage once a result has seated into it.
+- **Press** (\`inset 0 1px 2px rgba(28, 25, 23, 0.12)\`): the collapsed shadow of a control being pressed.
 
-**The Flat-by-Default Rule.** A resting page section does not receive a shadow. If an element is neither overlaying content nor responding to interaction, use a border or tonal layer instead.
+**The Lit-Deck Rule.** One light source, from above, everywhere. A resting *page section* still takes no shadow — only components participate. Never nest a raised surface inside a raised surface: a panel holds wells, and a well holds controls.
 
-## 5. Components
+**The Ring Composition Rule.** Elevation is declared through \`--tw-shadow\` and applied as \`box-shadow: var(--tw-shadow)\`, so the keyboard focus ring composes with it instead of erasing it. A raised component that sets \`box-shadow\` directly will lose its focus ring.
+
+## 5. Motion
+
+Motion reports something true or it does not ship. Every animation in the product must encode either **causality** (this came from that) or **state change** (this just became something else). Ambient movement, scroll-triggered reveals, staggered list entrances, and looping decoration are forbidden.
+
+### Duration and Easing
+
+- **Press** (\`90ms\`): the depression of a control under the pointer.
+- **State** (\`160ms\`): hover, colour, elevation, and small state changes.
+- **Enter** (\`240ms\`): dialog and drawer arrival. Exits run at \`140ms\` — leaving is faster than arriving.
+- **Signature** (\`380ms\`): the preview exposure, and nothing else.
+- **Standard easing** \`cubic-bezier(0.2, 0, 0, 1)\` for arrival, **exit easing** \`cubic-bezier(0.4, 0, 1, 1)\` for departure, **quint** \`cubic-bezier(0.22, 1, 0.36, 1)\` for one-shot ticks.
+
+### The Sanctioned Vocabulary
+
+1. **Press physics.** Every raised control travels down 1px and collapses its shadow to the press inset. Recessed surfaces never move.
+2. **Overlay choreography.** The overlay root carries the backdrop fade; the panel carries only its travel, so the two never compound. Dialogs scale from \`0.985\`. Drawers are revealed from the screen edge with a \`clip-path\` wipe — a right-anchored panel must never translate outward, because its box would leave the viewport.
+3. **The exposure.** A generated result fades and scales up into the preview well while the well's inset deepens by one step. It runs once per result. This is the product's signature moment; nothing else may compete with it.
+4. **State ticks.** One-shot, never looping: the favourite star on the way in only, the jobs badge on a count change, a running job row that just changed status, and the header shadow appearing once content scrolls beneath it.
+
+**The Travel-Is-A-Token Rule.** Every translation reads from \`--lift-hover\`, \`--lift-press\`, or \`--motion-lift\`. Reduced motion sets those to \`0px\` rather than overriding \`transform\`, because \`@apply\` inlines component rules and an override can land in the wrong source order.
+
+**The Reduced-Motion Rule.** Under \`prefers-reduced-motion: reduce\`, depth stays and travel goes to zero. Durations collapse via the tokens, and JavaScript-driven transitions check the media query directly so a leaving element never lingers.
+
+## 6. Components
 
 ### Buttons
 
@@ -198,8 +257,8 @@ Buttons are restrained and operational.
 
 - **Shape:** compact curved corners (\`6px\`) with a stable \`40px\` minimum height.
 - **Primary:** Operational Emerald with high-contrast text and \`12–16px\` horizontal padding.
-- **Hover / Focus:** one-step color strengthening on hover; a visible emerald focus ring with offset on keyboard focus.
-- **Secondary:** surface background, default border, and secondary text; hover changes the surface and text tone without adding lift.
+- **Hover / Focus:** one-step color strengthening plus a 1px rise on hover; a visible emerald focus ring with offset on keyboard focus.
+- **Secondary:** surface background, default border, and secondary text; hover changes the surface and text tone and rises with the same 1px step.
 - **Danger:** transparent or softly tinted surface with a red border and semantic danger text.
 - **Icon-only:** at least \`44px × 44px\`; use a familiar icon and an accessible name.
 
@@ -212,13 +271,13 @@ Buttons are restrained and operational.
 
 - **Corner Style:** panels use \`8px\`; gallery cards use \`12px\`; dialogs may use \`16px\`.
 - **Background:** theme-specific work surfaces and neutral layers.
-- **Shadow Strategy:** flat at rest; see the Elevation section.
+- **Shadow Strategy:** raised at rest, one step only; nested groups are recessed. See the Elevation section.
 - **Border:** a \`1px\` theme boundary is the default container separator.
 - **Internal Padding:** \`16px\` on compact panels and \`20px\` on primary drawers and details.
 
 ### Inputs / Fields
 
-- **Style:** \`40px\` minimum height, \`6px\` corners, a \`1px\` neutral border, canvas background, and \`12px\` horizontal padding.
+- **Style:** \`40px\` minimum height, \`6px\` corners, a \`1px\` neutral border, canvas background, a well inset, and \`12px\` horizontal padding.
 - **Focus:** retain the field shape and add a visible emerald ring or border shift; never remove focus without replacement.
 - **Error / Disabled:** error states use the semantic danger family. Disabled controls retain legible labels and use opacity only as a secondary cue.
 
@@ -228,15 +287,16 @@ The sticky header is compact, border-led, and task-oriented. Product identity re
 
 ### Gallery Card
 
-The gallery card is the signature repeated object. It uses a \`12px\` bordered container, stable image region, compact metadata, and a row of 44px actions. Selected and favorite states use distinct semantics; hover lift is limited to fine pointers and is disabled under reduced motion.
+The gallery card is the signature repeated object. It uses a \`12px\` bordered container raised one step, a recessed image region, compact metadata, and a row of 44px actions. Selected and favorite states use distinct semantics and an edge rather than extra shadow; hover lift is limited to fine pointers and goes to zero under reduced motion.
 
-## 6. Do's and Don'ts
+## 7. Do's and Don'ts
 
 ### Do:
 
 - **Do** preserve the prompt → assistant → preview → gallery workflow order across viewport sizes.
 - **Do** use Operational Emerald for primary action, active state, focus, and success.
-- **Do** use neutral borders and tonal surfaces as the default hierarchy mechanism.
+- **Do** use neutral borders and tonal surfaces as the default hierarchy mechanism, with one step of elevation to separate what is actionable from what receives input.
+- **Do** make every animation report causality or a state change, and read its travel from a token.
 - **Do** keep common controls at \`40px\` and standalone icon targets at least \`44px × 44px\`.
 - **Do** provide precise loading, success, error, empty, and disabled states.
 - **Do** maintain WCAG 2.2 AA contrast, visible keyboard focus, accessible names, and reduced-motion behavior.
@@ -244,8 +304,8 @@ The gallery card is the signature repeated object. It uses a \`12px\` bordered c
 ### Don't:
 
 - **Don't** make the product feel like a neon creative toy.
-- **Don't** use high-frequency animation, exaggerated gamification, or visually loud feedback.
-- **Don't** introduce decorative gradients, glowing accents, or multiple competing signal colors.
-- **Don't** add shadows to resting page sections or nest decorative cards inside cards.
+- **Don't** use high-frequency animation, looping decoration, scroll-triggered reveals, staggered list entrances, or visually loud feedback.
+- **Don't** introduce decorative gradients, glowing accents, soft-plastic bevels, or multiple competing signal colors.
+- **Don't** add shadows to resting page sections, nest a raised surface inside a raised surface, or give a decorative element depth it has not earned.
 - **Don't** use oversized display typography, fluid font sizing, or promotional hero composition in the working interface.
 - **Don't** let mobile layouts reorder the core workflow, overflow horizontally, or shrink icon targets below \`44px\`.

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { drawerIn, drawerOut, overlayIn, overlayOut } from '$lib/motion';
   import { tick } from 'svelte';
 import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput } from '$lib/api/types/snippets';
   import { dialog } from '$lib/actions/dialog';
@@ -133,11 +134,11 @@ import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput 
 </script>
 
 {#if open}
-  <div class="mobile-drawer-root fixed inset-0 z-50">
+  <div class="mobile-drawer-root fixed inset-0 z-50" in:overlayIn out:overlayOut>
     <button class="drawer-backdrop absolute inset-0" type="button" tabindex="-1" aria-label={$t.promptSnippets.closeLabel} on:click={closeDrawer}></button>
     <aside
       id="prompt-snippets-drawer"
-      class="mobile-drawer-panel fade-in absolute right-0 top-0 flex h-full w-full max-w-lg flex-col border-l border-stone-200 bg-white shadow-2xl shadow-stone-300/50 dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-none"
+      class="mobile-drawer-panel overlay-panel absolute right-0 top-0 flex h-full w-full max-w-lg flex-col border-l border-stone-200 bg-white dark:border-zinc-800 dark:bg-zinc-900" in:drawerIn out:drawerOut
       aria-labelledby="prompt-snippets-drawer-title"
       use:dialog={{ open, onClose: closeDrawer }}
       use:swipeClose={{ enabled: open, onClose: closeDrawer }}

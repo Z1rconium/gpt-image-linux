@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onDestroy } from 'svelte';
   import type { GalleryEntry, GalleryResponse } from '$lib/api/types/gallery';
   import GalleryFilterToolbar from '$lib/components/gallery/GalleryFilterToolbar.svelte';
   import GalleryPagination from '$lib/components/gallery/GalleryPagination.svelte';
@@ -49,6 +50,23 @@
 
   let importInput: HTMLInputElement;
   let failedThumbnailUrls = new Map<string, string>();
+  let poppedFavoriteId = '';
+  let favoritePopTimer: ReturnType<typeof setTimeout> | undefined;
+
+  // One beat, on the way in only: turning a favourite off is not a celebration.
+  function popFavorite(image: GalleryEntry) {
+    if (image.favorite) return;
+    clearTimeout(favoritePopTimer);
+    poppedFavoriteId = '';
+    requestAnimationFrame(() => {
+      poppedFavoriteId = image.id;
+    });
+    favoritePopTimer = setTimeout(() => {
+      poppedFavoriteId = '';
+    }, 280);
+  }
+
+  onDestroy(() => clearTimeout(favoritePopTimer));
 
   $: images = gallery?.images || [];
   $: pruneFailedThumbnailUrls(images);
@@ -220,7 +238,7 @@
       </div>
       <div class="mt-3 h-1.5 overflow-hidden rounded-full bg-emerald-950/20 dark:bg-emerald-950/70">
         {#if operationStatus.progress === null}
-          <div class="h-full w-1/3 animate-pulse rounded-full bg-emerald-500 dark:bg-emerald-300"></div>
+          <div class="progress-indeterminate h-full w-1/3 rounded-full bg-emerald-500 dark:bg-emerald-300"></div>
         {:else}
           <div class="h-full rounded-full bg-emerald-500 transition-[width] dark:bg-emerald-300" style={`width: ${Number(operationStatus.progress) || 0}%`}></div>
         {/if}
@@ -259,12 +277,12 @@
         </div>
       {/if}
 
-      <div class={`grid gap-4 sm:grid-cols-2 md:gap-5 lg:grid-cols-3 lg:gap-4 ${loading ? 'opacity-70' : ''}`}>
+      <div class={`gallery-grid grid gap-4 sm:grid-cols-2 md:gap-5 lg:grid-cols-3 lg:gap-4 ${loading ? 'opacity-70' : ''}`}>
         {#each images as image, index (image.id)}
           <article class={`gallery-card overflow-hidden rounded-xl border ${isImageSelected(image) ? 'border-emerald-400 bg-emerald-500/10' : 'border-stone-200 bg-white/85 dark:border-zinc-800 dark:bg-zinc-950/45'}`}>
             <button
               type="button"
-              class="control-focus relative block aspect-square w-full bg-stone-100 dark:bg-zinc-950"
+              class="gallery-media-well control-focus relative block aspect-square w-full bg-stone-100 dark:bg-zinc-950"
               aria-label={image.prompt}
               aria-pressed={selectionMode ? isImageSelected(image) : undefined}
               on:click={() => handleImageClick(image)}
@@ -320,9 +338,13 @@
                   aria-pressed={image.favorite}
                   aria-label={image.favorite ? $t.common.unfavorite : $t.common.favorite}
                   title={image.favorite ? $t.common.unfavorite : $t.common.favorite}
-                  on:click={(event) => handleGalleryAction(event, () => onFavorite(image))}
+                  on:click={(event) =>
+                    handleGalleryAction(event, () => {
+                      popFavorite(image);
+                      onFavorite(image);
+                    })}
                 >
-                  <Star aria-hidden="true" />
+                  <Star aria-hidden="true" class={poppedFavoriteId === image.id ? 'favorite-pop' : ''} />
                 </button>
                 <button
                   type="button"

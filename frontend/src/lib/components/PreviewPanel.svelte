@@ -14,6 +14,7 @@ import type { GenerateJobImage, GenerateJobStatus } from '$lib/api/types/jobs';
 
   let activeJobId = '';
   let selectedImageId = '';
+  let loadedPreviewSrc = '';
 
   function normalizePreviewImages(currentJob: GenerateJobStatus | null, fallbackUrl: string, fallbackFilename: string): GenerateJobImage[] {
     const jobImages = currentJob?.images?.filter((image) => image.image_url || image.filename) || [];
@@ -56,6 +57,8 @@ import type { GenerateJobImage, GenerateJobStatus } from '$lib/api/types/jobs';
   $: selectedImageIndex = selectedImage ? resultImages.findIndex((image) => image.image_id === selectedImage.image_id) : -1;
   $: previewWidth = selectedImage?.image_width || job?.image_width || undefined;
   $: previewHeight = selectedImage?.image_height || job?.image_height || undefined;
+  // The result seats into the well once it has actually arrived.
+  $: seated = Boolean(selectedImageUrl) && loadedPreviewSrc === selectedImageUrl;
   $: previewSize = displayImageSize({
     size: job?.size || null,
     image_width: selectedImage?.image_width ?? job?.image_width ?? null,
@@ -91,7 +94,10 @@ import type { GenerateJobImage, GenerateJobStatus } from '$lib/api/types/jobs';
     </div>
   {/if}
 
-  <div class={`mt-4 flex min-h-[360px] items-center justify-center overflow-hidden rounded-xl border border-stone-200 dark:border-zinc-800 ${selectedImageUrl ? 'bg-stone-100 dark:bg-zinc-950' : 'preview-empty'}`}>
+  <div
+    class={`preview-well mt-4 flex min-h-[360px] items-center justify-center overflow-hidden rounded-xl border border-stone-200 dark:border-zinc-800 ${selectedImageUrl ? 'bg-stone-100 dark:bg-zinc-950' : 'preview-empty'}`}
+    data-seated={seated}
+  >
     {#if selectedImageUrl}
       <div class="flex h-full w-full flex-col">
         {#if loading}
@@ -107,12 +113,14 @@ import type { GenerateJobImage, GenerateJobStatus } from '$lib/api/types/jobs';
           <img
             src={selectedImageUrl}
             alt={$t.preview.generatedAlt}
-            class="max-h-[640px] max-w-full rounded-lg object-contain"
+            class={`preview-image max-h-[640px] max-w-full rounded-lg object-contain ${seated ? 'preview-image-seated' : ''}`}
             loading="eager"
             fetchpriority="high"
             decoding="async"
             width={previewWidth}
             height={previewHeight}
+            on:load={() => (loadedPreviewSrc = selectedImageUrl)}
+            on:error={() => (loadedPreviewSrc = selectedImageUrl)}
           />
         </div>
         {#if resultImages.length > 1 || (loading && resultImages.length > 0)}

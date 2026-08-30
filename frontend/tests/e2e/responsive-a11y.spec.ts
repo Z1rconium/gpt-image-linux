@@ -139,3 +139,57 @@ test('settings drawer traps focus and key form controls have accessible names', 
   await page.keyboard.press('Escape');
   await expect(drawer).toBeHidden();
 });
+
+test('reduced motion keeps overlays usable and removes control travel', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await loadApp(page);
+
+  // Depth survives; travel does not.
+  const travel = await page.evaluate(() => {
+    const style = getComputedStyle(document.documentElement);
+    return {
+      liftHover: style.getPropertyValue('--lift-hover').trim(),
+      liftPress: style.getPropertyValue('--lift-press').trim(),
+      motionLift: style.getPropertyValue('--motion-lift').trim(),
+      elevation: style.getPropertyValue('--elev-1').trim()
+    };
+  });
+  expect(travel.liftHover).toBe('0px');
+  expect(travel.liftPress).toBe('0px');
+  expect(travel.motionLift).toBe('0px');
+  expect(travel.elevation).not.toBe('');
+
+  const card = page.locator('.gallery-card').first();
+  await card.hover();
+  // translateY(0px) resolves to the identity matrix, which is the point: no travel.
+  expect(['none', 'matrix(1, 0, 0, 1, 0, 0)']).toContain(
+    await card.evaluate((node) => getComputedStyle(node).transform)
+  );
+
+  // Overlays still open and close, and closing hands control straight back.
+  await page.getByRole('button', { name: 'Settings' }).click();
+  const drawer = page.getByRole('dialog', { name: 'Settings' });
+  await expect(drawer).toBeVisible();
+  await drawer.getByRole('button', { name: 'Close settings' }).click();
+  await expect(drawer).toBeHidden();
+
+  await page.getByRole('button', { name: 'Prompt snippets' }).click();
+  await expect(page.getByRole('dialog', { name: 'Prompt Snippets' })).toBeVisible();
+});
+
+test('a dialog reopened during its own exit still accepts clicks', async ({ page }) => {
+  await loadApp(page);
+
+  const openEdit = async () => {
+    await page.locator('.gallery-card').first().getByRole('button', { name: 'Edit' }).click();
+    return page.getByRole('dialog', { name: 'Edit this image' });
+  };
+
+  const first = await openEdit();
+  await first.getByRole('button', { name: 'Cancel', exact: true }).click();
+
+  // Reopening mid-exit reuses the same node; it must not stay click-through.
+  const second = await openEdit();
+  await second.getByRole('button', { name: 'Clear prompt and describe changes', exact: true }).click();
+  await expect(page.getByRole('textbox', { name: 'Prompt', exact: true })).toBeFocused();
+});

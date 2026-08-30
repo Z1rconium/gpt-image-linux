@@ -24,6 +24,8 @@
       calc(100% - 10px) 50%;
     background-size: 5px 5px, 5px 5px;
     background-repeat: no-repeat;
+    --tw-shadow: var(--well);
+    box-shadow: var(--tw-shadow);
   }
 
   .form-select::-ms-expand {
@@ -34,6 +36,21 @@
     border: 1px solid var(--border-default);
     border-radius: 8px;
     background: var(--surface-primary);
+    /* --tw-shadow keeps Tailwind's focus ring composable with our elevation. */
+    --tw-shadow: var(--edge), var(--elev-1);
+    box-shadow: var(--tw-shadow);
+  }
+
+  /* Recessed group: holds inputs, never lifts. */
+  .app-well {
+    --tw-shadow: var(--well);
+    box-shadow: var(--tw-shadow);
+  }
+
+  /* Overlay surfaces that leave the document flow. */
+  .overlay-panel {
+    --tw-shadow: var(--edge), var(--elev-4);
+    box-shadow: var(--tw-shadow);
   }
 
   .app-section {
@@ -48,22 +65,37 @@
     border-radius: 6px;
     background: var(--field-bg);
     color: var(--text-primary);
+    --tw-shadow: var(--well);
+    box-shadow: var(--tw-shadow);
+    transition:
+      border-color var(--dur-state) var(--ease-std),
+      box-shadow var(--dur-state) var(--ease-std);
   }
 
   .ui-button {
-    @apply control-focus inline-flex items-center justify-center px-3 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50;
+    @apply control-focus inline-flex items-center justify-center px-3 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50;
     min-height: 40px;
     border-radius: 6px;
+    transition:
+      background-color var(--dur-state) var(--ease-std),
+      border-color var(--dur-state) var(--ease-std),
+      color var(--dur-state) var(--ease-std),
+      box-shadow var(--dur-state) var(--ease-std),
+      transform var(--dur-press) var(--ease-std);
   }
 
   .ui-button-primary {
     @apply ui-button;
     background: var(--accent-solid);
     color: var(--accent-contrast);
+    --tw-shadow: var(--edge-accent), var(--elev-1);
+    box-shadow: var(--tw-shadow);
   }
 
   .ui-button-primary:hover:not(:disabled) {
     background: var(--accent-solid-hover);
+    --tw-shadow: var(--edge-accent), var(--elev-2);
+    transform: translateY(var(--lift-hover));
   }
 
   .ui-button-secondary {
@@ -71,11 +103,15 @@
     border: 1px solid var(--border-default);
     background: var(--surface-primary);
     color: var(--text-secondary);
+    --tw-shadow: var(--edge), var(--elev-1);
+    box-shadow: var(--tw-shadow);
   }
 
   .ui-button-secondary:hover:not(:disabled) {
     background: var(--surface-hover);
     color: var(--text-primary);
+    --tw-shadow: var(--edge), var(--elev-2);
+    transform: translateY(var(--lift-hover));
   }
 
   .ui-button-danger {
@@ -89,18 +125,40 @@
     background: var(--danger-soft);
   }
 
+  /* Press physics: raised controls travel down and their shadow collapses. */
+  .ui-button:active:not(:disabled) {
+    --tw-shadow: var(--press);
+    transform: translateY(var(--lift-press));
+    transition-duration: var(--dur-press);
+  }
+
+  /* Disabled reads dead: no edge, no lift. */
+  .ui-button:disabled {
+    --tw-shadow: 0 0 #0000;
+    box-shadow: none;
+    transform: none;
+  }
+
   .ui-icon-button {
-    @apply control-focus inline-flex items-center justify-center transition-colors disabled:cursor-not-allowed disabled:opacity-50;
+    @apply control-focus inline-flex items-center justify-center disabled:cursor-not-allowed disabled:opacity-50;
     width: 44px;
     min-width: 44px;
     min-height: 44px;
     border-radius: 6px;
     color: var(--text-muted);
+    transition:
+      background-color var(--dur-state) var(--ease-std),
+      color var(--dur-state) var(--ease-std),
+      transform var(--dur-press) var(--ease-std);
   }
 
   .ui-icon-button:hover:not(:disabled) {
     background: var(--surface-hover);
     color: var(--text-primary);
+  }
+
+  .ui-icon-button:active:not(:disabled) {
+    transform: translateY(var(--lift-press));
   }
 
   .status-error {
@@ -156,6 +214,28 @@
   --favorite-text: #b45309;
   --favorite-soft: rgba(245, 158, 11, 0.12);
   --favorite-inset: rgba(217, 119, 6, 0.18);
+
+  /* Lit Deck: one overhead light source. Raised = actionable, recessed = receives input. */
+  --edge: inset 0 -1px 0 rgba(28, 25, 23, 0.05);
+  --edge-accent: inset 0 1px 0 rgba(255, 255, 255, 0.16);
+  --elev-1: 0 1px 1px rgba(28, 25, 23, 0.04), 0 1px 3px -1px rgba(28, 25, 23, 0.08);
+  --elev-2: 0 1px 2px rgba(28, 25, 23, 0.05), 0 4px 10px -3px rgba(28, 25, 23, 0.1);
+  --elev-3: 0 2px 4px -1px rgba(28, 25, 23, 0.06), 0 12px 28px -10px rgba(28, 25, 23, 0.18);
+  --elev-4: var(--app-shadow);
+  --well: inset 0 1px 2px rgba(28, 25, 23, 0.07);
+  --well-deep: inset 0 2px 6px rgba(28, 25, 23, 0.1);
+  --press: inset 0 1px 2px rgba(28, 25, 23, 0.12);
+
+  --dur-press: 90ms;
+  --dur-state: 160ms;
+  --dur-enter: 240ms;
+  --dur-signature: 380ms;
+  --ease-std: cubic-bezier(0.2, 0, 0, 1);
+  --ease-exit: cubic-bezier(0.4, 0, 1, 1);
+  --ease-quint: cubic-bezier(0.22, 1, 0.36, 1);
+  --motion-lift: -2px;
+  --lift-hover: -1px;
+  --lift-press: 1px;
 }
 
 html.dark {
@@ -196,6 +276,16 @@ html.dark {
   --favorite-text: #fbbf24;
   --favorite-soft: rgba(245, 158, 11, 0.16);
   --favorite-inset: rgba(245, 158, 11, 0.22);
+
+  /* Dark carries depth with the top edge highlight; shadows recede. */
+  --edge: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  --edge-accent: inset 0 1px 0 rgba(255, 255, 255, 0.14);
+  --elev-1: 0 1px 2px rgba(0, 0, 0, 0.45);
+  --elev-2: 0 2px 6px -1px rgba(0, 0, 0, 0.55);
+  --elev-3: 0 2px 6px -2px rgba(0, 0, 0, 0.5), 0 12px 28px -10px rgba(0, 0, 0, 0.7);
+  --well: inset 0 1px 2px rgba(0, 0, 0, 0.4);
+  --well-deep: inset 0 2px 6px rgba(0, 0, 0, 0.55);
+  --press: inset 0 1px 3px rgba(0, 0, 0, 0.6);
 }
 
 * {
@@ -211,6 +301,15 @@ body {
   transition:
     background-color 0.2s ease,
     color 0.2s ease;
+}
+
+.app-header {
+  transition: box-shadow var(--dur-state) var(--ease-std);
+}
+
+.app-header[data-scrolled='true'] {
+  --tw-shadow: var(--elev-2);
+  box-shadow: var(--tw-shadow);
 }
 
 .skip-link {
@@ -302,6 +401,11 @@ html.dark input::placeholder {
   animation: fadeIn 0.18s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
+/* Panels animate in from the right edge; keep the travel clipped to the viewport. */
+.mobile-drawer-root {
+  overflow: hidden;
+}
+
 .drawer-backdrop {
   background: rgba(0, 0, 0, 0.58);
   backdrop-filter: blur(2px);
@@ -323,15 +427,37 @@ html.dark input::placeholder {
   color: var(--text-secondary);
   padding: 0.625rem 0.875rem;
   font-size: 0.8125rem;
-  box-shadow: 0 12px 28px rgba(15, 23, 42, 0.16);
+  --tw-shadow: var(--edge), var(--elev-3);
+  box-shadow: var(--tw-shadow);
+}
+
+.toast-panel {
+  --tw-shadow: var(--edge), var(--elev-3);
+  box-shadow: var(--tw-shadow);
 }
 
 .gallery-card {
   content-visibility: auto;
   contain-intrinsic-size: auto 420px;
+  --tw-shadow: var(--edge), var(--elev-1);
+  box-shadow: var(--tw-shadow);
   transition:
-    transform 0.18s cubic-bezier(0.22, 1, 0.36, 1),
-    box-shadow 0.18s cubic-bezier(0.22, 1, 0.36, 1);
+    transform var(--dur-state) var(--ease-quint),
+    box-shadow var(--dur-state) var(--ease-quint);
+}
+
+/* The image region is a well the thumbnail seats into. */
+.gallery-media-well {
+  position: relative;
+}
+
+.gallery-media-well::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  box-shadow: var(--well);
 }
 
 .gallery-icon-action {
@@ -345,17 +471,35 @@ html.dark input::placeholder {
   border-color: currentColor;
   border-radius: 6px;
   background: var(--surface-primary);
+  --tw-shadow: var(--edge), var(--elev-1);
+  box-shadow: var(--tw-shadow);
   transition:
-    background-color 0.15s,
-    border-color 0.15s,
-    color 0.15s,
-    box-shadow 0.15s;
+    background-color var(--dur-state) var(--ease-std),
+    border-color var(--dur-state) var(--ease-std),
+    color var(--dur-state) var(--ease-std),
+    box-shadow var(--dur-state) var(--ease-std),
+    transform var(--dur-press) var(--ease-std);
+}
+
+.gallery-icon-action:hover:not(:disabled) {
+  --tw-shadow: var(--edge), var(--elev-2);
+}
+
+.gallery-icon-action:active:not(:disabled) {
+  --tw-shadow: var(--press);
+  transform: translateY(var(--lift-press));
+  transition-duration: var(--dur-press);
+}
+
+.gallery-icon-action:disabled {
+  --tw-shadow: 0 0 #0000;
+  box-shadow: none;
 }
 
 .gallery-icon-action[aria-pressed='true'] {
   color: var(--favorite-text);
   background: var(--favorite-soft);
-  box-shadow: inset 0 0 0 1px var(--favorite-inset);
+  --tw-shadow: inset 0 0 0 1px var(--favorite-inset), var(--elev-1);
 }
 
 .gallery-icon-action svg {
@@ -374,9 +518,118 @@ html.dark input::placeholder {
 
 @media (hover: hover) and (pointer: fine) {
   .gallery-card:hover {
-    transform: translateY(-2px);
-    box-shadow: var(--gallery-hover-shadow);
+    transform: translateY(var(--motion-lift));
+    --tw-shadow: var(--edge), var(--elev-3);
+    box-shadow: var(--tw-shadow);
   }
+}
+
+/* Signature moment: a result seats into the recessed preview well. */
+.preview-well {
+  position: relative;
+}
+
+.preview-well::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  box-shadow: var(--well);
+  transition: box-shadow var(--dur-signature) var(--ease-std);
+}
+
+.preview-well[data-seated='true']::after {
+  box-shadow: var(--well-deep);
+}
+
+.preview-image {
+  opacity: 0;
+  transform: scale(0.985);
+  transition:
+    opacity var(--dur-signature) var(--ease-std),
+    transform var(--dur-signature) var(--ease-std);
+}
+
+.preview-image-seated {
+  opacity: 1;
+  transform: none;
+}
+
+/* Indeterminate progress: one slow sweep, never a pulse. */
+.progress-indeterminate {
+  animation: progress-sweep 1.4s var(--ease-quint) infinite;
+}
+
+@keyframes progress-sweep {
+  from {
+    transform: translateX(-110%);
+  }
+  to {
+    transform: translateX(340%);
+  }
+}
+
+/* One-shot state ticks. */
+@keyframes favorite-pop {
+  0% {
+    transform: scale(1);
+  }
+  40% {
+    transform: scale(1.18);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+.favorite-pop {
+  animation: favorite-pop 220ms var(--ease-quint);
+}
+
+@keyframes badge-nudge {
+  0% {
+    transform: translateY(0);
+  }
+  45% {
+    transform: translateY(-2px);
+  }
+  100% {
+    transform: translateY(0);
+  }
+}
+
+.badge-nudge {
+  animation: badge-nudge 220ms var(--ease-quint);
+}
+
+.job-settled {
+  position: relative;
+}
+
+.job-settled::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  border-radius: inherit;
+  background: var(--text-muted);
+  opacity: 0;
+  animation: job-settled 600ms var(--ease-exit);
+}
+
+@keyframes job-settled {
+  from {
+    opacity: 0.14;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+.gallery-grid {
+  transition: opacity var(--dur-state) var(--ease-std);
 }
 
 .preview-empty {
@@ -639,6 +892,22 @@ html.dark input::placeholder {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  /* Depth stays; travel and duration go to zero. */
+  :root,
+  html.dark {
+    --dur-press: 0.001ms;
+    --dur-state: 0.001ms;
+    --dur-enter: 0.001ms;
+    --dur-signature: 0.001ms;
+    --motion-lift: 0px;
+    --lift-hover: 0px;
+    --lift-press: 0px;
+  }
+
+  .preview-image {
+    transform: none;
+  }
+
   *,
   *::before,
   *::after {
@@ -646,11 +915,5 @@ html.dark input::placeholder {
     animation-iteration-count: 1 !important;
     scroll-behavior: auto !important;
     transition-duration: 0.001ms !important;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) and (hover: hover) and (pointer: fine) {
-  .gallery-card:hover {
-    transform: none;
   }
 }

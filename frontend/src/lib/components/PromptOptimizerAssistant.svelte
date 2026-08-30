@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { dialogIn, dialogOut, overlayIn, overlayOut } from '$lib/motion';
   import { browser } from '$app/environment';
   import { onDestroy, onMount } from 'svelte';
   import { dialog } from '$lib/actions/dialog';
@@ -422,7 +423,7 @@ import type { ApiPath } from '$lib/api/types/common';
 {/if}
 
 {#if enabled && open}
-  <div class="mobile-dialog-root fixed inset-0 z-[92] flex items-center justify-center bg-black/65 p-4">
+  <div class="mobile-dialog-root fixed inset-0 z-[92] flex items-center justify-center bg-black/65 p-4" in:overlayIn out:overlayOut>
     <button
       type="button"
       class="absolute inset-0"
@@ -431,7 +432,7 @@ import type { ApiPath } from '$lib/api/types/common';
       on:click={closeAssistant}
     ></button>
     <div
-      class="mobile-dvh-dialog fade-in relative z-10 flex w-full max-w-4xl flex-col overflow-hidden rounded-2xl border border-stone-200 bg-white shadow-[0_24px_90px_-32px_rgba(15,23,42,0.45)] dark:border-zinc-800 dark:bg-zinc-950 dark:shadow-none"
+      class="mobile-dvh-dialog overlay-panel relative z-10 flex w-full max-w-4xl flex-col overflow-hidden rounded-2xl border border-stone-200 bg-white dark:border-zinc-800 dark:bg-zinc-950" in:dialogIn out:dialogOut
       aria-labelledby="prompt-optimizer-assistant-title"
       use:dialog={{ open, onClose: closeAssistant }}
     >

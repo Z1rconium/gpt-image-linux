@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { dialogIn, dialogOut, overlayIn, overlayOut } from '$lib/motion';
   import type { GalleryEntry } from '$lib/api/types/gallery';
   import { dialog } from '$lib/actions/dialog';
   import { t } from '$lib/i18n';
@@ -10,10 +11,10 @@
 </script>
 
 {#if open && image}
-  <div class="fixed inset-0 z-[90] flex items-center justify-center bg-stone-950/60 p-4 dark:bg-zinc-950/75">
+  <div class="fixed inset-0 z-[90] flex items-center justify-center bg-stone-950/60 p-4 dark:bg-zinc-950/75" in:overlayIn out:overlayOut>
     <button class="absolute inset-0" type="button" tabindex="-1" aria-label={$t.galleryEditDialog.closeLabel} on:click={onClose}></button>
     <div
-      class="fade-in relative flex w-full max-w-md flex-col overflow-hidden rounded-2xl border border-stone-200 bg-white shadow-2xl shadow-stone-300/50 dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-none"
+      class="overlay-panel relative flex w-full max-w-md flex-col overflow-hidden rounded-2xl border border-stone-200 bg-white dark:border-zinc-800 dark:bg-zinc-900" in:dialogIn out:dialogOut
       aria-labelledby="gallery-edit-dialog-title"
       aria-describedby="gallery-edit-dialog-subtitle"
       use:dialog={{ open, onClose }}

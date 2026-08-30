@@ -129,7 +129,10 @@ function pushEntry(entry: DialogEntry) {
   // Only the topmost dialog should keep aria-hidden/inert applied;
   // restore the previous top's siblings before applying the new top's.
   const previousTop = stack[stack.length - 1];
-  if (previousTop) clearInertFromBackground(previousTop.inertSiblings);
+  if (previousTop) {
+    clearInertFromBackground(previousTop.inertSiblings);
+    previousTop.inertSiblings = [];
+  }
   stack.push(entry);
   entry.inertSiblings = applyInertToBackground(entry.node);
   ensureGlobalKeyHandler();
@@ -138,14 +141,14 @@ function pushEntry(entry: DialogEntry) {
 function removeEntry(entry: DialogEntry) {
   const index = stack.indexOf(entry);
   if (index === -1) return;
-  const wasTop = index === stack.length - 1;
   stack.splice(index, 1);
   clearInertFromBackground(entry.inertSiblings);
   entry.inertSiblings = [];
 
-  if (wasTop) {
-    const newTop = stack[stack.length - 1];
-    if (newTop) newTop.inertSiblings = applyInertToBackground(newTop.node);
+  const newTop = stack[stack.length - 1];
+  if (newTop) {
+    clearInertFromBackground(newTop.inertSiblings);
+    newTop.inertSiblings = applyInertToBackground(newTop.node);
   }
 }
 

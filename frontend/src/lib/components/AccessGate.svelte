@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { dialogIn, dialogOut, overlayIn, overlayOut } from '$lib/motion';
   import { onDestroy, tick } from 'svelte';
   import { browser } from '$app/environment';
   import { dialog } from '$lib/actions/dialog';
@@ -137,6 +138,8 @@
   <div
     class="mobile-dialog-root fixed inset-0 z-[100] flex items-center justify-center bg-stone-100 px-4 dark:bg-zinc-950"
     aria-label={$t.access.dialogLabel}
+    in:overlayIn
+    out:overlayOut
     use:dialog={{ open: visible }}
   >
     <button
@@ -149,7 +152,7 @@
     >
       {$t.language.button}
     </button>
-    <div class="mobile-dvh-dialog fade-in w-full max-w-sm overflow-y-auto rounded-2xl border border-stone-200 bg-white/90 p-5 shadow-2xl shadow-stone-300/50 dark:border-zinc-800 dark:bg-zinc-900/80 dark:shadow-none sm:p-6">
+    <div class="mobile-dvh-dialog overlay-panel w-full max-w-sm overflow-y-auto rounded-2xl border border-stone-200 bg-white/90 p-5 dark:border-zinc-800 dark:bg-zinc-900/80 sm:p-6" in:dialogIn out:dialogOut>
       <div class="mb-5 flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-500/10">
         <span class="text-lg text-emerald-400">#</span>
       </div>

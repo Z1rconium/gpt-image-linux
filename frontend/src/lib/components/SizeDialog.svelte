@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { dialogIn, dialogOut, overlayIn, overlayOut } from '$lib/motion';
   import { t } from '$lib/i18n';
   import { dialog } from '$lib/actions/dialog';
 
@@ -20,10 +21,10 @@
 </script>
 
 {#if open}
-  <div class="fixed inset-0 z-[80] flex items-center justify-center bg-stone-950/60 px-4 backdrop-blur dark:bg-zinc-950/75">
+  <div class="fixed inset-0 z-[80] flex items-center justify-center bg-stone-950/60 px-4 backdrop-blur dark:bg-zinc-950/75" in:overlayIn out:overlayOut>
     <button class="absolute inset-0" type="button" tabindex="-1" aria-label={$t.common.close} on:click={onClose}></button>
     <div
-      class="fade-in relative w-full max-w-lg rounded-2xl border border-stone-200 bg-white p-5 shadow-2xl dark:border-zinc-800 dark:bg-zinc-900"
+      class="overlay-panel relative w-full max-w-lg rounded-2xl border border-stone-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900" in:dialogIn out:dialogOut
       aria-labelledby="size-dialog-title"
       use:dialog={{ open, onClose }}
     >

@@ -93,7 +93,7 @@
   <!-- Parameters Section: Grouped for Visual Balance & Clarity -->
   <div class="mt-5 space-y-3">
     <!-- Block 1: Core Generation Parameters (4 columns, balanced 100%) -->
-    <div class="rounded-xl border border-stone-200/80 bg-stone-50/50 p-3.5 dark:border-zinc-800/80 dark:bg-zinc-950/40">
+    <div class="app-well rounded-xl border border-stone-200/80 bg-stone-50/50 p-3.5 dark:border-zinc-800/80 dark:bg-zinc-950/40">
       <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <label class="block">
           <span class="mb-1.5 block text-xs font-medium text-stone-600 dark:text-zinc-400">{$t.common.model}</span>
@@ -145,7 +145,7 @@
     <!-- Block 2: Output Style & Protocol Dual Cards (7:5 split on desktop, balanced and aligned) -->
     <div class="grid gap-3 lg:grid-cols-12">
       <!-- Output Settings (3 columns: Format, Compression, Background) -->
-      <div class="rounded-xl border border-stone-200/80 bg-stone-50/50 p-3.5 lg:col-span-7 dark:border-zinc-800/80 dark:bg-zinc-950/40">
+      <div class="app-well rounded-xl border border-stone-200/80 bg-stone-50/50 p-3.5 lg:col-span-7 dark:border-zinc-800/80 dark:bg-zinc-950/40">
         <div class="grid gap-3 sm:grid-cols-3">
           <label class="block">
             <span class="mb-1.5 block text-xs font-medium text-stone-600 dark:text-zinc-400">{$t.promptForm.format}</span>
@@ -185,7 +185,7 @@
       </div>
 
       <!-- Protocol Settings (2 columns: API Path, Response Format) -->
-      <div class="rounded-xl border border-stone-200/80 bg-stone-50/50 p-3.5 lg:col-span-5 dark:border-zinc-800/80 dark:bg-zinc-950/40">
+      <div class="app-well rounded-xl border border-stone-200/80 bg-stone-50/50 p-3.5 lg:col-span-5 dark:border-zinc-800/80 dark:bg-zinc-950/40">
         <div class="grid gap-3 sm:grid-cols-2">
           <label class="block">
             <span class="mb-1.5 block text-xs font-medium text-stone-600 dark:text-zinc-400">{$t.promptForm.apiPath}</span>
@@ -236,7 +236,7 @@
       >
         {editPlanning ? $t.promptForm.planningEdit : $t.promptForm.planEdit}
       </button>
-      <button type="button" disabled={loading} class="ui-button-primary px-5 font-semibold shadow-sm" on:click={onSubmit}>
+      <button type="button" disabled={loading} class="ui-button-primary px-5 font-semibold" on:click={onSubmit}>
         {hasEditSource ? $t.promptForm.edits : $t.promptForm.generate}
       </button>
     </div>

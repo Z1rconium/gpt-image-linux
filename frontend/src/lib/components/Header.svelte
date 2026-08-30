@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { language, t, toggleLanguage } from '$lib/i18n';
 
   export let activeJobsCount = 0;
@@ -23,9 +24,21 @@
     ? $t.header.versionUpdateTitle(version, latestVersion)
     : $t.header.versionTitle(version);
   $: safeReleaseUrl = releaseUrl?.startsWith('https://github.com/') ? releaseUrl : null;
+
+  // The header only casts a shadow once there is content underneath it.
+  let scrolled = false;
+
+  onMount(() => {
+    const sync = () => {
+      scrolled = window.scrollY > 4;
+    };
+    sync();
+    window.addEventListener('scroll', sync, { passive: true });
+    return () => window.removeEventListener('scroll', sync);
+  });
 </script>
 
-<header class="app-header sticky top-0 z-40 border-b border-stone-200/80 bg-stone-50/88 backdrop-blur-sm dark:border-zinc-800 dark:bg-zinc-950/80">
+<header class="app-header sticky top-0 z-40 border-b border-stone-200/80 bg-stone-50/88 backdrop-blur-sm dark:border-zinc-800 dark:bg-zinc-950/80" data-scrolled={scrolled}>
   <div class="mx-auto flex max-w-5xl flex-wrap items-center gap-3 px-4 py-3 sm:flex-nowrap sm:px-6 sm:py-4">
     <div class="flex min-w-0 flex-1 items-start gap-3">
       <button
@@ -105,9 +118,11 @@
       >
         <span class="text-sm font-semibold leading-none">{$t.header.jobs}</span>
         {#if activeJobsCount}
-          <span class="absolute -right-1 -top-1 h-4 min-w-4 rounded-full bg-emerald-700 px-1 text-[10px] font-semibold leading-4 text-white">
-            {activeJobsCount}
-          </span>
+          {#key activeJobsCount}
+            <span class="badge-nudge absolute -right-1 -top-1 h-4 min-w-4 rounded-full bg-emerald-700 px-1 text-[10px] font-semibold leading-4 text-white">
+              {activeJobsCount}
+            </span>
+          {/key}
         {/if}
       </button>
       <button
