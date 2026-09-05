@@ -270,7 +270,7 @@
   {:else}
     <div class="relative" aria-busy={loading}>
       {#if loading}
-        <div class="pointer-events-none absolute inset-0 z-10 rounded-xl bg-white/30 backdrop-blur-[1px] dark:bg-zinc-950/20">
+        <div class="gallery-loading-overlay pointer-events-none absolute inset-0 z-10 rounded-xl">
           <div class="absolute right-3 top-3 rounded-lg border border-stone-300 bg-white/90 px-3 py-2 text-xs text-stone-700 shadow-lg dark:border-zinc-700 dark:bg-zinc-950/90 dark:text-zinc-300">
             {$t.gallery.loading}
           </div>

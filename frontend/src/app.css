@@ -53,6 +53,35 @@
     box-shadow: var(--tw-shadow);
   }
 
+  /* Keep glass bounded to the surface that needs it. */
+  .glass-surface {
+    border: 1px solid var(--glass-border);
+    background: var(--glass-bg);
+    isolation: isolate;
+  }
+
+  .header-command {
+    @apply mobile-touch-target control-focus inline-flex h-10 min-w-10 items-center justify-center rounded-lg px-2 text-stone-500;
+    transition:
+      background-color var(--dur-state) var(--ease-std),
+      color var(--dur-state) var(--ease-std),
+      transform var(--dur-press) var(--ease-std);
+  }
+
+  .header-command:hover:not(:disabled),
+  .header-command[aria-expanded='true'] {
+    background: var(--surface-hover);
+    color: var(--text-primary);
+  }
+
+  .header-command:active:not(:disabled) {
+    transform: translateY(var(--lift-press));
+  }
+
+  html.dark .header-command {
+    color: var(--text-muted);
+  }
+
   .app-section {
     border-top: 1px solid var(--border-subtle);
     padding-top: 1.25rem;
@@ -214,6 +243,8 @@
   --favorite-text: #b45309;
   --favorite-soft: rgba(245, 158, 11, 0.12);
   --favorite-inset: rgba(217, 119, 6, 0.18);
+  --glass-bg: rgba(250, 250, 249, 0.82);
+  --glass-border: rgba(214, 211, 209, 0.82);
 
   /* Lit Deck: one overhead light source. Raised = actionable, recessed = receives input. */
   --edge: inset 0 -1px 0 rgba(28, 25, 23, 0.05);
@@ -276,6 +307,8 @@ html.dark {
   --favorite-text: #fbbf24;
   --favorite-soft: rgba(245, 158, 11, 0.16);
   --favorite-inset: rgba(245, 158, 11, 0.22);
+  --glass-bg: rgba(9, 9, 11, 0.78);
+  --glass-border: rgba(63, 63, 70, 0.86);
 
   /* Dark carries depth with the top edge highlight; shadows recede. */
   --edge: inset 0 1px 0 rgba(255, 255, 255, 0.05);
@@ -305,6 +338,18 @@ body {
 
 .app-header {
   transition: box-shadow var(--dur-state) var(--ease-std);
+}
+
+.app-header.glass-surface {
+  border-top: 0;
+  backdrop-filter: blur(10px) saturate(1.05);
+  -webkit-backdrop-filter: blur(10px) saturate(1.05);
+}
+
+@supports not (backdrop-filter: blur(1px)) {
+  .app-header.glass-surface {
+    background: var(--surface-primary);
+  }
 }
 
 .app-header[data-scrolled='true'] {
@@ -436,9 +481,18 @@ html.dark input::placeholder {
   box-shadow: var(--tw-shadow);
 }
 
+.gallery-loading-overlay {
+  background: rgba(255, 255, 255, 0.3);
+}
+
+html.dark .gallery-loading-overlay {
+  background: rgba(9, 9, 11, 0.2);
+}
+
 .gallery-card {
   content-visibility: auto;
   contain-intrinsic-size: auto 420px;
+  contain: layout style;
   --tw-shadow: var(--edge), var(--elev-1);
   box-shadow: var(--tw-shadow);
   transition:
@@ -449,6 +503,12 @@ html.dark input::placeholder {
 /* The image region is a well the thumbnail seats into. */
 .gallery-media-well {
   position: relative;
+  overflow: hidden;
+}
+
+.gallery-image {
+  transform: scale(1);
+  transition: transform var(--dur-state) var(--ease-quint);
 }
 
 .gallery-media-well::after {
@@ -518,9 +578,13 @@ html.dark input::placeholder {
 
 @media (hover: hover) and (pointer: fine) {
   .gallery-card:hover {
-    transform: translateY(var(--motion-lift));
+    transform: translateY(var(--motion-lift)) scale(1.003);
     --tw-shadow: var(--edge), var(--elev-3);
     box-shadow: var(--tw-shadow);
+  }
+
+  .gallery-card:hover .gallery-image {
+    transform: scale(1.015);
   }
 }
 
@@ -629,6 +693,7 @@ html.dark input::placeholder {
 }
 
 .gallery-grid {
+  contain: layout style;
   transition: opacity var(--dur-state) var(--ease-std);
 }
 
@@ -883,6 +948,14 @@ html.dark input::placeholder {
     background: rgba(0, 0, 0, 0.5);
     backdrop-filter: none;
     -webkit-backdrop-filter: none;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .app-header.glass-surface {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    background: var(--surface-primary);
   }
 }
 

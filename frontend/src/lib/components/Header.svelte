@@ -38,7 +38,7 @@
   });
 </script>
 
-<header class="app-header sticky top-0 z-40 border-b border-stone-200/80 bg-stone-50/88 backdrop-blur-sm dark:border-zinc-800 dark:bg-zinc-950/80" data-scrolled={scrolled}>
+<header class="app-header glass-surface sticky top-0 z-40" data-scrolled={scrolled}>
   <div class="mx-auto flex max-w-5xl flex-wrap items-center gap-3 px-4 py-3 sm:flex-nowrap sm:px-6 sm:py-4">
     <div class="flex min-w-0 flex-1 items-start gap-3">
       <button
@@ -94,7 +94,7 @@
       </button>
       <button
         type="button"
-        class="mobile-touch-target control-focus relative inline-flex h-10 min-w-10 items-center justify-center rounded-lg px-2 text-stone-500 transition-colors hover:bg-stone-100 hover:text-stone-950 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+        class="header-command relative"
         title={$t.header.promptSnippets}
         aria-label={$t.header.promptSnippets}
         aria-controls="prompt-snippets-drawer"
@@ -107,7 +107,7 @@
       </button>
       <button
         type="button"
-        class="mobile-touch-target control-focus relative inline-flex h-10 min-w-10 items-center justify-center rounded-lg px-2 text-stone-500 transition-colors hover:bg-stone-100 hover:text-stone-950 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+        class="header-command relative"
         title={$t.header.jobHistory}
         aria-label={$t.header.jobHistory}
         aria-controls="jobs-drawer"
@@ -127,7 +127,7 @@
       </button>
       <button
         type="button"
-        class="mobile-touch-target control-focus inline-flex h-10 min-w-10 items-center justify-center rounded-lg px-2 text-stone-500 transition-colors hover:bg-stone-100 hover:text-stone-950 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+        class="header-command"
         title={$t.common.settings}
         aria-label={$t.common.settings}
         aria-controls="settings-drawer"
